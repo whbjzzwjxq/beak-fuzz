@@ -1,0 +1,26 @@
+[package]
+name = "beak-fuzz"
+version = "0.1.0"
+edition = "2024"
+description = "Fuzzing tool for zkVM artifacts"
+publish = false
+
+# This is a standalone crate, not part of the workspace
+[workspace]
+
+[lib]
+name = "beak_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "beak-fuzz"
+path = "src/bin/fuzz.rs"
+
+[dependencies]
+
+serde = "1.0.228"
+serde_json = "1.0.149"
+hex = "0.4.3"
+
+libafl = "0.15.4"
+rrs-lib = "0.1"
