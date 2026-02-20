@@ -2,6 +2,7 @@ use std::sync::Mutex;
 use std::collections::HashMap;
 use lazy_static::lazy_static;
 use openvm_stark_backend::p3_field::{Field, PrimeField32};
+use serde_json::{json, Value};
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -87,6 +88,52 @@ impl GlobalState {
 
 lazy_static! {
     static ref GLOBAL_STATE: Mutex<GlobalState> = Mutex::new(GlobalState::new());
+}
+
+lazy_static! {
+    static ref JSON_CAPTURE: Mutex<JsonCapture> = Mutex::new(JsonCapture::new());
+}
+
+struct JsonCapture {
+    enabled: bool,
+    logs: Vec<Value>,
+}
+
+impl JsonCapture {
+    fn new() -> Self {
+        Self {
+            enabled: false,
+            logs: Vec::new(),
+        }
+    }
+}
+
+pub fn enable_json_capture() {
+    let mut cap = JSON_CAPTURE.lock().unwrap();
+    cap.enabled = true;
+    cap.logs.clear();
+}
+
+pub fn disable_json_capture() {
+    let mut cap = JSON_CAPTURE.lock().unwrap();
+    cap.enabled = false;
+}
+
+pub fn take_json_logs() -> Vec<Value> {
+    let mut cap = JSON_CAPTURE.lock().unwrap();
+    std::mem::take(&mut cap.logs)
+}
+
+fn capture_json(tag: &'static str, payload: Value) {
+    let mut cap = JSON_CAPTURE.lock().unwrap();
+    if !cap.enabled {
+        return;
+    }
+    cap.logs.push(json!({ "tag": tag, "payload": payload }));
+}
+
+fn parse_json_or_string(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
 }
 
 pub fn is_trace_logging() -> bool {
@@ -410,18 +457,14 @@ pub fn print_injection_info(
 pub fn print_trace_info() {
     let state = GLOBAL_STATE.lock().unwrap();
     if state.trace_logging {
-        println!(
-            "<trace>{{\
-                \"step\":{}, \
-                \"pc\":{}, \
-                \"instruction\":\"{}\", \
-                \"assembly\":\"{}\"\
-            }}</trace>",
-            state.step,
-            state.hint_pc,
-            state.hint_instruction,
-            state.hint_assembly,
-        );
+        let payload = json!({
+            "step": state.step,
+            "pc": state.hint_pc,
+            "instruction": state.hint_instruction,
+            "assembly": state.hint_assembly,
+        });
+        capture_json("trace", payload.clone());
+        println!("<trace>{}</trace>", serde_json::to_string(&payload).unwrap());
     }
 }
 
@@ -484,21 +527,16 @@ pub fn print_micro_ops_deltas(air_names: &Vec<String>, prev_heights: &Vec<usize>
     }
     chips.push_str("]");
 
-    println!(
-        "<record>{{\
-            \"context\":\"micro_ops\", \
-            \"step\":{}, \
-            \"pc\":{}, \
-            \"instruction\":\"{}\", \
-            \"assembly\":\"{}\", \
-            \"chips\":{}\
-        }}</record>",
-        state.step,
-        state.hint_pc,
-        escape_json_string(&state.hint_instruction),
-        escape_json_string(&state.hint_assembly),
-        chips,
-    );
+    let payload = json!({
+        "context": "micro_ops",
+        "step": state.step,
+        "pc": state.hint_pc,
+        "instruction": state.hint_instruction,
+        "assembly": state.hint_assembly,
+        "chips": parse_json_or_string(&chips),
+    });
+    capture_json("record", payload.clone());
+    println!("<record>{}</record>", serde_json::to_string(&payload).unwrap());
 }
 
 pub fn print_micro_op_json(chip: &String, payload_json: &String) {
@@ -510,25 +548,18 @@ pub fn print_micro_op_json(chip: &String, payload_json: &String) {
     let uop_idx = state.micro_idx;
     state.micro_idx = state.micro_idx.wrapping_add(1);
 
-    println!(
-        "<record>{{\
-            \"context\":\"micro_ops_uop\", \
-            \"step\":{}, \
-            \"pc\":{}, \
-            \"instruction\":\"{}\", \
-            \"assembly\":\"{}\", \
-            \"chip\":\"{}\", \
-            \"uop_idx\":{}, \
-            \"payload\":{}\
-        }}</record>",
-        state.step,
-        state.hint_pc,
-        escape_json_string(&state.hint_instruction),
-        escape_json_string(&state.hint_assembly),
-        escape_json_string(chip),
-        uop_idx,
-        payload_json,
-    );
+    let payload = json!({
+        "context": "micro_ops_uop",
+        "step": state.step,
+        "pc": state.hint_pc,
+        "instruction": state.hint_instruction,
+        "assembly": state.hint_assembly,
+        "chip": chip,
+        "uop_idx": uop_idx,
+        "payload": parse_json_or_string(payload_json),
+    });
+    capture_json("record", payload.clone());
+    println!("<record>{}</record>", serde_json::to_string(&payload).unwrap());
 }
 
 pub fn print_chip_row_json(domain: &str, chip: &String, gates_json: &str, values_json: &str) {
@@ -544,30 +575,21 @@ pub fn print_chip_row_json(domain: &str, chip: &String, gates_json: &str, values
     let row_id = format!("openvm:{}:{}:{}", state.step, uop_idx, row_seq);
     state.last_row_id = row_id.clone();
 
-    println!(
-        "<record>{{\
-            \"context\":\"micro_op\", \
-            \"micro_op_type\":\"chip_row\", \
-            \"step\":{}, \
-            \"pc\":{}, \
-            \"instruction\":\"{}\", \
-            \"assembly\":\"{}\", \
-            \"row_id\":\"{}\", \
-            \"domain\":\"{}\", \
-            \"chip\":\"{}\", \
-            \"gates\":{}, \
-            \"values\":{}\
-        }}</record>",
-        state.step,
-        state.hint_pc,
-        escape_json_string(&state.hint_instruction),
-        escape_json_string(&state.hint_assembly),
-        escape_json_string(&row_id),
-        escape_json_string(domain),
-        escape_json_string(chip),
-        gates_json,
-        values_json,
-    );
+    let payload = json!({
+        "context": "micro_op",
+        "micro_op_type": "chip_row",
+        "step": state.step,
+        "pc": state.hint_pc,
+        "instruction": state.hint_instruction,
+        "assembly": state.hint_assembly,
+        "row_id": row_id,
+        "domain": domain,
+        "chip": chip,
+        "gates": parse_json_or_string(gates_json),
+        "values": parse_json_or_string(values_json),
+    });
+    capture_json("record", payload.clone());
+    println!("<record>{}</record>", serde_json::to_string(&payload).unwrap());
 }
 
 pub fn get_last_row_id() -> String {
@@ -588,34 +610,23 @@ pub fn print_interaction_json(
         return;
     }
 
-    println!(
-        "<record>{{\
-            \"context\":\"micro_op\", \
-            \"micro_op_type\":\"interaction\", \
-            \"step\":{}, \
-            \"pc\":{}, \
-            \"instruction\":\"{}\", \
-            \"assembly\":\"{}\", \
-            \"table_id\":\"{}\", \
-            \"io\":\"{}\", \
-            \"kind\":\"{}\", \
-            \"scope\":\"global\", \
-            \"anchor_row_id\":\"{}\", \
-            \"multiplicity\":{{\"value\":{},\"ref\":\"{}\"}}, \
-            \"payload\":{}\
-        }}</record>",
-        state.step,
-        state.hint_pc,
-        escape_json_string(&state.hint_instruction),
-        escape_json_string(&state.hint_assembly),
-        escape_json_string(table_id),
-        escape_json_string(io),
-        escape_json_string(kind),
-        escape_json_string(anchor_row_id),
-        multiplicity_value,
-        escape_json_string(multiplicity_ref),
-        payload_json,
-    );
+    let payload = json!({
+        "context": "micro_op",
+        "micro_op_type": "interaction",
+        "step": state.step,
+        "pc": state.hint_pc,
+        "instruction": state.hint_instruction,
+        "assembly": state.hint_assembly,
+        "table_id": table_id,
+        "io": io,
+        "kind": kind,
+        "scope": "global",
+        "anchor_row_id": anchor_row_id,
+        "multiplicity": { "value": multiplicity_value, "ref": multiplicity_ref },
+        "payload": parse_json_or_string(payload_json),
+    });
+    capture_json("record", payload.clone());
+    println!("<record>{}</record>", serde_json::to_string(&payload).unwrap());
 }
 
 

@@ -1,8 +1,0 @@
-[build]
-target = "{{ riscv_target }}"
-
-[target.{{ riscv_target }}]
-rustflags = [
-  "-C", "link-arg=-Tlink.x",
-]
-

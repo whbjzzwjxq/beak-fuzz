@@ -7,11 +7,6 @@ dependencies = [
     "jinja2>=3.1.6",
     "zkvm-fuzzer-utils",
     "openvm-fuzzer",
-    "sp1-fuzzer",
-    "risc0-fuzzer",
-    "pico-fuzzer",
-    "jolt-fuzzer",
-    "nexus-fuzzer",
     "beak-core",
 ]
 
@@ -29,11 +24,6 @@ workspace = { members = ["libs/*", "projects/*"] }
 [tool.uv.sources]
 zkvm-fuzzer-utils = { workspace = true }
 openvm-fuzzer = { workspace = true }
-sp1-fuzzer = { workspace = true }
-risc0-fuzzer = { workspace = true }
-pico-fuzzer = { workspace = true }
-jolt-fuzzer = { workspace = true }
-nexus-fuzzer = { workspace = true }
 beak-core = { workspace = true }
 
 [tool.black]
@@ -60,10 +50,5 @@ pythonpath = [
     "libs/beak-core",
     "libs/zkvm-fuzzer-utils",
     "projects/openvm-fuzzer",
-    "projects/sp1-fuzzer",
-    "projects/risc0-fuzzer",
-    "projects/pico-fuzzer",
-    "projects/jolt-fuzzer",
-    "projects/nexus-fuzzer",
 ]
 testpaths = ["libs", "projects"]

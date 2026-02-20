@@ -1,0 +1,25 @@
+[package]
+name = "beak-openvm"
+version = "0.1.0"
+edition = "2021"
+description = "OpenVM-specific beak binaries"
+publish = false
+
+[[bin]]
+name = "beak-trace"
+path = "src/bin/trace.rs"
+
+[[bin]]
+name = "beak-fuzz"
+path = "src/bin/fuzz.rs"
+
+[dependencies]
+beak-core = { path = "../../crates/beak-core" }
+clap = "4.5"
+
+# OpenVM path dependencies (scoped to one specific commit)
+fuzzer_utils = { path = "../../beak-py/out/openvm-d7eab708f43487b2e7c00524ffd611f835e8e6b5/openvm-src/crates/fuzzer_utils" }
+openvm-sdk = { path = "../../beak-py/out/openvm-d7eab708f43487b2e7c00524ffd611f835e8e6b5/openvm-src/crates/sdk" }
+openvm-transpiler = { path = "../../beak-py/out/openvm-d7eab708f43487b2e7c00524ffd611f835e8e6b5/openvm-src/crates/toolchain/transpiler" }
+openvm-rv32im-transpiler = { path = "../../beak-py/out/openvm-d7eab708f43487b2e7c00524ffd611f835e8e6b5/openvm-src/extensions/rv32im/transpiler" }
+openvm-instructions = { path = "../../beak-py/out/openvm-d7eab708f43487b2e7c00524ffd611f835e8e6b5/openvm-src/crates/toolchain/instructions" }
