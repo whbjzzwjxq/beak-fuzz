@@ -1,0 +1,14 @@
+[package]
+name = "fuzzer_utils"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+lazy_static = "1.4"
+rand = "0.9.1"
+
+openvm-instructions = { path = "../toolchain/instructions" }
+openvm-rv32im-transpiler = { path = "../../extensions/rv32im/transpiler" }
+
+openvm-stark-backend.workspace = true
+

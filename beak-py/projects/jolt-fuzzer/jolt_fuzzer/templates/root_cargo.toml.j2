@@ -1,0 +1,41 @@
+[package]
+name = "jolt-loop1-host"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["guest"]
+
+[profile.release]
+debug = 0
+codegen-units = 1
+lto = "fat"
+
+[dependencies]
+serde_json = "1"
+jolt-sdk = { path = "{{ zkvm_path }}/jolt-sdk", features = ["host"] }
+guest = { package = "jolt-guest", path = "./guest" }
+
+{% if commit_or_branch in [
+  "55b9830a3944dde55d33a55c42522b81dd49f87a",
+  "42de0ca1f581dd212dda7ff44feee806556531d2",
+  "85bf51da10efa9c679c35ffc1a8d45cc6cb1c788",
+  "e9caa23565dbb13019afe61a2c95f51d1999e286",
+] %}
+ark-serialize = "0.5.0"
+{% endif %}
+
+{% if commit_or_branch in [
+  "20ac6eb526af383e7b597273990b5e4b783cc2a6",
+  "70c77337426615b67191b301e9175e2bb093830d",
+  "55b9830a3944dde55d33a55c42522b81dd49f87a",
+  "42de0ca1f581dd212dda7ff44feee806556531d2",
+  "85bf51da10efa9c679c35ffc1a8d45cc6cb1c788",
+  "e9caa23565dbb13019afe61a2c95f51d1999e286",
+] %}
+
+[features]
+icicle = ["jolt-sdk/icicle"]
+{% endif %}
+
+{{ patch_crates_io_section }}

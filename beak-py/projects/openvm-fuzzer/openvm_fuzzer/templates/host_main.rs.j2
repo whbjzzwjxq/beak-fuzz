@@ -1,0 +1,224 @@
+use fuzzer_utils;
+use std::sync::Arc;
+
+use openvm_build::GuestOptions;
+use openvm_sdk::{
+    config::{AppConfig, AppFriParams, SdkVmConfig},
+    Sdk, StdIn,
+};
+{% if use_generic_sdk %}
+use openvm_sdk::config::TranspilerConfig;
+use openvm_sdk::fs::{read_object_from_file, write_object_to_file};
+use openvm_sdk::keygen::AppProvingKey;
+use openvm_sdk::prover::verify_app_proof;
+{% endif %}
+
+use clap::Parser;
+use std::time::Instant;
+
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+struct Args {
+    #[clap(long)]
+    trace: bool,
+{% if is_fault_injection %}
+    #[arg(long, requires_all=["inject_step", "inject_kind", "seed"])]
+    #[clap(long)]
+    inject: bool,
+
+    #[clap(long)]
+    seed: Option<u64>,
+
+    #[clap(long)]
+    inject_step: Option<u64>,
+
+    #[clap(long)]
+    inject_kind: Option<String>,
+{% endif %}
+}
+
+fn main() {
+    let args = Args::parse();
+    // Some OpenVM SDK operations can be stack-intensive on macOS (small default main-thread stack).
+    // Run the actual workload on a fresh thread with a larger stack to avoid stack overflows.
+    std::thread::Builder::new()
+        .name("openvm-host-main".to_string())
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || run(args))
+        .expect("spawn openvm-host-main thread")
+        .join()
+        .expect("openvm-host-main thread panicked");
+}
+
+fn run(args: Args) {
+    fuzzer_utils::set_trace_logging(args.trace);
+{% if is_fault_injection %}
+    fuzzer_utils::set_injection(args.inject);
+    if args.inject {
+        fuzzer_utils::set_seed(args.seed.unwrap());
+        fuzzer_utils::set_injection_step(args.inject_step.unwrap());
+        fuzzer_utils::set_injection_kind(args.inject_kind.unwrap());
+        fuzzer_utils::disable_assertions();
+    } else {
+        fuzzer_utils::enable_assertions();
+    }
+{% else %}
+    fuzzer_utils::disable_assertions();
+{% endif %}
+
+    println!(
+        "<record>{{ '{{' }}\
+            \"context\":\"Setup\", \
+            \"status\":\"start\"\
+        }}</record>"
+    );
+    let timer = Instant::now();
+
+    // SDK VM Config
+    let vm_config = SdkVmConfig::builder()
+       .system(Default::default())
+       .rv32i(Default::default())
+       .rv32m(Default::default())
+       .io(Default::default())
+       .build();
+
+    let app_fri_params = AppFriParams::default().fri_params;
+
+    {% if use_generic_sdk %}
+    let app_config = AppConfig::new(app_fri_params.clone(), vm_config.clone());
+    let sdk = Sdk::new(app_config).expect("sdk init");
+    {% else %}
+    let sdk = Sdk;
+    {% endif %}
+
+    let guest_opts = GuestOptions::default();
+    let target_path = "guest";
+    {% if use_generic_sdk %}
+    let elf = sdk
+        .build(guest_opts, target_path, &Default::default(), None)
+        .expect("guest build");
+    let exe = sdk.convert_to_exe(elf).expect("guest transpile");
+    {% else %}
+    let elf = sdk
+        .build(guest_opts, target_path, &Default::default())
+        .expect("guest build");
+    let exe = sdk.transpile(elf, vm_config.transpiler()).expect("guest transpile");
+    {% endif %}
+
+    let mut stdin = StdIn::default();
+
+    // 1. Inject initial register values
+    {% for reg_idx, val in initial_regs.items() %}
+    stdin.write(&{{ val }}u32);
+    {% endfor %}
+
+    {% if use_generic_sdk %}
+    // `Sdk` caches proving keys only in-memory (per-process). Persist the app proving key on disk
+    // so repeated runs avoid expensive key generation.
+    let app_pk_cache_path = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        // Tie the cache to the *circuit config*, not the program.
+        // (Different programs can share the same circuit; different circuit configs must not share keys.)
+        format!("{:?}", &vm_config).hash(&mut hasher);
+        format!("{:?}", &app_fri_params).hash(&mut hasher);
+        let cache_tag = format!("{:016x}", hasher.finish());
+
+        std::path::Path::new("target")
+            .join("openvm-sdk-cache")
+            .join(format!(
+                "app_pk_v{}_{}.bitcode",
+                openvm_sdk::OPENVM_VERSION,
+                cache_tag
+            ))
+    };
+    if let Ok(pk) = read_object_from_file::<AppProvingKey<_>, _>(&app_pk_cache_path) {
+        // Best effort: if a key is already set, we just keep the existing one.
+        let _ = sdk.set_app_pk(pk);
+    }
+
+    let mut app_prover = sdk.app_prover(exe.clone()).expect("app prover");
+    let app_commit = app_prover.app_commit();
+    let app_pk = sdk.app_pk().clone();
+    let app_vk = app_pk.get_app_vk();
+    if !app_pk_cache_path.exists() {
+        // Best-effort write; if it fails we still have a valid key in-memory for this run.
+        let _ = write_object_to_file(&app_pk_cache_path, app_pk);
+    }
+    {% else %}
+    let app_config = AppConfig::new(app_fri_params.clone(), vm_config);
+    let app_committed_exe = sdk.commit_app_exe(app_fri_params, exe).expect("commit app exe");
+    let app_pk = Arc::new(sdk.app_keygen(app_config).expect("app keygen"));
+    {% endif %}
+
+    println!(
+        "<record>{{ '{{' }}\
+            \"context\":\"Setup\", \
+            \"status\":\"success\", \
+            \"time\":\"{:.2?}\"\
+        }}</record>",
+        timer.elapsed()
+    );
+
+    println!(
+        "<record>{{ '{{' }}\
+            \"context\":\"Prover\", \
+            \"status\":\"start\"\
+        }}</record>"
+    );
+    let timer = Instant::now();
+
+    {% if use_generic_sdk %}
+    let proof = app_prover.prove(stdin.clone()).expect("prove");
+    {% else %}
+    let proof = sdk.generate_app_proof(
+        app_pk.clone(),
+        app_committed_exe.clone(),
+        stdin.clone()
+    ).expect("prove");
+    {% endif %}
+
+    println!(
+        "<record>{{ '{{' }}\
+            \"context\":\"Prover\", \
+            \"status\":\"success\",\
+            \"output\":\"{:?}\", \
+            \"time\":\"{:.2?}\"\
+        }}</record>",
+        proof.user_public_values.public_values,
+        timer.elapsed()
+    );
+
+{% if is_fault_injection %}
+    if args.inject { fuzzer_utils::enable_assertions(); }
+{% endif %}
+
+    println!(
+        "<record>{{ '{{' }}\
+            \"context\":\"Verifier\", \
+            \"status\":\"start\"\
+        }}</record>"
+    );
+    let timer = Instant::now();
+
+    {% if use_generic_sdk %}
+    let verified = verify_app_proof(&app_vk, &proof).expect("verify");
+    if verified.app_exe_commit != app_commit.app_exe_commit {
+        panic!("app exe commit mismatch");
+    }
+    {% else %}
+    let app_vk = app_pk.get_app_vk();
+    sdk.verify_app_proof(&app_vk, &proof).expect("verify");
+    {% endif %}
+
+    println!(
+        "<record>{{ '{{' }}\
+            \"context\":\"Verifier\", \
+            \"status\":\"success\", \
+            \"time\":\"{:.2?}\"\
+        }}</record>",
+        timer.elapsed()
+    );
+}

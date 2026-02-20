@@ -1,0 +1,13 @@
+[package]
+name = "openvm-host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive", "env"] }
+fuzzer_utils = { path = "{{ zkvm_path }}/crates/fuzzer_utils" }
+openvm = { path = "{{ zkvm_path }}/crates/toolchain/openvm" }
+openvm-sdk = { path = "{{ zkvm_path }}/crates/sdk" }
+openvm-build = { path = "{{ zkvm_path }}/crates/toolchain/build" }
+openvm-platform = { path = "{{ zkvm_path }}/crates/toolchain/platform" }
+openvm-transpiler = { path = "{{ zkvm_path }}/crates/toolchain/transpiler" }

@@ -1,0 +1,13 @@
+[package]
+version = "0.1.0"
+name = "sp1-host"
+edition = "2021"
+default-run = "sp1-host"
+
+[[bin]]
+name = "sp1-host"
+path = "src/main.rs"
+
+[dependencies]
+sp1-sdk = { path = "{{ zkvm_path }}/crates/sdk" }
+serde_json = "1"

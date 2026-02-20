@@ -1,0 +1,35 @@
+use pico_sdk::{client::DefaultProverClient, init_logger};
+use serde_json::json;
+use std::fs;
+use std::time::Instant;
+
+const PICO_GUEST_PATH: &str = "../app/elf/riscv32im-pico-zkvm-elf";
+
+fn main() {
+    init_logger();
+
+    println!("<record>{}</record>", json!({"context":"Prover & Verifier","status":"start"}));
+    let timer = Instant::now();
+
+    let elf = fs::read(PICO_GUEST_PATH).expect("read guest elf");
+    let client = DefaultProverClient::new(&elf);
+    let mut stdin_builder = client.new_stdin_builder();
+
+    {% for reg_idx in initial_regs.keys() if reg_idx != 0 %}
+    stdin_builder.write(&{{ initial_regs[reg_idx] }}u32);
+    {% endfor %}
+
+    let riscv_proof = client.prove_fast(stdin_builder).expect("prove_fast");
+
+    let pv = riscv_proof.pv_stream.clone().expect("pv_stream");
+    let mut outputs: Vec<u32> = Vec::new();
+    for chunk in pv.chunks_exact(4).take({{ output_word_count }}) {
+        outputs.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+
+    println!(
+        "<record>{}</record>",
+        json!({"context":"Prover & Verifier","status":"success","time": format!("{:.2?}", timer.elapsed()),"output": outputs})
+    );
+}
+

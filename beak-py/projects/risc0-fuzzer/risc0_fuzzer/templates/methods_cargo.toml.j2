@@ -1,0 +1,11 @@
+[package]
+name = "risc0-methods"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+risc0-build = { path = "{{ zkvm_path }}/risc0/build" }
+
+[package.metadata.risc0]
+methods = ["guest"]
+

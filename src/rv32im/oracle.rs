@@ -1,57 +1,28 @@
-//! RISC-V oracle: compute expected register results by simulating execution with rrs-lib.
-
-use std::collections::HashMap;
-
 use rrs_lib::HartState;
 use rrs_lib::instruction_executor::{InstructionException, InstructionExecutor};
 use rrs_lib::memories::{MemorySpace, VecMemory};
 
-use crate::fuzz::seed::FuzzingSeed;
-use crate::rv32im::instruction::RV32IMInstruction;
-
-/// Default code base (PC start). Matches riscv-tests dump entry `_start` at 0x8000_0000 and
-/// typical zkVM / RISC-V test harness layout (see `storage/riscv-tests-artifacts/*.dump`).
-pub const DEFAULT_CODE_BASE: u32 = 0x8000_0000;
-
-/// Maximum number of instructions to execute to avoid infinite loops.
 const MAX_INSTRUCTIONS: u32 = 1000;
 
-/// Oracle that computes expected register values by running the seed's program in rrs-lib.
 pub struct RISCVOracle;
 
 impl RISCVOracle {
-    /// Run the program from `seed` in the rrs-lib simulator and return the final register values
-    /// for every register that was in `initial_regs`. Execution is limited to `MAX_INSTRUCTIONS`;
-    /// on fetch/illegal/load/store/align errors execution stops and current register state is returned.
-    pub fn compute_expected_results(seed: &FuzzingSeed) -> HashMap<u32, u32> {
-        if seed.instructions.is_empty() {
-            return seed
-                .initial_regs
-                .keys()
-                .copied()
-                .map(|idx| (idx, if idx == 0 { 0 } else { seed.initial_regs[&idx] }))
-                .collect();
+    /// Execute instruction words starting at pc=0 with all registers zeroed.
+    /// Returns all 32 register values after execution completes or faults.
+    pub fn execute(words: &[u32]) -> [u32; 32] {
+        let mut regs = [0u32; 32];
+        if words.is_empty() {
+            return regs;
         }
 
-        let base_addr = DEFAULT_CODE_BASE;
-        let code_words: Vec<u32> =
-            seed.instructions.iter().map(|inst: &RV32IMInstruction| inst.word).collect();
-        let code_len_bytes = code_words.len().saturating_mul(4);
-
+        let code_len_bytes = (words.len() * 4) as u32;
         let mut mem_space = MemorySpace::new();
         mem_space
-            .add_memory(base_addr, code_len_bytes as u32, Box::new(VecMemory::new(code_words)))
-            .expect("add code region at DEFAULT_CODE_BASE");
+            .add_memory(0, code_len_bytes, Box::new(VecMemory::new(words.to_vec())))
+            .expect("add code region");
 
         let mut hart = HartState::new();
-        hart.pc = base_addr;
-        for (reg_idx, &val) in &seed.initial_regs {
-            let i = *reg_idx as usize;
-            if i < 32 {
-                hart.registers[i] = val;
-            }
-        }
-        hart.registers[0] = 0;
+        hart.pc = 0;
 
         let mut executor = InstructionExecutor {
             hart_state: &mut hart,
@@ -72,14 +43,10 @@ impl RISCVOracle {
             }
         }
 
-        seed.initial_regs
-            .keys()
-            .copied()
-            .map(|idx| {
-                let i = idx as usize;
-                let val = if i < 32 { hart.registers[i] } else { 0 };
-                (idx, val)
-            })
-            .collect()
+        for i in 0..32 {
+            regs[i] = hart.registers[i];
+        }
+        regs[0] = 0; // x0 is always 0
+        regs
     }
 }

@@ -1,0 +1,36 @@
+use risc0_methods::GUEST_ELF;
+use risc0_zkvm::{default_executor, ExecutorEnv};
+use serde_json::json;
+use std::time::Instant;
+
+fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
+        .init();
+
+    println!("<record>{}</record>", json!({"context":"Environment Builder","status":"start"}));
+    let timer = Instant::now();
+
+    let mut builder = ExecutorEnv::builder();
+    {% for reg_idx in initial_regs.keys() if reg_idx != 0 %}
+    builder.write(&{{ initial_regs[reg_idx] }}u32).unwrap();
+    {% endfor %}
+    let env = builder.build().unwrap();
+
+    println!(
+        "<record>{}</record>",
+        json!({"context":"Environment Builder","status":"success","time": format!("{:.2?}", timer.elapsed())})
+    );
+
+    println!("<record>{}</record>", json!({"context":"Executor","status":"start"}));
+    let timer = Instant::now();
+    let session = default_executor().execute(env, GUEST_ELF).unwrap();
+
+    const OUTPUT_WORD_COUNT: usize = {{ output_word_count }};
+    let outputs: [u32; OUTPUT_WORD_COUNT] = session.journal.decode().unwrap();
+
+    println!(
+        "<record>{}</record>",
+        json!({"context":"Executor","status":"success","time": format!("{:.2?}", timer.elapsed()),"output": outputs})
+    );
+}

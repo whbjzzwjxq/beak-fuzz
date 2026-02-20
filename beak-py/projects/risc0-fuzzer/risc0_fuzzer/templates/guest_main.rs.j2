@@ -1,0 +1,45 @@
+#![no_main]
+#![no_std]
+#![allow(unused_unsafe)]
+#![allow(unconditional_panic)]
+#![allow(arithmetic_overflow)]
+
+use core::arch::asm;
+use risc0_zkvm::guest::env;
+
+risc0_zkvm::guest::entry!(main);
+
+fn main() {
+    {% for reg_idx in initial_regs.keys() if reg_idx != 0 %}
+    let mut x{{ reg_idx }}: u32 = env::read();
+    {% endfor %}
+
+    let mut final_x0: u32 = 0;
+
+    unsafe {
+        asm!(
+            {% for inst in instructions %}
+            "{{ inst }}",
+            {% endfor %}
+            "mv {final_x0}, x0",
+            {% for reg_idx in initial_regs.keys() if reg_idx != 0 %}
+            inout("x{{ reg_idx }}") x{{ reg_idx }},
+            {% endfor %}
+            final_x0 = out(reg) final_x0,
+            options(nostack)
+        );
+    }
+
+    const OUTPUT_WORD_COUNT: usize = {{ output_word_count }};
+    let outputs: [u32; OUTPUT_WORD_COUNT] = [
+        {% for reg_idx in initial_regs.keys() %}
+        {{ reg_idx }}u32,
+        {% if reg_idx == 0 %}
+        final_x0,
+        {% else %}
+        x{{ reg_idx }},
+        {% endif %}
+        {% endfor %}
+    ];
+    env::commit(&outputs);
+}

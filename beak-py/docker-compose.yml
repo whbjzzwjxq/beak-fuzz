@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  worker:
+    image: openvm-fuzzer
+    build:
+      context: .
+      dockerfile: projects/openvm-fuzzer/Dockerfile
+    volumes:
+      - ./openvm-src:/app/openvm-src
+    entrypoint: ["uv", "run", "openvm-fuzzer", "install", "--zkvm-src", "/app/openvm-src", "--commit-or-branch", "bmk-f038", "--out-root", "/app/out"]
+    deploy:
+      replicas: 1 # Install-only; no parallel workers needed

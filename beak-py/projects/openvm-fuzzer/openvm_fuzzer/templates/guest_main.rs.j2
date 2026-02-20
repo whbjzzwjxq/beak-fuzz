@@ -1,0 +1,46 @@
+#![allow(unused_unsafe)]
+#![allow(unconditional_panic)]
+#![allow(arithmetic_overflow)]
+#![no_main]
+
+extern crate alloc;
+
+use openvm::io::{read, reveal_u32, println};
+use core::arch::asm;
+
+openvm::entry!(main);
+
+#[no_mangle]
+pub fn main() {
+    // 1. Inject initial register states from Host (excluding x0)
+    {% for reg_idx in initial_regs.keys() if reg_idx != 0 %}
+    let mut x{{ reg_idx }}: u32 = read();
+    {% endfor %}
+
+    // 2. Execute random instruction sequence
+    unsafe {
+        asm!(
+            // Fuzzing instruction sequence
+            {% for inst in instructions %}
+            "{{ inst }}",
+            {% endfor %}
+
+            // Capture x0 into scratch register x30 (t5).
+            // (Using an actual register avoids introducing an extra Rust variable.)
+            "addi x30, x0, 0",
+
+            // Bind to physical registers (excluding x0 from operands)
+            {% for reg_idx in initial_regs.keys() if reg_idx != 0 %}
+            inout("x{{ reg_idx }}") x{{ reg_idx }},
+            {% endfor %}
+            options(nostack)
+        );
+    }
+
+    // 3. Reveal and print results.
+    // Publish captured x0 (held in x30) as public output word 0.
+    println(alloc::format!("x0={}", x30));
+    {% for reg_idx in initial_regs.keys() if reg_idx != 0 and reg_idx != 30 %}
+    println(alloc::format!("x{{ reg_idx }}={}", x{{ reg_idx }}));
+    {% endfor %}
+}

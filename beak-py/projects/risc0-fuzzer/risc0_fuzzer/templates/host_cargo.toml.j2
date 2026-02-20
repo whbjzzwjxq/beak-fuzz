@@ -1,0 +1,12 @@
+[package]
+name = "risc0-host"
+version = "0.1.0"
+edition = "2021"
+default-run = "risc0-host"
+
+[dependencies]
+risc0-methods = { path = "../methods" }
+risc0-zkvm = { path = "{{ zkvm_path }}/risc0/zkvm", features = ["client", "prove"] }
+serde_json = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+

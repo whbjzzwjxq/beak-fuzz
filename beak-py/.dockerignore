@@ -1,0 +1,12 @@
+.venv
+.git
+__pycache__
+openvm-src
+output
+fuzz_results
+target
+*.elf
+*.o
+*.bin
+uv.lock
+
