@@ -336,7 +336,7 @@ def parse_riscv_tests(
             },
         }
         if verbose:
-            preview = " | ".join(seed["instructions"][:8])
+            preview = " | ".join(str(w) for w in seed["instructions"][:8])
             if len(seed["instructions"]) > 8:
                 preview += " | ..."
             print(
@@ -356,6 +356,8 @@ def parse_riscv_tests(
             flush()
             current_label_addr = int(m_label.group(1), 16)
             current_label = m_label.group(2)
+            # Ensure we never carry over lines from a previous block.
+            current_lines = []
             continue
 
         if current_label is None or not current_label.startswith("test"):
