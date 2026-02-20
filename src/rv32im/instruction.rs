@@ -1015,6 +1015,36 @@ fn decode_system_instruction(word: u32) -> Option<RV32IMInstruction> {
         ));
     }
 
+    // CSR read (csrr): funct3 == 4
+    if opcode == 0x73 && funct3 == 4 {
+        let csr = (word >> 20) & 0xfff;
+        let asm = format!("csrr x{rd}, 0x{csr:x}");
+        return Some(RV32IMInstruction::new(
+            "csrr",
+            word,
+            asm,
+            Some(rd),
+            None,
+            None,
+            Some(csr as i32),
+        ));
+    }
+
+    // Any other opcode 0x73 (system/CSR): accept as generic "system" so deserialization never fails
+    if opcode == 0x73 {
+        let imm12 = (word >> 20) & 0xfff;
+        let asm = format!("system 0x{imm12:03x}");
+        return Some(RV32IMInstruction::new(
+            "system",
+            word,
+            asm,
+            Some(rd),
+            Some(rs1),
+            None,
+            Some(imm12 as i32),
+        ));
+    }
+
     None
 }
 

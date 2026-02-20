@@ -12,6 +12,7 @@ pub type Metadata = Map<String, serde_json::Value>;
 pub struct FuzzingSeed {
     pub instructions: Vec<RV32IMInstruction>,
     pub initial_regs: HashMap<u32, u32>,
+    pub used_regs: Vec<u32>,
     pub metadata: Metadata,
 }
 
@@ -19,9 +20,10 @@ impl FuzzingSeed {
     pub fn new(
         instructions: Vec<RV32IMInstruction>,
         initial_regs: HashMap<u32, u32>,
+        used_regs: Vec<u32>,
         metadata: Metadata,
     ) -> Self {
-        Self { instructions, initial_regs, metadata }
+        Self { instructions, initial_regs, used_regs, metadata }
     }
 }
 

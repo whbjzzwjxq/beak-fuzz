@@ -24,3 +24,4 @@ hex = "0.4.3"
 
 libafl = "0.15.4"
 rrs-lib = "0.1"
+crypto-bigint = "0.6.1"

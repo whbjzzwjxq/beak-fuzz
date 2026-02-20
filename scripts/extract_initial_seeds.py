@@ -93,6 +93,78 @@ ORACLE_RESULT_REG = 10  # a0
 # gp = x3, used in structural "bne zero, gp, pass" at end of many test blocks.
 GP_REG = 3
 
+# Map zkvm-unsupported / reserved regs to temporaries for fuzzing:
+# sp(2), gp(3), tp(4), x8/fp(8), x9/s1(9) -> t0(5), t1(6), t2(7), t3(28), t4(29)
+REG_REMAP = {2: 5, 3: 6, 4: 7, 8: 28, 9: 29}
+
+
+def _remap_reg(r: int) -> int:
+    return REG_REMAP.get(r, r)
+
+
+def _rewrite_word_regs(word: int) -> int:
+    """
+    Rewrite rd/rs1/rs2 in instruction word: sp,gp,tp,x8,x9 -> t0,t1,t2,t3,t4.
+    So zkvm tests avoid using stack pointer, frame pointer, base pointer, gp, tp.
+    """
+    opcode = _opcode(word)
+    # R-type: 0x33 (OP), 0x3b (OP-64)
+    if opcode in (0x33, 0x3B):
+        rd, rs1, rs2 = _rd(word), _rs1(word), _rs2(word)
+        rd, rs1, rs2 = _remap_reg(rd), _remap_reg(rs1), _remap_reg(rs2)
+        return (word & 0xFE00007F) | (rd << 7) | (rs1 << 15) | (rs2 << 20)
+    # I-type: 0x13 (opimm), 0x03 (load), 0x67 (jalr), 0x73 (csr/csrr/csrw etc)
+    if opcode in (0x13, 0x03, 0x67, 0x73):
+        rd, rs1 = _rd(word), _rs1(word)
+        rd, rs1 = _remap_reg(rd), _remap_reg(rs1)
+        return (word & 0xFFFFE07F) | (rd << 7) | (rs1 << 15)
+    # S-type: 0x23 (store)
+    if opcode == 0x23:
+        rs1, rs2 = _rs1(word), _rs2(word)
+        rs1, rs2 = _remap_reg(rs1), _remap_reg(rs2)
+        return (word & 0x01FFF07F) | (rs1 << 15) | (rs2 << 20)
+    # B-type: 0x63 (branch)
+    if opcode == 0x63:
+        rs1, rs2 = _rs1(word), _rs2(word)
+        rs1, rs2 = _remap_reg(rs1), _remap_reg(rs2)
+        return (word & 0x01FFF07F) | (rs1 << 15) | (rs2 << 20)
+    # U-type: 0x37 (lui), 0x17 (auipc)
+    if opcode in (0x37, 0x17):
+        rd = _remap_reg(_rd(word))
+        return (word & 0xFFFFF07F) | (rd << 7)
+    # J-type: 0x6f (jal)
+    if opcode == 0x6F:
+        rd = _remap_reg(_rd(word))
+        return (word & 0xFFFFF07F) | (rd << 7)
+    return word
+
+
+def _regs_used_in_word(word: int) -> set[int]:
+    """Return set of register indices (rd, rs1, rs2) used in one instruction word."""
+    opcode = _opcode(word)
+    regs: set[int] = set()
+    if opcode in (0x33, 0x3B):
+        regs.add(_rd(word))
+        regs.add(_rs1(word))
+        regs.add(_rs2(word))
+    elif opcode in (0x13, 0x03, 0x67, 0x73):
+        regs.add(_rd(word))
+        regs.add(_rs1(word))
+    elif opcode == 0x23 or opcode == 0x63:
+        regs.add(_rs1(word))
+        regs.add(_rs2(word))
+    elif opcode in (0x37, 0x17, 0x6F):
+        regs.add(_rd(word))
+    return regs
+
+
+def _used_regs_from_words(words: list[int]) -> list[int]:
+    """Collect all registers read or written in the instruction stream; return sorted list."""
+    seen: set[int] = set()
+    for w in words:
+        seen.update(_regs_used_in_word(w))
+    return sorted(seen)
+
 
 def _strip_trailing_bne_zero_gp_pass(words: list[int]) -> list[int]:
     """
@@ -239,9 +311,24 @@ def parse_riscv_tests(
             inferred_regs, inst_words = _infer_initial_regs(inst_words)
         inst_words = _replace_branch_to_fail(inst_words)
 
+        # 1. Remove x0 from initial_regs (zkvm: no need for "0": 0).
+        # 2. Remap sp(2), gp(3), tp(4), x8(8), x9(9) -> t0(5), t1(6), t2(7), t3(28), t4(29).
+        initial_regs_remapped: dict[str, int] = {}
+        for k, v in inferred_regs.items():
+            if k == 0:
+                continue
+            key_remapped = _remap_reg(k)
+            initial_regs_remapped[str(key_remapped)] = v & 0xFFFFFFFF
+
+        # Rewrite instruction words so rd/rs1/rs2 use remapped registers.
+        inst_words = [_rewrite_word_regs(w) for w in inst_words]
+
+        used_regs = _used_regs_from_words(inst_words)
+
         seed = {
             "instructions": inst_words,
-            "initial_regs": {str(k): v & 0xFFFFFFFF for k, v in inferred_regs.items()},
+            "initial_regs": initial_regs_remapped,
+            "used_regs": used_regs,
             "metadata": {
                 "source": source,
                 "label": current_label,
