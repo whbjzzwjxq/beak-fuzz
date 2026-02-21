@@ -17,16 +17,7 @@ Beak-py is a Python monorepo for **collecting zkVM guest program execution trace
   rustup component add llvm-tools-preview
   ```
 
-### 2. Prepare local zkVM repos
-
-This repo vendors zkVM source repos as **git submodules**. To fetch/update all zkVM repos under `*-src/`:
-
-```bash
-git submodule sync --recursive
-git submodule update --init --recursive
-```
-
-### 3. Setup Python environment
+### 2. Setup Python environment
 
 Initialize the workspace and install dependencies:
 
@@ -34,32 +25,28 @@ Initialize the workspace and install dependencies:
 make install
 ```
 
-### 4. Manage zkVM Snapshot ( Using OpenVM as the example )
+### 3. Install a zkVM snapshot (OpenVM example)
 
-- Install a snapshot
+Beak-py's role is to **materialize and patch** a pinned zkVM snapshot under `out/`.
+For OpenVM, `openvm-fuzzer install` will clone the upstream repo and apply patches automatically.
 
 ```bash
 uv run openvm-fuzzer install --commit-or-branch bmk-regzero
 ```
 
-### 5. Run a seed
+### 4. Run a seed (via Rust beak-trace)
 
-- Run this seed
+This repository's current integration test runner for OpenVM is the Rust binary:
+`projects/openvm` -> `beak-trace`.
 
 ```bash
-uv run openvm-fuzzer trace \
-  --asm "add x14, x1, x5" \
-  --asm "addi x7, x7, 1" \
-  --asm "li x5, 2" \
-  --asm "bne x7, x5, -16" \
-  --asm "li x7, 25" \
-  --asm "xor x10, x14, x7" \
-  --reg x6=28 \
-  --reg x7=0 \
-  --reg x1=15 \
-  --reg x5=11 \
-  --reg x10=0 \
-  --reg x14=0
+cd ../projects/openvm
+
+# Baseline: should PASS (oracle regs match OpenVM regs)
+cargo run --bin beak-trace -- --bin "00100513 00200593 00b50633"
+
+# Soundness example: writes x0 (rd=0), should DETECT mismatch
+cargo run --bin beak-trace -- --bin "12345017 00000533"
 ```
 
 ## Core Architecture
@@ -69,10 +56,7 @@ uv run openvm-fuzzer trace \
 3. **`projects/*-fuzzer`**: Per-zkVM packages that can:
    - materialize a local zkVM repo snapshot into `out/<zkvm>-<commit>/...`
    - optionally apply instrumentation / fault-injection patches (where supported)
-4. **`scripts/*_bucket_workflow.py`**: End-to-end workflows that:
-   - generate a tiny guest program from an instruction file
-   - run the zkVM (offline)
-   - parse `<record>...</record>` JSON logs into `micro_op_records.json`
+4. **`scripts/*_bucket_workflow.py`**: legacy/memo scripts (not the primary supported flow).
 
 ## Register Safety
 

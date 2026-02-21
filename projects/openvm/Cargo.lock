@@ -320,6 +320,7 @@ dependencies = [
  "openvm-rv32im-transpiler",
  "openvm-sdk",
  "openvm-transpiler",
+ "serde_json",
 ]
 
 [[package]]

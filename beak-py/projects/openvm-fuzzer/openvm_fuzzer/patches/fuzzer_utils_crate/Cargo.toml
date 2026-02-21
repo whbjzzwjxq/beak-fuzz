@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 lazy_static = "1.4"
 rand = "0.9.1"
+serde_json.workspace = true
 
 openvm-instructions = { path = "../toolchain/instructions" }
 openvm-rv32im-transpiler = { path = "../../extensions/rv32im/transpiler" }

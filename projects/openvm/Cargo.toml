@@ -16,6 +16,7 @@ path = "src/bin/fuzz.rs"
 [dependencies]
 beak-core = { path = "../../crates/beak-core" }
 clap = "4.5"
+serde_json = "1"
 
 # OpenVM path dependencies (scoped to one specific commit)
 fuzzer_utils = { path = "../../beak-py/out/openvm-d7eab708f43487b2e7c00524ffd611f835e8e6b5/openvm-src/crates/fuzzer_utils" }
