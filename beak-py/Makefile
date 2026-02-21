@@ -60,7 +60,6 @@ $(PYRIGHTCONFIG):
 	echo '{'                                  >  $(PYRIGHTCONFIG)
 	echo '    "extraPaths" : ['               >> $(PYRIGHTCONFIG)
 	echo '        "./libs/zkvm-fuzzer-utils",' >> $(PYRIGHTCONFIG)
-	echo '        "./libs/beak-core",'        >> $(PYRIGHTCONFIG)
 	echo '        "./projects/openvm-fuzzer",' >> $(PYRIGHTCONFIG)
 	echo '        "./projects/sp1-fuzzer",'   >> $(PYRIGHTCONFIG)
 	echo '        "./projects/risc0-fuzzer",' >> $(PYRIGHTCONFIG)

@@ -31,7 +31,6 @@ WORKDIR /app
 
 # Copy dependency files first to leverage Docker cache
 COPY pyproject.toml .
-COPY libs/beak-core/pyproject.toml libs/beak-core/
 COPY libs/zkvm-fuzzer-utils/pyproject.toml libs/zkvm-fuzzer-utils/
 COPY projects/openvm-fuzzer/pyproject.toml projects/openvm-fuzzer/
 

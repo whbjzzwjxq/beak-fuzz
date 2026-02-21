@@ -7,7 +7,6 @@ dependencies = [
     "jinja2>=3.1.6",
     "zkvm-fuzzer-utils",
     "openvm-fuzzer",
-    "beak-core",
 ]
 
 [dependency-groups]
@@ -24,7 +23,6 @@ workspace = { members = ["libs/*", "projects/*"] }
 [tool.uv.sources]
 zkvm-fuzzer-utils = { workspace = true }
 openvm-fuzzer = { workspace = true }
-beak-core = { workspace = true }
 
 [tool.black]
 line-length = 100
@@ -47,7 +45,6 @@ profile = "black"
 
 [tool.pytest.ini_options]
 pythonpath = [
-    "libs/beak-core",
     "libs/zkvm-fuzzer-utils",
     "projects/openvm-fuzzer",
 ]

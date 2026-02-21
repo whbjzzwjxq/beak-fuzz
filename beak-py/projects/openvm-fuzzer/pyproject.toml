@@ -12,7 +12,6 @@ authors = []
 readme = "README.md"
 dependencies = [
   "zkvm-fuzzer-utils",
-  "beak-core",
   "jinja2"
 ]
 
