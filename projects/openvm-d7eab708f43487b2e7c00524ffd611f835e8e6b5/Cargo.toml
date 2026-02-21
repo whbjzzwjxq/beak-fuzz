@@ -1,8 +1,8 @@
 [package]
-name = "beak-openvm"
+name = "beak-openvm-d7eab708"
 version = "0.1.0"
 edition = "2021"
-description = "OpenVM-specific beak binaries"
+description = "OpenVM-specific beak binaries (commit d7eab708)"
 publish = false
 
 [[bin]]

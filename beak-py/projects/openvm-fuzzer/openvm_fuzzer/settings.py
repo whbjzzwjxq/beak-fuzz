@@ -45,4 +45,4 @@ def resolve_openvm_commit(commit_or_branch: str) -> str:
     return commit_or_branch
 
 
-RUST_TOOLCHAIN_VERSION = "nightly-2025-02-14"
+RUST_TOOLCHAIN_VERSION = "nightly-2025-08-19"

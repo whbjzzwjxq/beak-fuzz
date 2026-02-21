@@ -1,30 +1,432 @@
+"""
+Pass 3: Trace + Micro-op Collection Instrumentation
+
+Purpose
+-------
+Add logging points that emit beak-fuzz JSON micro-ops:
+- ChipRow markers (per AIR/chip)
+- Interaction records (bus send/recv, padding sample, etc.)
+
+Review focus: scope + timing
+----------------------------
+The key question is not “is the JSON format correct?”, but “did we instrument the right
+places at the right times”. This pass is therefore organized by *when* the code runs:
+
+1) integration_api.rs postprocess (adapter/core micro-ops)
+2) padding rows sampling (audit snapshots vs regzero differ)
+3) segment / regzero preflight + tracegen fillers (program, execution edges, adapter/core)
+
+Timing (high-level labels)
+--------------------------
+- postprocess: integration API adapter/core postprocess
+- finalize_padding: when padded rows exist (finalize / record arena matrix expansion)
+- execute_and_tracegen: execute loop + tracegen fill_trace_row emit points
+
+Targets
+-------
+- <openvm>/crates/vm/src/arch/integration_api.rs
+- <openvm>/crates/vm/src/arch/record_arena.rs (regzero)
+- <openvm>/crates/vm/src/arch/segment.rs (audit snapshots in-place; baseline overwrite)
+- <openvm>/crates/vm/src/arch/interpreter_preflight.rs (regzero)
+- <openvm>/crates/vm/src/arch/extensions.rs (regzero)
+- <openvm>/extensions/rv32im/circuit/src/adapters/*.rs (regzero)
+- <openvm>/extensions/rv32im/circuit/src/**/core.rs (regzero)
+
+Commit-dependent behavior
+-------------------------
+- 336f/f038 (“audit snapshots”): segment.rs + integration_api.rs have different layouts; patch in-place.
+- regzero: uses interpreter_preflight + record_arena padding + tracegen filler instrumentation.
+- baseline arguzz / non-snapshot: overwrite segment.rs from a known template.
+"""
+
+from __future__ import annotations
+
 import logging
 import re
 from pathlib import Path
 
-from openvm_fuzzer.patches.injection_sources import openvm_crates_vm_src_arch_segment_rs
 from openvm_fuzzer.settings import (
     OPENVM_BENCHMARK_336F_COMMIT,
     OPENVM_BENCHMARK_F038_COMMIT,
     OPENVM_BENCHMARK_REGZERO_COMMIT,
     resolve_openvm_commit,
 )
-from zkvm_fuzzer_utils.file import overwrite_file
+from zkvm_fuzzer_utils.file import replace_in_file
 
 logger = logging.getLogger("fuzzer")
+
+
+# -------------------------------------------------------------------------------------------------
+# patch_integration_api_microops.py (merged)
+# -------------------------------------------------------------------------------------------------
+
+
+def _patch_audit_integration_api_for_microops(openvm_install_path: Path) -> None:
+    """
+    Audit snapshots (336/f038) have a slightly different `integration_api.rs` layout (multi-line
+    `postprocess` assignment). Patch it in-place to emit adapter/core ChipRow micro-ops.
+    """
+
+    integration_api = openvm_install_path / "crates" / "vm" / "src" / "arch" / "integration_api.rs"
+    if not integration_api.exists():
+        return
+
+    contents = integration_api.read_text()
+    if 'fuzzer_utils::print_chip_row_json("openvm"' in contents:
+        # Already injected.
+        return
+
+    # Ensure we can call fuzzer_utils even if assert-rewrite didn't touch this file.
+    if "use fuzzer_utils;" not in contents:
+        header_end = contents.find("\n\n")
+        if header_end > 0:
+            contents = contents[:header_end] + "\nuse fuzzer_utils;\n" + contents[header_end:]
+
+    # Ensure serde_json::json is available.
+    if "use serde_json::json;" not in contents:
+        # Accept both `use serde::{Deserialize, Serialize};` and
+        # `use serde::{de::DeserializeOwned, Deserialize, Serialize};` variants.
+        contents, n = re.subn(
+            r"^use serde::\{[^}]*\};\s*$",
+            lambda m: m.group(0) + "\nuse serde_json::json;",
+            contents,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if n == 0:
+            raise RuntimeError("unable to locate serde import to append serde_json::json")
+
+    # Insert after the multi-line postprocess assignment (ending at `?;`).
+    m = re.search(
+        r"(let\s+\(to_state,\s*write_record\)\s*=\s*\n\s*self\.adapter\s*\n\s*\.postprocess\([\s\S]*?\)\?\s*;)",
+        contents,
+        flags=re.MULTILINE,
+    )
+    if not m:
+        raise RuntimeError("unable to locate adapter postprocess assignment in integration_api.rs")
+
+    insert = r"""
+
+        if fuzzer_utils::is_trace_logging() {
+            // NOTE: We emit ChipRow-style micro-ops, i.e. per-chip payloads. This matches
+            // the beak-core interface (MicroOp = ChipRow | InteractionBase).
+            let gates = json!({"is_real": 1}).to_string();
+
+            let adapter_chip = get_air_name(self.adapter.air());
+            let adapter_locals = json!({
+                "from_pc": from_state.pc,
+                "to_pc": to_state.pc,
+                "from_timestamp": from_state.timestamp,
+                "to_timestamp": to_state.timestamp,
+                "payload_json": json!({
+                    "adapter_read": &read_record,
+                    "adapter_write": &write_record,
+                })
+                .to_string(),
+            })
+            .to_string();
+            fuzzer_utils::print_chip_row_json("openvm", &adapter_chip, &gates, &adapter_locals);
+
+            let core_chip = get_air_name(self.core.air());
+            let core_locals = json!({
+                "from_pc": from_state.pc,
+                "payload_json": json!({ "core": &core_record }).to_string(),
+            })
+            .to_string();
+            fuzzer_utils::print_chip_row_json("openvm", &core_chip, &gates, &core_locals);
+        }
+"""
+    pos = m.end()
+    contents = contents[:pos] + insert + contents[pos:]
+    integration_api.write_text(contents)
+
+
+def _patch_integration_api_microops(*, openvm_install_path: Path, commit_or_branch: str) -> None:
+    resolved_commit = resolve_openvm_commit(commit_or_branch)
+
+    integration_api = openvm_install_path / "crates" / "vm" / "src" / "arch" / "integration_api.rs"
+    if not integration_api.exists():
+        return
+
+    if resolved_commit in {OPENVM_BENCHMARK_336F_COMMIT, OPENVM_BENCHMARK_F038_COMMIT}:
+        _patch_audit_integration_api_for_microops(openvm_install_path)
+        return
+
+    contents = integration_api.read_text()
+
+    # Ensure we can call fuzzer_utils even if assert-rewrite didn't touch this file.
+    if "use fuzzer_utils;" not in contents:
+        header_end = contents.find("\n\n")
+        if header_end > 0:
+            integration_api.write_text(
+                contents[:header_end] + "\nuse fuzzer_utils;\n" + contents[header_end:]
+            )
+            contents = integration_api.read_text()
+
+    # Ensure serde_json::json is available.
+    if "use serde_json::json;" not in contents:
+        replace_in_file(
+            integration_api,
+            [
+                (
+                    r"use serde::\{de::DeserializeOwned, Deserialize, Serialize\};",
+                    "use serde::{de::DeserializeOwned, Deserialize, Serialize};\nuse serde_json::json;",
+                )
+            ],
+        )
+        contents = integration_api.read_text()
+
+    # Repair a prior bad injection that left a literal `\1` line in the file.
+    if "\n\\1\n" in contents:
+        integration_api.write_text(contents.replace("\n\\1\n", "\n"))
+        contents = integration_api.read_text()
+
+    if 'fuzzer_utils::print_chip_row_json("openvm"' in contents:
+        return
+
+    replace_in_file(
+        integration_api,
+        [
+            (
+                r"^(\s*self\.adapter\s*\.postprocess\(\s*memory,\s*instruction,\s*from_state,\s*output,\s*&read_record\s*\)\?\s*;)\s*$",
+                r"""\1
+
+        if fuzzer_utils::is_trace_logging() {
+            // NOTE: We emit ChipRow-style micro-ops, i.e. per-chip payloads. This matches
+            // the beak-core interface (MicroOp = ChipRow | InteractionBase).
+            let gates = json!({"is_real": 1}).to_string();
+
+            let adapter_chip = get_air_name(self.adapter.air());
+            let adapter_locals = json!({
+                "from_pc": from_state.pc,
+                "to_pc": to_state.pc,
+                "from_timestamp": from_state.timestamp,
+                "to_timestamp": to_state.timestamp,
+                "payload_json": json!({
+                    "adapter_read": &read_record,
+                    "adapter_write": &write_record,
+                })
+                .to_string(),
+            })
+            .to_string();
+            fuzzer_utils::print_chip_row_json("openvm", &adapter_chip, &gates, &adapter_locals);
+
+            let core_chip = get_air_name(self.core.air());
+            let core_locals = json!({
+                "from_pc": from_state.pc,
+                "payload_json": json!({ "core": &core_record }).to_string(),
+            })
+            .to_string();
+            fuzzer_utils::print_chip_row_json("openvm", &core_chip, &gates, &core_locals);
+        }""",
+            ),
+        ],
+        flags=re.MULTILINE,
+    )
+
+
+# -------------------------------------------------------------------------------------------------
+# patch_padding_samples.py (merged)
+# -------------------------------------------------------------------------------------------------
+
+
+def _patch_audit_integration_api_for_padding_samples(openvm_install_path: Path) -> None:
+    """
+    Audit snapshots (336/f038) build padded traces in `VmChipWrapper::generate_air_proof_input`.
+
+    Sample a few padding rows (which are all-zero) as inactive ChipRows (is_real=0) and emit an
+    effectful Interaction anchored to them. This enables InactiveRowEffectsBucket without dumping
+    every padding row.
+    """
+
+    integration_api = openvm_install_path / "crates" / "vm" / "src" / "arch" / "integration_api.rs"
+    if not integration_api.exists():
+        return
+
+    contents = integration_api.read_text()
+    # Repair older insertion that passed `&str` to `update_hints` (signature expects `&String`).
+    if 'update_hints(0, "PADDING", "PADDING")' in contents:
+        contents = contents.replace(
+            'fuzzer_utils::update_hints(0, "PADDING", "PADDING");',
+            'let hint = "PADDING".to_string();\n            fuzzer_utils::update_hints(0, &hint, &hint);',
+        )
+        integration_api.write_text(contents)
+        contents = integration_api.read_text()
+
+    # Repair older insertion that borrowed `self` after `self.records` was moved.
+    if 'let chip = format!("VmChipWrapper{}", self.air_name());' in contents:
+        contents = contents.replace(
+            'let chip = format!("VmChipWrapper{}", self.air_name());',
+            'let chip = "VmChipWrapper".to_string();',
+        )
+        integration_api.write_text(contents)
+        contents = integration_api.read_text()
+
+    # Repair older insertion that references `beak_padding_chip` without declaration.
+    if "let chip = beak_padding_chip.clone();" in contents:
+        contents = contents.replace(
+            "let chip = beak_padding_chip.clone();",
+            'let chip = "VmChipWrapper".to_string();',
+        )
+        integration_api.write_text(contents)
+        contents = integration_api.read_text()
+
+    if "PaddingSample" in contents:
+        return
+
+    # Ensure we can call fuzzer_utils even if assert-rewrite didn't touch this file.
+    if "use fuzzer_utils;" not in contents:
+        header_end = contents.find("\n\n")
+        if header_end > 0:
+            contents = contents[:header_end] + "\nuse fuzzer_utils;\n" + contents[header_end:]
+
+    # Ensure serde_json::json is available (we emit small JSON payloads).
+    if "use serde_json::json;" not in contents:
+        contents, n = re.subn(
+            r"^use serde::\{[^}]*\};\s*$",
+            lambda m: m.group(0) + "\nuse serde_json::json;",
+            contents,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if n == 0:
+            # Best-effort: insert after the last `use` in the header.
+            header_end = contents.find("\n\n")
+            if header_end > 0:
+                contents = contents[:header_end] + "\nuse serde_json::json;\n" + contents[header_end:]
+
+    # Insert after finalize, where `height/num_records/width` are in scope and padding rows exist.
+    anchor = "self.core.finalize(&mut trace, num_records);"
+    insert = r"""
+
+        // beak-fuzz: sample a few inactive (padding) rows for op-agnostic inactive-row analysis.
+        if fuzzer_utils::is_trace_logging() && height > num_records {
+            let hint = "PADDING".to_string();
+            fuzzer_utils::update_hints(0, &hint, &hint);
+            fuzzer_utils::inc_step();
+
+            let chip = "VmChipWrapper".to_string();
+            let max_samples: usize = 3;
+            let mut emitted: usize = 0;
+            while emitted < max_samples && (num_records + emitted) < height {
+                let row_idx = num_records + emitted;
+                let gates = json!({"is_real": 0}).to_string();
+                let locals = json!({
+                    "chip": chip,
+                    "row_idx": row_idx,
+                    "real_rows": num_records,
+                    "total_rows": height,
+                    "width": width,
+                })
+                .to_string();
+                fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+                let anchor_row_id = fuzzer_utils::get_last_row_id();
+                let payload = json!({"chip": chip, "row_idx": row_idx}).to_string();
+                fuzzer_utils::print_interaction_json(
+                    "PaddingSample",
+                    "send",
+                    "inactive_row",
+                    &anchor_row_id,
+                    &payload,
+                    1,
+                    "const",
+                );
+                emitted += 1;
+            }
+        }
+"""
+
+    if anchor not in contents:
+        # Older/variant layouts: don't fail hard; just skip.
+        integration_api.write_text(contents)
+        return
+    contents = contents.replace(anchor, anchor + insert)
+    integration_api.write_text(contents)
+
+
+def _patch_regzero_record_arena_for_padding_samples(openvm_install_path: Path) -> None:
+    """
+    regzero snapshot pads traces via `MatrixRecordArena::into_matrix`, truncating to the next power
+    of two and leaving unused rows as all-zeros. Sample a few padding rows there.
+    """
+
+    path = openvm_install_path / "crates" / "vm" / "src" / "arch" / "record_arena.rs"
+    if not path.exists():
+        return
+
+    contents = path.read_text()
+    # Repair older insertion that passed `&str` to `update_hints` (signature expects `&String`).
+    if 'update_hints(0, "PADDING", "PADDING")' in contents:
+        contents = contents.replace(
+            'fuzzer_utils::update_hints(0, "PADDING", "PADDING");',
+            'let hint = "PADDING".to_string();\n            fuzzer_utils::update_hints(0, &hint, &hint);',
+        )
+        path.write_text(contents)
+
+    if "PaddingSample" in contents:
+        return
+
+    anchor = "let height = next_power_of_two_or_zero(rows_used);"
+    insert = r"""
+
+        // beak-fuzz: sample a few inactive (padding) rows for op-agnostic inactive-row analysis.
+        if fuzzer_utils::is_trace_logging() && height > rows_used {
+            let hint = "PADDING".to_string();
+            fuzzer_utils::update_hints(0, &hint, &hint);
+            fuzzer_utils::inc_step();
+
+            let chip = format!("MatrixRecordArena(width={})", width);
+            let max_samples: usize = 3;
+            let mut emitted: usize = 0;
+            while emitted < max_samples && (rows_used + emitted) < height {
+                let row_idx = rows_used + emitted;
+                let gates = "{\"is_real\":0}".to_string();
+                let locals = format!(
+                    "{{\"chip\":\"{}\",\"row_idx\":{},\"real_rows\":{},\"total_rows\":{},\"width\":{}}}",
+                    chip, row_idx, rows_used, height, width
+                );
+                fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+                let anchor_row_id = fuzzer_utils::get_last_row_id();
+                let payload = format!("{{\"chip\":\"{}\",\"row_idx\":{}}}", chip, row_idx);
+                fuzzer_utils::print_interaction_json(
+                    "PaddingSample",
+                    "send",
+                    "inactive_row",
+                    &anchor_row_id,
+                    &payload,
+                    1,
+                    "const",
+                );
+                emitted += 1;
+            }
+        }
+"""
+
+    if anchor not in contents:
+        return
+    contents = contents.replace(anchor, anchor + insert)
+    path.write_text(contents)
+
+
+def _patch_padding_samples(*, openvm_install_path: Path, commit_or_branch: str) -> None:
+    resolved_commit = resolve_openvm_commit(commit_or_branch)
+
+    if resolved_commit in {OPENVM_BENCHMARK_336F_COMMIT, OPENVM_BENCHMARK_F038_COMMIT}:
+        _patch_audit_integration_api_for_padding_samples(openvm_install_path)
+
+    if resolved_commit == OPENVM_BENCHMARK_REGZERO_COMMIT:
+        _patch_regzero_record_arena_for_padding_samples(openvm_install_path)
+
+
+# -------------------------------------------------------------------------------------------------
+# patch_segment_and_regzero_microops.py (merged)
+# -------------------------------------------------------------------------------------------------
 
 _OPENVM_SNAPSHOT_COMMITS = {
     OPENVM_BENCHMARK_REGZERO_COMMIT,
     OPENVM_BENCHMARK_336F_COMMIT,
     OPENVM_BENCHMARK_F038_COMMIT,
 }
-
-
-def apply(*, openvm_install_path: Path, commit_or_branch: str) -> None:
-    _patch_segment_and_regzero_microops(
-        openvm_install_path=openvm_install_path,
-        commit_or_branch=commit_or_branch,
-    )
 
 
 def _insert_after(contents: str, *, anchor: str, insert: str, guard: str) -> str:
@@ -51,29 +453,13 @@ def _patch_audit_segment_rs_for_microops(openvm_install_path: Path) -> None:
     Audit snapshots (336/f038) predate our template overwrite approach.
     Patch `crates/vm/src/arch/segment.rs` in-place to emit ChipRow + Interaction micro-ops.
     """
+
     segment_rs = openvm_install_path / "crates" / "vm" / "src" / "arch" / "segment.rs"
     if not segment_rs.exists():
         logger.info("segment.rs not found; skipping audit segment patch: %s", segment_rs)
         return
 
     contents = segment_rs.read_text()
-
-    # Repair a prior bad patch that inserted `inc_step()` *after* the `(opcode, dsl_instr)` tuple,
-    # breaking the block's return type.
-    bad_block = (
-        "(opcode, dsl_instr.cloned())\n\n"
-        "                // Advance \"op index\" for micro-op grouping.\n"
-        "                fuzzer_utils::print_trace_info();\n"
-        "                fuzzer_utils::inc_step();\n\n"
-    )
-    if bad_block in contents:
-        good_block = (
-            "\n                // Advance \"op index\" for micro-op grouping.\n"
-            "                fuzzer_utils::print_trace_info();\n"
-            "                fuzzer_utils::inc_step();\n\n"
-            "                (opcode, dsl_instr.cloned())\n"
-        )
-        contents = contents.replace(bad_block, good_block)
 
     # Ensure imports used by the injected blocks.
     if "use serde_json::json;" not in contents:
@@ -88,11 +474,7 @@ def _patch_audit_segment_rs_for_microops(openvm_install_path: Path) -> None:
             if header_end > 0:
                 header = contents[:header_end]
                 if "use serde_json::json;" not in header:
-                    contents = (
-                        contents[:header_end]
-                        + "\nuse serde_json::json;\n"
-                        + contents[header_end:]
-                    )
+                    contents = contents[:header_end] + "\nuse serde_json::json;\n" + contents[header_end:]
 
     if "use crate::system::memory::online::MemoryLogEntry;" not in contents:
         # Insert after existing `use crate::{ ... system::memory::MemoryImage, ... };` block if present.
@@ -377,9 +759,10 @@ def _patch_audit_segment_rs_for_microops(openvm_install_path: Path) -> None:
     contents = _insert_before(
         contents,
         anchor="(opcode, dsl_instr.cloned())",
-        guard="fuzzer_utils::inc_step()",
+        guard="beak_fuzz_op_step_v1",
         insert=r"""
 
+                // beak_fuzz_op_step_v1
                 // Advance "op index" for micro-op grouping.
                 fuzzer_utils::print_trace_info();
                 fuzzer_utils::inc_step();
@@ -389,11 +772,10 @@ def _patch_audit_segment_rs_for_microops(openvm_install_path: Path) -> None:
     segment_rs.write_text(contents)
 
 
+# The remainder of patch_segment_and_regzero_microops.py is large; keep it verbatim for stability.
+# (Functions below are copied without semantic changes.)
+
 def _patch_regzero_interpreter_preflight_for_microops(openvm_install_path: Path) -> None:
-    """
-    regzero snapshot uses the preflight interpreter loop for trace-generation. Patch it to emit
-    ProgramChip + ProgramBus and a lightweight ExecutionBus edge per instruction.
-    """
     path = (
         openvm_install_path
         / "crates"
@@ -406,7 +788,6 @@ def _patch_regzero_interpreter_preflight_for_microops(openvm_install_path: Path)
         return
 
     contents = path.read_text()
-    # Idempotence: allow incremental additions (e.g. later adding Exec(...) chip markers).
     if (
         "ProgramChip" in contents
         and "ProgramBus" in contents
@@ -419,19 +800,16 @@ def _patch_regzero_interpreter_preflight_for_microops(openvm_install_path: Path)
     ):
         return
 
-    # Ensure serde_json::json import.
     if "use serde_json::json;" not in contents:
         header_end = contents.find("\n\n")
         if header_end > 0:
             contents = contents[:header_end] + "\nuse serde_json::json;\n" + contents[header_end:]
 
-    # Ensure we can call fuzzer_utils even if assert-rewrite didn't touch this file.
     if "use fuzzer_utils;" not in contents:
         header_end = contents.find("\n\n")
         if header_end > 0:
             contents = contents[:header_end] + "\nuse fuzzer_utils;\n" + contents[header_end:]
 
-    # Pre-exec: ProgramChip + ProgramBus.
     contents = _insert_after(
         contents,
         anchor='tracing::trace!("pc: {pc:#x} | {:?}", pc_entry.insn);',
@@ -493,7 +871,6 @@ def _patch_regzero_interpreter_preflight_for_microops(openvm_install_path: Path)
 """,
     )
 
-    # Per-instruction executor chip marker (may be added later than ProgramChip patch).
     contents = _insert_after(
         contents,
         anchor="if fuzzer_utils::is_trace_logging() {",
@@ -501,12 +878,6 @@ def _patch_regzero_interpreter_preflight_for_microops(openvm_install_path: Path)
         insert=r"""
             // Per-instruction "main chip" marker at the executor granularity.
             // regzero-era preflight execution does not expose adapter/core splits here.
-            // TODO(beak-fuzz): If we want ChipRow outputs for concrete AIRs like
-            // `Rv32JalrAdapterAir` / `Rv32BranchAdapterAir` (with their real column/locals
-            // payloads), we must instrument the trace build/filler stage that materializes those
-            // AIR rows (e.g. the rv32im adapter fillers / tracegen). The preflight interpreter
-            // only sees decoded `Instruction` and executor dispatch, so it cannot access the
-            // per-AIR row objects needed to print accurate ChipRow locals.
             let opcode_name = executor.get_opcode_name(pc_entry.insn.opcode.as_usize());
             let gates = json!({"is_real": 1}).to_string();
             let locals = json!({
@@ -530,7 +901,6 @@ def _patch_regzero_interpreter_preflight_for_microops(openvm_install_path: Path)
 """,
     )
 
-    # Post-exec: ExecutionBus edge + per-op increment.
     contents = _insert_after(
         contents,
         anchor="executor.execute(vm_state_mut, &pc_entry.insn)?;",
@@ -593,16 +963,11 @@ def _patch_regzero_interpreter_preflight_for_microops(openvm_install_path: Path)
 
 
 def _patch_regzero_tracegen_extensions_for_microops(openvm_install_path: Path) -> None:
-    """
-    regzero snapshot: tracegen entry point has access to per-AIR (chip) names, which we expose via
-    `fuzzer_utils::set_current_air_name(...)` so deeper fillers can label micro-ops consistently.
-    """
     path = openvm_install_path / "crates" / "vm" / "src" / "arch" / "extensions.rs"
     if not path.exists():
         return
 
     contents = path.read_text()
-    # Repair: earlier injection used `set_current_air_name(air_name)` but the API expects `&str`.
     if "fuzzer_utils::set_current_air_name(air_name);" in contents:
         contents = contents.replace(
             "fuzzer_utils::set_current_air_name(air_name);",
@@ -629,11 +994,41 @@ def _patch_regzero_tracegen_extensions_for_microops(openvm_install_path: Path) -
     path.write_text(contents)
 
 
+def _insert_before_fn_close(contents: str, *, fn_name: str, insert: str, guard: str) -> str:
+    if guard in contents:
+        return contents
+    needle = f"fn {fn_name}"
+    start = contents.find(needle)
+    if start < 0:
+        raise RuntimeError(f"function not found for injection: {needle!r}")
+    brace_open = contents.find("{", start)
+    if brace_open < 0:
+        raise RuntimeError(f"function body not found for injection: {needle!r}")
+    depth = 0
+    for i in range(brace_open, len(contents)):
+        ch = contents[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return contents[:i] + insert + contents[i:]
+    raise RuntimeError(f"unterminated function body for injection: {needle!r}")
+
+
+def _ensure_serde_json_import(path: Path) -> None:
+    if not path.exists():
+        return
+    c = path.read_text()
+    if "use serde_json::json;" in c:
+        return
+    header_end = c.find("\n\n")
+    if header_end > 0:
+        c = c[:header_end] + "\nuse serde_json::json;\n" + c[header_end:]
+        path.write_text(c)
+
+
 def _patch_regzero_rv32im_adapters_for_microops(openvm_install_path: Path) -> None:
-    """
-    regzero snapshot: emit ChipRow micro-ops for key RV32IM adapter AIRs from their
-    AdapterTraceFiller::fill_trace_row implementations.
-    """
     branch_path = (
         openvm_install_path
         / "extensions"
@@ -665,7 +1060,6 @@ def _patch_regzero_rv32im_adapters_for_microops(openvm_install_path: Path) -> No
 
     if branch_path.exists():
         c = branch_path.read_text()
-        # Drop any prior beak-fuzz capture/emit blocks (keep the rest intact).
         c = re.sub(
             r"\n\s*// beak_fuzz_emit_chip_row_v2.*?\n\s*let beak_from_pc = .*?;\n\s*let beak_from_timestamp = .*?;\n\s*let beak_rs1_ptr = .*?;\n\s*let beak_rs2_ptr = .*?;\n",
             "\n",
@@ -681,8 +1075,6 @@ def _patch_regzero_rv32im_adapters_for_microops(openvm_install_path: Path) -> No
         branch_path.write_text(c)
 
         c = branch_path.read_text()
-        # Ensure v3 capture block is present and up-to-date (older injections captured too few fields).
-        # Rewrite any existing v3 capture region (marker -> adapter_row borrow) to keep it stable.
         if "beak_fuzz_emit_chip_row_v3_capture" in c:
             c = re.sub(
                 r"\n(?P<indent>\s*)// beak_fuzz_emit_chip_row_v3_capture[\s\S]*?\n(?P=indent)let adapter_row:",
@@ -703,7 +1095,6 @@ def _patch_regzero_rv32im_adapters_for_microops(openvm_install_path: Path) -> No
                 flags=re.DOTALL,
             )
         else:
-            # Capture record fields early (before overwriting the row) so we can print them later.
             c = _insert_after(
                 c,
                 anchor="unsafe { get_record_from_slice(&mut adapter_row, ()) };",
@@ -721,7 +1112,6 @@ def _patch_regzero_rv32im_adapters_for_microops(openvm_install_path: Path) -> No
 """,
             )
 
-        # Ensure v3 emit block is present. Older injections sometimes left only the marker comment.
         if 'let chip = "Rv32BranchAdapterAir"' not in c:
             if "beak_fuzz_emit_chip_row_v3_emit" in c:
                 c = re.sub(
@@ -750,7 +1140,6 @@ def _patch_regzero_rv32im_adapters_for_microops(openvm_install_path: Path) -> No
                     flags=re.MULTILINE,
                 )
             else:
-                # Emit after the last assignment.
                 c = _insert_after(
                     c,
                     anchor="adapter_row.rs2_ptr = F::from_canonical_u32(record.rs2_ptr);",
@@ -795,45 +1184,6 @@ def _patch_regzero_rv32im_adapters_for_microops(openvm_install_path: Path) -> No
             flags=re.DOTALL,
         )
         jalr_path.write_text(c)
-
-
-def _insert_before_fn_close(contents: str, *, fn_name: str, insert: str, guard: str) -> str:
-    """
-    Insert `insert` right before the closing `}` of `fn <fn_name>(...) { ... }`.
-    Uses a small brace-matching scan to avoid brittle regexes across OpenVM snapshots.
-    """
-    if guard in contents:
-        return contents
-    needle = f"fn {fn_name}"
-    start = contents.find(needle)
-    if start < 0:
-        raise RuntimeError(f"function not found for injection: {needle!r}")
-    brace_open = contents.find("{", start)
-    if brace_open < 0:
-        raise RuntimeError(f"function body not found for injection: {needle!r}")
-    depth = 0
-    for i in range(brace_open, len(contents)):
-        ch = contents[i]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                # Insert right before this `}`.
-                return contents[:i] + insert + contents[i:]
-    raise RuntimeError(f"unterminated function body for injection: {needle!r}")
-
-
-def _ensure_serde_json_import(path: Path) -> None:
-    if not path.exists():
-        return
-    c = path.read_text()
-    if "use serde_json::json;" in c:
-        return
-    header_end = c.find("\n\n")
-    if header_end > 0:
-        c = c[:header_end] + "\nuse serde_json::json;\n" + c[header_end:]
-        path.write_text(c)
 
 
 def _patch_regzero_rv32im_more_adapters_for_microops(openvm_install_path: Path) -> None:
@@ -1316,9 +1666,6 @@ def _patch_regzero_rv32im_cores_for_microops(openvm_install_path: Path) -> None:
 def _patch_segment_and_regzero_microops(*, openvm_install_path: Path, commit_or_branch: str) -> None:
     resolved_commit = resolve_openvm_commit(commit_or_branch)
 
-    # segment.rs:
-    # - For older audit snapshots we patch in-place (file layout differs).
-    # - For main/ca36de we overwrite from a known template.
     if resolved_commit in {OPENVM_BENCHMARK_336F_COMMIT, OPENVM_BENCHMARK_F038_COMMIT}:
         _patch_audit_segment_rs_for_microops(openvm_install_path)
     elif resolved_commit in _OPENVM_SNAPSHOT_COMMITS:
@@ -1338,8 +1685,21 @@ def _patch_segment_and_regzero_microops(*, openvm_install_path: Path, commit_or_
     if resolved_commit in _OPENVM_SNAPSHOT_COMMITS:
         return
 
-    overwrite_file(
-        openvm_install_path / "crates" / "vm" / "src" / "arch" / "segment.rs",
-        openvm_crates_vm_src_arch_segment_rs(resolved_commit),
+    # We intentionally do not overwrite `segment.rs` from a template for non-snapshot commits.
+    # The previous template lived under `openvm_fuzzer/patches/injection_sources/`, which has been
+    # removed to keep the installer simplest; if/when we reintroduce templated overwrites (e.g.
+    # Pass 4 work), wire it back in here.
+    logger.info("segment.rs template overwrite disabled; skipping for %s", resolved_commit)
+
+
+def apply(*, openvm_install_path: Path, commit_or_branch: str) -> None:
+    _patch_integration_api_microops(
+        openvm_install_path=openvm_install_path,
+        commit_or_branch=commit_or_branch,
+    )
+    _patch_padding_samples(openvm_install_path=openvm_install_path, commit_or_branch=commit_or_branch)
+    _patch_segment_and_regzero_microops(
+        openvm_install_path=openvm_install_path,
+        commit_or_branch=commit_or_branch,
     )
 

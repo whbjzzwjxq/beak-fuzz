@@ -1,6 +1,5 @@
-use std::sync::Arc;
-
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use clap::{Arg, Command};
 
@@ -26,7 +25,7 @@ fn main() {
                 .long("bin")
                 .help("Hex encoded RISC-V instruction word. Can be specified multiple times, or pass a space/comma separated list.")
                 .num_args(1..)
-                .action(clap::ArgAction::Append)
+                .action(clap::ArgAction::Append),
         )
         .arg(
             Arg::new("print_micro_ops")
@@ -34,7 +33,9 @@ fn main() {
                 .help("Parse captured <record> JSON into beak-core MicroOp and print them.")
                 .action(clap::ArgAction::SetTrue),
         )
-        .after_help("Example:\n  beak-trace --bin 12345017 --bin 00000533\n  beak-trace --bin \"12345017 00000533\"")
+        .after_help(
+            "Example:\n  beak-trace --bin 12345017 --bin 00000533\n  beak-trace --bin \"12345017 00000533\"",
+        )
         .get_matches();
 
     let mut input_words = Vec::new();
@@ -292,9 +293,21 @@ fn micro_ops_from_json_logs(json_logs: &[serde_json::Value]) -> Vec<MicroOp> {
 
         match micro_op_type {
             "chip_row" => {
-                let row_id = payload.get("row_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let domain = payload.get("domain").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let chip = payload.get("chip").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let row_id = payload
+                    .get("row_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let domain = payload
+                    .get("domain")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let chip = payload
+                    .get("chip")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 if row_id.is_empty() || domain.is_empty() || chip.is_empty() {
                     continue;
                 }
@@ -338,12 +351,21 @@ fn micro_ops_from_json_logs(json_logs: &[serde_json::Value]) -> Vec<MicroOp> {
                 base.kind = parse_interaction_kind(payload.get("kind").and_then(|v| v.as_str()));
 
                 if let Some(mult) = payload.get("multiplicity").and_then(|v| v.as_object()) {
-                    let value = mult.get("value").and_then(|v| v.as_u64()).map(|n| GateValue::from(n));
-                    let ref_ = mult.get("ref").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    let value = mult
+                        .get("value")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| GateValue::from(n));
+                    let ref_ = mult
+                        .get("ref")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
                     base.multiplicity = Some(InteractionMultiplicity { value, ref_ });
                 }
 
-                let payload_json = payload.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                let payload_json = payload
+                    .get("payload")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 let h = fnv1a64(payload_json.to_string().as_bytes());
                 let ci = CustomInteraction {
                     base,
@@ -376,10 +398,7 @@ fn print_micro_op_line(idx: usize, uop: &MicroOp) {
         }
         MicroOp::Interaction(i) => {
             let base = i.base();
-            let anchor = base
-                .anchor_row_id
-                .as_deref()
-                .unwrap_or("-");
+            let anchor = base.anchor_row_id.as_deref().unwrap_or("-");
             println!(
                 "  [{idx}] interaction kind={:?} table_id={} io={:?} scope={:?} anchor_row_id={}",
                 base.kind, base.table_id, base.io, base.scope, anchor
@@ -387,3 +406,4 @@ fn print_micro_op_line(idx: usize, uop: &MicroOp) {
         }
     }
 }
+

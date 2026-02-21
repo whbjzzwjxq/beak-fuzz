@@ -1,4 +1,34 @@
-.PHONY: extract-initial-seeds openvm-example-x0
+.PHONY: extract-initial-seeds openvm-install openvm-build openvm-run openvm-example-x0
+
+# Commit selector (required for OpenVM targets).
+#
+# Usage examples:
+#   make openvm-install COMMIT=bmk-regzero
+#   make openvm-build COMMIT=bmk-regzero BIN=beak-trace
+#   make openvm-run   COMMIT=bmk-regzero BIN=beak-trace ARGS='--bin "12345017 00000533"'
+#
+# COMMIT can be a full SHA or an alias defined in:
+#   beak-py/projects/openvm-fuzzer/openvm_fuzzer/settings.py
+COMMIT ?=
+BIN ?= beak-trace
+ARGS ?=
+
+OPENVM_PYTHONPATH := beak-py/projects/openvm-fuzzer
+
+define _require_commit
+	@if [ -z "$(COMMIT)" ]; then \
+		echo "error: COMMIT is required (full SHA or alias, e.g. bmk-regzero)"; \
+		exit 2; \
+	fi
+endef
+
+define _openvm_resolve
+PYTHONPATH="$(OPENVM_PYTHONPATH)" python -c 'import sys; arg=sys.argv[1]; exec("""\ntry:\n  from openvm_fuzzer.settings import resolve_openvm_commit\n  print(resolve_openvm_commit(arg))\nexcept Exception:\n  import re\n  if re.fullmatch(r"[0-9a-f]{40}", arg):\n    print(arg)\n  else:\n    raise\n""")' "$(COMMIT)"
+endef
+
+define _openvm_project_dir
+projects/openvm-$(shell $(_openvm_resolve))
+endef
 
 extract-initial-seeds:
 	@mkdir -p storage/fuzzing_seeds
@@ -6,8 +36,23 @@ extract-initial-seeds:
 		-i storage/riscv-tests-artifacts \
 		-o storage/fuzzing_seeds/initial.jsonl
 
+openvm-install:
+	$(_require_commit)
+	cd beak-py && make install
+	cd beak-py && uv run openvm-fuzzer install --commit-or-branch "$(COMMIT)"
+
+openvm-build:
+	$(_require_commit)
+	@echo "Building $(_openvm_project_dir) (BIN=$(BIN))"
+	cd "$(_openvm_project_dir)" && cargo build --bin "$(BIN)"
+
+openvm-run:
+	$(_require_commit)
+	@echo "Running $(_openvm_project_dir) (BIN=$(BIN))"
+	cd "$(_openvm_project_dir)" && cargo run --bin "$(BIN)" -- $(ARGS)
+
 # Example: run a seed that writes x0 (should detect mismatch).
 # Prereq: install the OpenVM snapshot first:
-#   cd beak-py && make install && uv run openvm-fuzzer install --commit-or-branch bmk-regzero
+#   make openvm-install COMMIT=bmk-regzero
 openvm-example-x0:
-	cd projects/openvm && cargo run --bin beak-trace -- --bin "12345017 00000533"
+	@$(MAKE) openvm-run COMMIT=bmk-regzero BIN=beak-trace ARGS='--bin "12345017 00000533"'

@@ -12,12 +12,10 @@ Typical structure:
 ```
 beak-py/
   libs/
-    beak-core/               Platform-independent models (RISC-V, trace schema, buckets)
     zkvm-fuzzer-utils/       Shared utilities used by project installers/patchers
   projects/
     openvm-fuzzer/           OpenVM snapshot materialization + patch pipeline
     <other-zkvm>-fuzzer/     Similar per-zkVM packages (optional / evolving)
-  scripts/                   End-to-end workflows (historical; may be superseded)
   out/                       Materialized snapshots and generated artifacts
 ```
 
@@ -33,6 +31,8 @@ beak-py/
   - Python: *fetch + patch + stage* zkVM sources
   - Rust: *execute + prove + verify + compare + analyze traces*
 
+Rust-side "facts/standards" (trace schema, buckets, invariants) live in `crates/beak-core`.
+
 ## OpenVM flow (current primary target)
 
 The OpenVM support lives in `projects/openvm-fuzzer/openvm_fuzzer/`.
@@ -42,24 +42,24 @@ The OpenVM support lives in `projects/openvm-fuzzer/openvm_fuzzer/`.
 - Resolve a `--commit-or-branch` alias to a concrete commit.
 - Materialize `openvm-src` into:
   `out/openvm-<commit>/openvm-src/`
-- Apply patches from `openvm_fuzzer/patches/` onto that snapshot.
+- Apply a 3-pass patch pipeline (`openvm_fuzzer/passes/`) onto that snapshot.
 
 ### Patch steps
 
-Patches are plain Python modules under:
+The patch pipeline is grouped into 3 pass modules under:
 
-`projects/openvm-fuzzer/openvm_fuzzer/patches/`
+`projects/openvm-fuzzer/openvm_fuzzer/passes/`
 
-The install command applies a fixed list of patch `apply(...)` functions. Patches generally use
-simple text/file operations (write, overwrite, regex replace) and should avoid complex coupling
-to Rust in-memory structs.
+The install command applies all 3 passes in order. Each pass is implemented as a single
+`apply(openvm_install_path, commit_or_branch)` entrypoint that performs straightforward file edits
+(write, overwrite, regex replace) and should avoid complex coupling to Rust in-memory structs.
 
 ### fuzzer_utils crate template
 
 Some OpenVM-side instrumentation is delivered by *creating or overwriting* the
 `crates/fuzzer_utils` crate inside the snapshot using templates under:
 
-`projects/openvm-fuzzer/openvm_fuzzer/patches/fuzzer_utils_crate/`
+`projects/openvm-fuzzer/openvm_fuzzer/fuzzer_utils_crate/`
 
 This is the preferred place to inject helpers that the Rust runner can call (e.g. toggles,
 logging hooks, trace capture).
