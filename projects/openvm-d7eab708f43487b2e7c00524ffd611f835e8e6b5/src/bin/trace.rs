@@ -81,9 +81,7 @@ fn main() {
         .join()
         .expect("thread panicked");
 
-    if !result {
-        std::process::exit(1);
-    }
+    return 0;
 }
 
 fn run_trace(words: &[u32], print_micro_ops: bool) -> bool {

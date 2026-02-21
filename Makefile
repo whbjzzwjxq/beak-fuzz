@@ -14,6 +14,7 @@ BIN ?= beak-trace
 ARGS ?=
 
 OPENVM_PYTHONPATH := beak-py/projects/openvm-fuzzer
+PYTHON ?= python3
 
 define _require_commit
 	@if [ -z "$(COMMIT)" ]; then \
@@ -23,11 +24,7 @@ define _require_commit
 endef
 
 define _openvm_resolve
-PYTHONPATH="$(OPENVM_PYTHONPATH)" python -c 'import sys; arg=sys.argv[1]; exec("""\ntry:\n  from openvm_fuzzer.settings import resolve_openvm_commit\n  print(resolve_openvm_commit(arg))\nexcept Exception:\n  import re\n  if re.fullmatch(r"[0-9a-f]{40}", arg):\n    print(arg)\n  else:\n    raise\n""")' "$(COMMIT)"
-endef
-
-define _openvm_project_dir
-projects/openvm-$(shell $(_openvm_resolve))
+PYTHONPATH="$(OPENVM_PYTHONPATH)" $(PYTHON) -c 'import sys; arg=sys.argv[1]; exec("""\ntry:\n  from openvm_fuzzer.settings import resolve_openvm_commit\n  print(resolve_openvm_commit(arg))\nexcept Exception:\n  import re\n  if re.fullmatch(r\"[0-9a-f]{40}\", arg):\n    print(arg)\n  else:\n    raise\n""")' "$(COMMIT)"
 endef
 
 extract-initial-seeds:
@@ -43,13 +40,17 @@ openvm-install:
 
 openvm-build:
 	$(_require_commit)
-	@echo "Building $(_openvm_project_dir) (BIN=$(BIN))"
-	cd "$(_openvm_project_dir)" && cargo build --bin "$(BIN)"
+	@resolved="$$( $(_openvm_resolve) )" && \
+	proj="projects/openvm-$${resolved}" && \
+	echo "Building $${proj} (BIN=$(BIN))" && \
+	cd "$${proj}" && cargo build --bin "$(BIN)"
 
 openvm-run:
 	$(_require_commit)
-	@echo "Running $(_openvm_project_dir) (BIN=$(BIN))"
-	cd "$(_openvm_project_dir)" && cargo run --bin "$(BIN)" -- $(ARGS)
+	@resolved="$$( $(_openvm_resolve) )" && \
+	proj="projects/openvm-$${resolved}" && \
+	echo "Running $${proj} (BIN=$(BIN))" && \
+	cd "$${proj}" && cargo run --bin "$(BIN)" -- $(ARGS)
 
 # Example: run a seed that writes x0 (should detect mismatch).
 # Prereq: install the OpenVM snapshot first:
