@@ -435,22 +435,7 @@ pub fn print_injection_info(
 ) {
     let state = GLOBAL_STATE.lock().unwrap();
     if state.trace_logging {
-        println!(
-            "<fault>{{\
-                \"step\":{}, \
-                \"pc\":{}, \
-                \"instruction\":\"{}\", \
-                \"assembly\":\"{}\", \
-                \"kind\":\"{}\", \
-                \"info\":\"{}\"\
-            }}</fault>",
-            state.step,
-            state.hint_pc,
-            state.hint_instruction,
-            state.hint_assembly,
-            inject_kind,
-            info,
-        );
+        let _ = (inject_kind, info);
     }
 }
 
@@ -464,7 +449,6 @@ pub fn print_trace_info() {
             "assembly": state.hint_assembly,
         });
         capture_json("trace", payload.clone());
-        println!("<trace>{}</trace>", serde_json::to_string(&payload).unwrap());
     }
 }
 
@@ -536,7 +520,6 @@ pub fn print_micro_ops_deltas(air_names: &Vec<String>, prev_heights: &Vec<usize>
         "chips": parse_json_or_string(&chips),
     });
     capture_json("record", payload.clone());
-    println!("<record>{}</record>", serde_json::to_string(&payload).unwrap());
 }
 
 pub fn print_micro_op_json(chip: &String, payload_json: &String) {
@@ -559,7 +542,6 @@ pub fn print_micro_op_json(chip: &String, payload_json: &String) {
         "payload": parse_json_or_string(payload_json),
     });
     capture_json("record", payload.clone());
-    println!("<record>{}</record>", serde_json::to_string(&payload).unwrap());
 }
 
 pub fn print_chip_row_json(domain: &str, chip: &String, gates_json: &str, values_json: &str) {
@@ -589,7 +571,6 @@ pub fn print_chip_row_json(domain: &str, chip: &String, gates_json: &str, values
         "values": parse_json_or_string(values_json),
     });
     capture_json("record", payload.clone());
-    println!("<record>{}</record>", serde_json::to_string(&payload).unwrap());
 }
 
 pub fn get_last_row_id() -> String {
@@ -626,7 +607,6 @@ pub fn print_interaction_json(
         "payload": parse_json_or_string(payload_json),
     });
     capture_json("record", payload.clone());
-    println!("<record>{}</record>", serde_json::to_string(&payload).unwrap());
 }
 
 

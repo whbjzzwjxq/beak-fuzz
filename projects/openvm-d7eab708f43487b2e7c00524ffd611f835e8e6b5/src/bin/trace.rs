@@ -30,7 +30,7 @@ fn main() {
         .arg(
             Arg::new("print_micro_ops")
                 .long("print-micro-ops")
-                .help("Parse captured <record> JSON into beak-core MicroOp and print them.")
+                .help("Parse captured JSON logs into beak-core MicroOp and print them.")
                 .action(clap::ArgAction::SetTrue),
         )
         .after_help(
@@ -382,26 +382,6 @@ fn micro_ops_from_json_logs(json_logs: &[serde_json::Value]) -> Vec<MicroOp> {
 }
 
 fn print_micro_op_line(idx: usize, uop: &MicroOp) {
-    match uop {
-        MicroOp::ChipRow(r) => {
-            let is_real = r
-                .gates
-                .get("is_real")
-                .map(|v| format!("{v:?}"))
-                .unwrap_or_else(|| "n/a".to_string());
-            println!(
-                "  [{idx}] chip_row kind={:?} domain={} chip={} row_id={} gates.is_real={}",
-                r.kind, r.domain, r.chip, r.row_id, is_real
-            );
-        }
-        MicroOp::Interaction(i) => {
-            let base = i.base();
-            let anchor = base.anchor_row_id.as_deref().unwrap_or("-");
-            println!(
-                "  [{idx}] interaction kind={:?} table_id={} io={:?} scope={:?} anchor_row_id={}",
-                base.kind, base.table_id, base.io, base.scope, anchor
-            );
-        }
-    }
+    println!("  [{idx}] {uop:#?}");
 }
 
