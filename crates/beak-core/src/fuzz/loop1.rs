@@ -14,6 +14,7 @@ use crate::fuzz::jsonl::{BugRecord, CorpusRecord, JsonlWriter};
 use crate::fuzz::seed::FuzzingSeed;
 use crate::rv32im::instruction::RV32IMInstruction;
 use crate::rv32im::oracle::RISCVOracle;
+use crate::trace::trace::{sorted_bucket_signatures, OwnedTrace};
 
 use super::mutators::SeedMutator;
 
@@ -48,14 +49,12 @@ pub struct Loop1Outputs {
 
 #[derive(Debug, Clone, Default)]
 pub struct BackendEval {
-    /// Optional list of matched bucket hit signatures.
-    /// This should use the same convention as `BucketHit::signature()` (currently `bucket_id`).
-    pub bucket_sigs: Vec<String>,
-    /// Optional precomputed signature if bucket signatures are not available.
-    pub bucket_sig: Option<String>,
+    /// Backend-produced trace for this run (may be empty on error / best-effort paths).
+    pub trace: OwnedTrace,
 
     pub micro_ops_len: usize,
     pub op_count: usize,
+    /// Best-effort bucket hit count (should match `trace.bucket_hits.len()` when populated).
     pub bucket_hit_count: usize,
     pub final_regs: Option<[u32; 32]>,
     pub backend_error: Option<String>,
@@ -131,22 +130,23 @@ fn mismatch_regs(oracle: &[u32; 32], prover: &[u32; 32]) -> Vec<(u32, u32, u32)>
 
 /// Canonicalize bucket hit signatures into a single stable signature string.
 ///
-/// - Deduplicates signatures
-/// - Sorts lexicographically
-/// - Joins with '\n'
+/// Contract:
+/// - Input must already be sorted canonically (by `BucketType` order, then signature string).
+/// - Deduplicates while preserving the input order.
+/// - Joins with '\n'.
 fn canonical_bucket_sig(sigs: &[String]) -> String {
-    let mut uniq: Vec<&str> = {
-        let mut s = HashSet::<&str>::new();
-        for sig in sigs {
-            let t = sig.trim();
-            if !t.is_empty() {
-                s.insert(t);
-            }
+    let mut seen = HashSet::<&str>::new();
+    let mut out: Vec<&str> = Vec::new();
+    for sig in sigs {
+        let t = sig.trim();
+        if t.is_empty() {
+            continue;
         }
-        s.into_iter().collect()
-    };
-    uniq.sort_unstable();
-    uniq.join("\n")
+        if seen.insert(t) {
+            out.push(t);
+        }
+    }
+    out.join("\n")
 }
 
 fn load_initial_seeds(
@@ -404,10 +404,12 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
             .unwrap_or_default();
 
         let eval = backend.collect_eval();
-        let sig = if !eval.bucket_sigs.is_empty() {
-            canonical_bucket_sig(&eval.bucket_sigs)
+        let bucket_sigs = sorted_bucket_signatures(&eval.trace);
+        let sig = canonical_bucket_sig(&bucket_sigs);
+        let bucket_hit_count = if !eval.trace.bucket_hits.is_empty() {
+            eval.trace.bucket_hits.len()
         } else {
-            eval.bucket_sig.unwrap_or_default()
+            eval.bucket_hit_count
         };
 
         let timed_out = start.elapsed() > timeout;
@@ -417,7 +419,7 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
             bucket_sig: sig,
             micro_ops_len: eval.micro_ops_len,
             op_count: eval.op_count,
-            bucket_hit_count: eval.bucket_hit_count,
+            bucket_hit_count,
             mismatch_regs: mismatches.clone(),
             timed_out,
         };

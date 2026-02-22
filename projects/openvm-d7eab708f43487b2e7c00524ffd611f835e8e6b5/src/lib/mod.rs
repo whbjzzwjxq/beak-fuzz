@@ -7,6 +7,10 @@ pub mod trace;
 use serde::{Deserialize, Serialize};
 use strum::{EnumString, VariantNames};
 
+pub type Pc = u32;
+pub type Timestamp = u32;
+pub type FieldElement = u32;
+
 /// Address space for memory interactions (RAM, registers, volatile, I/O).
 #[derive(Debug, Clone, Copy, EnumString, VariantNames, Serialize, Deserialize)]
 #[strum(serialize_all = "lowercase")]
