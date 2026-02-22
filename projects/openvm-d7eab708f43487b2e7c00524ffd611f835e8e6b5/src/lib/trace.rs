@@ -1,166 +1,228 @@
+use std::collections::HashMap;
+
+use beak_core::trace::micro_ops::trace::Trace;
+
+use crate::chip_row::OpenVMChipRow;
+use crate::insn::OpenVMInsn;
+use crate::interaction::OpenVMInteraction;
+
 #[derive(Debug, Clone)]
 pub struct OpenVMTrace {
-    /// List of chip rows in the trace.
-    pub chip_rows: Vec<ChipRow>,
-    /// List of interactions in the trace.
-    pub interactions: Vec<Interaction>,
-    /// List of instructions in the trace.
-    pub instructions: Vec<Insn>,
+    instructions: Vec<OpenVMInsn>,
+    chip_rows: Vec<OpenVMChipRow>,
+    interactions: Vec<OpenVMInteraction>,
 
-    /// Below are indexed views (by table, by chip row id, by anchor, op_spans).
-    /// Map of interactions by table id.
-    pub interactions_by_table: HashMap<String, Vec<&Interaction>>,
-    /// Map of chip rows by id.
-    pub chip_rows_by_id: HashMap<String, &ChipRow>,
-    /// Map of chip rows by kind.
-    pub chip_rows_by_kind: HashMap<ChipRowKind, Vec<ChipRow>>,
-    /// Map of interactions by anchor row id.
-    pub interactions_by_anchor_row_id: HashMap<String, Vec<Interaction>>,
+    // ---- Global indexing by per-record `seq` (u64, stored as usize index) ----
+    insn_index_by_seq: Vec<Option<usize>>,
+    chip_row_index_by_seq: Vec<Option<usize>>,
+    interaction_index_by_seq: Vec<Option<usize>>,
+
+    // ---- Step/op indexing (step_idx/op_idx are u64 on records) ----
+    insn_index_by_step: Vec<Option<usize>>,
+    chip_row_index_by_step_op: Vec<HashMap<u64, usize>>,
+    interaction_index_by_step_op: Vec<HashMap<u64, usize>>,
+
+    // ---- Slice-returning indexes (owned, small duplication is ok) ----
+    interactions_by_row_id: HashMap<String, Vec<OpenVMInteraction>>,
+    interactions_by_table_id: HashMap<String, Vec<OpenVMInteraction>>,
 }
 
-impl ZKVMTrace {
-    /// Build a trace from `micro_ops`, optional extra `chip_rows`, and optional `op_spans`.
-    pub fn new(
-        micro_ops: Vec<MicroOp>,
-        chip_rows: Option<Vec<ChipRow>>,
-        op_spans: Option<Vec<Vec<usize>>>,
-    ) -> Result<Self, String> {
-        let len = micro_ops.len();
-        if let Some(ref spans) = op_spans {
-            for (op_idx, span) in spans.iter().enumerate() {
-                if span.is_empty() {
-                    return Err(format!("op_spans[{}] is empty", op_idx));
-                }
-                for &i in span {
-                    if i >= len {
-                        return Err(format!(
-                            "op_spans[{}] contains out-of-range index {} (len(micro_ops)={})",
-                            op_idx, i, len
-                        ));
-                    }
-                }
+impl OpenVMTrace {
+    fn get_index_by_seq(map: &[Option<usize>], seq: usize) -> usize {
+        map.get(seq)
+            .copied()
+            .flatten()
+            .unwrap_or_else(|| panic!("missing record for global seq={}", seq))
+    }
+
+    fn ensure_len_opt(map: &mut Vec<Option<usize>>, idx: usize) {
+        if map.len() <= idx {
+            map.resize(idx + 1, None);
+        }
+    }
+
+    fn ensure_len_map<T>(map: &mut Vec<T>, idx: usize)
+    where
+        T: Default + Clone,
+    {
+        if map.len() <= idx {
+            map.resize(idx + 1, T::default());
+        }
+    }
+}
+
+impl Trace<OpenVMInteraction, OpenVMChipRow, OpenVMInsn> for OpenVMTrace {
+    fn instructions(&self) -> &[OpenVMInsn] {
+        &self.instructions
+    }
+
+    fn chip_rows(&self) -> &[OpenVMChipRow] {
+        &self.chip_rows
+    }
+
+    fn interactions(&self) -> &[OpenVMInteraction] {
+        &self.interactions
+    }
+
+    fn get_instruction_global(&self, seq: usize) -> &OpenVMInsn {
+        let i = Self::get_index_by_seq(&self.insn_index_by_seq, seq);
+        &self.instructions[i]
+    }
+
+    fn get_chip_row_global(&self, seq: usize) -> &OpenVMChipRow {
+        let i = Self::get_index_by_seq(&self.chip_row_index_by_seq, seq);
+        &self.chip_rows[i]
+    }
+
+    fn get_interaction_global(&self, seq: usize) -> &OpenVMInteraction {
+        let i = Self::get_index_by_seq(&self.interaction_index_by_seq, seq);
+        &self.interactions[i]
+    }
+
+    fn get_instruction_in_step(&self, step_idx: usize, op_idx: usize) -> &OpenVMInsn {
+        if op_idx != 0 {
+            panic!("OpenVMInsn is one-per-step; expected op_idx=0 (got {})", op_idx);
+        }
+        let i = self
+            .insn_index_by_step
+            .get(step_idx)
+            .copied()
+            .flatten()
+            .unwrap_or_else(|| panic!("missing instruction for step_idx={}", step_idx));
+        &self.instructions[i]
+    }
+
+    fn get_chip_row_in_step(&self, step_idx: usize, op_idx: usize) -> &OpenVMChipRow {
+        let m = self
+            .chip_row_index_by_step_op
+            .get(step_idx)
+            .unwrap_or_else(|| panic!("missing chip-row step bucket for step_idx={}", step_idx));
+        let i = m
+            .get(&(op_idx as u64))
+            .copied()
+            .unwrap_or_else(|| panic!("missing chip row for step_idx={}, op_idx={}", step_idx, op_idx));
+        &self.chip_rows[i]
+    }
+
+    fn get_interaction_in_step(&self, step_idx: usize, op_idx: usize) -> &OpenVMInteraction {
+        let m = self
+            .interaction_index_by_step_op
+            .get(step_idx)
+            .unwrap_or_else(|| panic!("missing interaction step bucket for step_idx={}", step_idx));
+        let i = m
+            .get(&(op_idx as u64))
+            .copied()
+            .unwrap_or_else(|| panic!("missing interaction for step_idx={}, op_idx={}", step_idx, op_idx));
+        &self.interactions[i]
+    }
+
+    fn get_interactions_by_row_id(&self, row_id: &str) -> &[OpenVMInteraction] {
+        match self.interactions_by_row_id.get(row_id) {
+            Some(v) => v.as_slice(),
+            None => &[],
+        }
+    }
+
+    fn get_interactions_by_table_id(&self, table_id: &str) -> &[OpenVMInteraction] {
+        match self.interactions_by_table_id.get(table_id) {
+            Some(v) => v.as_slice(),
+            None => &[],
+        }
+    }
+
+    fn new(
+        instructions: Vec<OpenVMInsn>,
+        chip_rows: Vec<OpenVMChipRow>,
+        interactions: Vec<OpenVMInteraction>,
+    ) -> Self {
+        let mut insn_index_by_seq: Vec<Option<usize>> = Vec::new();
+        let mut chip_row_index_by_seq: Vec<Option<usize>> = Vec::new();
+        let mut interaction_index_by_seq: Vec<Option<usize>> = Vec::new();
+
+        let mut insn_index_by_step: Vec<Option<usize>> = Vec::new();
+        let mut chip_row_index_by_step_op: Vec<HashMap<u64, usize>> = Vec::new();
+        let mut interaction_index_by_step_op: Vec<HashMap<u64, usize>> = Vec::new();
+
+        let mut interactions_by_row_id: HashMap<String, Vec<OpenVMInteraction>> = HashMap::new();
+        let mut interactions_by_table_id: HashMap<String, Vec<OpenVMInteraction>> = HashMap::new();
+
+        for (i, insn) in instructions.iter().enumerate() {
+            let seq = insn.seq as usize;
+            let step = insn.step_idx as usize;
+
+            Self::ensure_len_opt(&mut insn_index_by_seq, seq);
+            if insn_index_by_seq[seq].is_some() {
+                panic!("duplicate OpenVMInsn.seq={}", seq);
+            }
+            insn_index_by_seq[seq] = Some(i);
+
+            Self::ensure_len_opt(&mut insn_index_by_step, step);
+            if insn_index_by_step[step].is_some() {
+                panic!("duplicate OpenVMInsn.step_idx={}", step);
+            }
+            insn_index_by_step[step] = Some(i);
+        }
+
+        for (i, row) in chip_rows.iter().enumerate() {
+            let base = row.base();
+            let seq = base.seq as usize;
+            let step = base.step_idx as usize;
+            let op = base.op_idx;
+
+            Self::ensure_len_opt(&mut chip_row_index_by_seq, seq);
+            if chip_row_index_by_seq[seq].is_some() {
+                panic!("duplicate OpenVMChipRow.seq={}", seq);
+            }
+            chip_row_index_by_seq[seq] = Some(i);
+
+            Self::ensure_len_map(&mut chip_row_index_by_step_op, step);
+            if chip_row_index_by_step_op[step].insert(op, i).is_some() {
+                panic!(
+                    "duplicate OpenVMChipRow for step_idx={}, op_idx={}",
+                    base.step_idx, base.op_idx
+                );
             }
         }
 
-        let chip_rows: Vec<ChipRow> = micro_ops
-            .iter()
-            .filter_map(|u| match u {
-                MicroOp::ChipRow(r) => Some(r.clone()),
-                _ => None,
-            })
-            .chain(chip_rows.into_iter().flatten())
-            .collect();
+        for (i, uop) in interactions.iter().enumerate() {
+            let base = uop.base();
+            let seq = base.seq as usize;
+            let step = base.step_idx as usize;
+            let op = base.op_idx;
 
-        let interactions: Vec<Interaction> = micro_ops
-            .iter()
-            .filter_map(|u| match u {
-                MicroOp::Interaction(i) => Some(i.clone()),
-                _ => None,
-            })
-            .collect();
-
-        let mut interactions_by_table: HashMap<String, Vec<Interaction>> = HashMap::new();
-        for uop in &interactions {
-            interactions_by_table.entry(uop.base().table_id.clone()).or_default().push(uop.clone());
-        }
-
-        let chip_rows_by_id: HashMap<String, ChipRow> =
-            chip_rows.iter().map(|r| (r.row_id.clone(), r.clone())).collect();
-
-        let mut chip_rows_by_kind: HashMap<ChipRowKind, Vec<ChipRow>> = HashMap::new();
-        for row in &chip_rows {
-            chip_rows_by_kind.entry(row.kind.clone()).or_default().push(row.clone());
-        }
-
-        let mut interactions_by_anchor_row_id: HashMap<String, Vec<Interaction>> = HashMap::new();
-        for uop in &interactions {
-            if let Some(ref aid) = uop.base().anchor_row_id {
-                interactions_by_anchor_row_id.entry(aid.clone()).or_default().push(uop.clone());
+            Self::ensure_len_opt(&mut interaction_index_by_seq, seq);
+            if interaction_index_by_seq[seq].is_some() {
+                panic!("duplicate OpenVMInteraction.seq={}", seq);
             }
+            interaction_index_by_seq[seq] = Some(i);
+
+            Self::ensure_len_map(&mut interaction_index_by_step_op, step);
+            if interaction_index_by_step_op[step].insert(op, i).is_some() {
+                panic!(
+                    "duplicate OpenVMInteraction for step_idx={}, op_idx={}",
+                    base.step_idx, base.op_idx
+                );
+            }
+
+            interactions_by_row_id.entry(base.row_id.clone()).or_default().push(uop.clone());
+            interactions_by_table_id
+                .entry(base.table_name.clone())
+                .or_default()
+                .push(uop.clone());
         }
 
-        Ok(Self {
-            micro_ops,
-            op_spans,
+        Self {
+            instructions,
             chip_rows,
             interactions,
-            interactions_by_table,
-            chip_rows_by_id,
-            chip_rows_by_kind,
-            interactions_by_anchor_row_id,
-        })
-    }
-
-    pub fn by_table_id(&self, table_id: &str) -> &[Interaction] {
-        self.interactions_by_table.get(table_id).map(Vec::as_slice).unwrap_or(&[])
-    }
-
-    pub fn chip_row(&self, row_id: &str) -> Option<&ChipRow> {
-        self.chip_rows_by_id.get(row_id)
-    }
-
-    pub fn chip_rows_of_kind(&self, kind: &ChipRowKind) -> &[ChipRow] {
-        self.chip_rows_by_kind.get(kind).map(Vec::as_slice).unwrap_or(&[])
-    }
-
-    pub fn by_anchor_row_id(&self, row_id: &str) -> &[Interaction] {
-        self.interactions_by_anchor_row_id.get(row_id).map(Vec::as_slice).unwrap_or(&[])
-    }
-
-    pub fn op_micro_ops(&self, op_idx: usize) -> Result<Vec<MicroOp>, String> {
-        let spans = self
-            .op_spans
-            .as_ref()
-            .ok_or_else(|| "Trace has no op_spans; op-level access is unavailable".to_string())?;
-        let span = spans.get(op_idx).ok_or_else(|| format!("op_spans has no index {}", op_idx))?;
-        Ok(span.iter().filter_map(|&i| self.micro_ops.get(i).cloned()).collect())
-    }
-
-    pub fn validate(&self) -> Vec<String> {
-        let mut errors = Vec::new();
-        if self.micro_ops.is_empty() {
-            errors.push("Trace is empty".to_string());
-            return errors;
+            insn_index_by_seq,
+            chip_row_index_by_seq,
+            interaction_index_by_seq,
+            insn_index_by_step,
+            chip_row_index_by_step_op,
+            interaction_index_by_step_op,
+            interactions_by_row_id,
+            interactions_by_table_id,
         }
-        if self.chip_rows_by_id.len() != self.chip_rows.len() {
-            errors.push("Trace has duplicate ChipRow.row_id values".to_string());
-        }
-        for uop in &self.interactions {
-            if let Some(ref aid) = uop.base().anchor_row_id {
-                if !self.chip_rows_by_id.contains_key(aid) {
-                    errors.push(format!("Interaction references missing anchor_row_id={:?}", aid));
-                }
-            }
-        }
-        errors
-    }
-
-    /// OpenVM-specific: construct an op-level `ZKVMTrace` from OpenVM-emitted micro-ops.
-    ///
-    /// This relies on the OpenVM emitter providing explicit `step` fields on emitted micro-ops
-    /// (chip rows and interactions). Micro-ops without an explicit step are excluded from spans.
-    pub fn from_openvm_micro_ops(micro_ops: Vec<MicroOp>) -> Result<Self, String> {
-        fn step_for_micro_op(uop: &MicroOp) -> Option<u64> {
-            match uop {
-                MicroOp::ChipRow(r) => r.step,
-                MicroOp::Interaction(i) => i.base().step,
-            }
-        }
-
-        let mut by_step: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
-        for (idx, uop) in micro_ops.iter().enumerate() {
-            let Some(step) = step_for_micro_op(uop) else {
-                continue;
-            };
-            by_step.entry(step).or_default().push(idx);
-        }
-        let op_spans: Vec<Vec<usize>> = by_step.into_values().collect();
-
-        let trace = ZKVMTrace::new(micro_ops, None, Some(op_spans))?;
-        let errors = trace.validate();
-        if !errors.is_empty() {
-            return Err(format!("ZKVMTrace::validate failed: {}", errors.join("; ")));
-        }
-        Ok(trace)
     }
 }

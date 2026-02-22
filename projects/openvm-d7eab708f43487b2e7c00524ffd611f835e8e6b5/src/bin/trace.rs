@@ -11,7 +11,7 @@ use openvm_sdk::{config::AppConfig, prover::verify_app_proof, Sdk, StdIn, F};
 use openvm_transpiler::transpiler::Transpiler;
 
 use beak_core::rv32im::oracle::RISCVOracle;
-use beak_core::trace::micro_ops::MicroOp;
+use serde_json::Value;
 
 fn main() {
     let matches = Command::new("beak-trace")
@@ -144,16 +144,13 @@ fn run_trace(words: &[u32], print_micro_ops: bool) -> bool {
     println!("\n=== Captured JSON logs ===");
     println!("  {} entr(y/ies)", json_logs.len());
 
-    // --- 6. Parse captured records into beak-core structures ---
-    let (trace, insns) =
-        beak_core::trace::openvm::trace_and_insns_from_openvm_json_logs(&json_logs)
-            .expect("parse beak records");
-    println!("\n=== Parsed trace (beak-core) ===");
-    println!("  micro_ops={}", trace.micro_ops.len());
-    println!("  insns={}", insns.len());
+    // --- 6. Print captured JSON records (raw) ---
+    //
+    // Note: `beak-core` no longer exposes an OpenVM-specific `MicroOp` parser here. At this stage,
+    // we keep `beak-trace` useful by printing the raw captured JSON records.
     if print_micro_ops {
-        for (i, uop) in trace.micro_ops.iter().enumerate() {
-            print_micro_op_line(i, uop);
+        for (i, v) in json_logs.iter().enumerate() {
+            print_json_log_line(i, v);
         }
     }
 
@@ -192,7 +189,7 @@ fn run_trace(words: &[u32], print_micro_ops: bool) -> bool {
     !mismatch
 }
 
-fn print_micro_op_line(idx: usize, uop: &MicroOp) {
-    println!("  [{idx}] {uop:#?}");
+fn print_json_log_line(idx: usize, v: &Value) {
+    println!("  [{idx}] {v}");
 }
 

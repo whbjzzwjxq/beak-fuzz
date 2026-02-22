@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::trace::micro_ops::chip_row::ChipRow;
+use crate::trace::micro_ops::insn::Insn;
 use crate::trace::micro_ops::interaction::Interaction;
 use crate::trace::micro_ops::trace::Trace;
 
@@ -52,7 +53,7 @@ impl BucketHit {
     }
 }
 
-pub trait Bucket<T: Trace<I, C>, I: Interaction, C: ChipRow>: Send + Sync {
+pub trait Bucket<T: Trace<I, C, X>, I: Interaction, C: ChipRow, X: Insn>: Send + Sync {
     fn bucket_type(&self) -> BucketType;
 
     /// Returns a hit if this bucket matches the op-level micro-ops.
