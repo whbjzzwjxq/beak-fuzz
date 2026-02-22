@@ -72,7 +72,7 @@ def _patch_audit_integration_api_for_microops(openvm_install_path: Path) -> None
         return
 
     contents = integration_api.read_text()
-    if 'fuzzer_utils::print_chip_row_json("openvm"' in contents:
+    if 'fuzzer_utils::emit_chip_row_json("openvm"' in contents:
         # Already injected.
         return
 
@@ -125,7 +125,15 @@ def _patch_audit_integration_api_for_microops(openvm_install_path: Path) -> None
                 .to_string(),
             })
             .to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &adapter_chip, &gates, &adapter_locals);
+            // integration_api spans many extensions; default to explicit "custom" unless a given
+            // injection site can name a more specific kind without heuristics.
+            fuzzer_utils::emit_chip_row_json(
+                "openvm",
+                &adapter_chip,
+                "custom",
+                &gates,
+                &adapter_locals,
+            );
 
             let core_chip = get_air_name(self.core.air());
             let core_locals = json!({
@@ -133,7 +141,7 @@ def _patch_audit_integration_api_for_microops(openvm_install_path: Path) -> None
                 "payload_json": json!({ "core": &core_record }).to_string(),
             })
             .to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &core_chip, &gates, &core_locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &core_chip, "custom", &gates, &core_locals);
         }
 """
     pos = m.end()
@@ -181,7 +189,7 @@ def _patch_integration_api_microops(*, openvm_install_path: Path, commit_or_bran
         integration_api.write_text(contents.replace("\n\\1\n", "\n"))
         contents = integration_api.read_text()
 
-    if 'fuzzer_utils::print_chip_row_json("openvm"' in contents:
+    if 'fuzzer_utils::emit_chip_row_json("openvm"' in contents:
         return
 
     replace_in_file(
@@ -209,7 +217,15 @@ def _patch_integration_api_microops(*, openvm_install_path: Path, commit_or_bran
                 .to_string(),
             })
             .to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &adapter_chip, &gates, &adapter_locals);
+            // integration_api spans many extensions; default to explicit "custom" unless a given
+            // injection site can name a more specific kind without heuristics.
+            fuzzer_utils::emit_chip_row_json(
+                "openvm",
+                &adapter_chip,
+                "custom",
+                &gates,
+                &adapter_locals,
+            );
 
             let core_chip = get_air_name(self.core.air());
             let core_locals = json!({
@@ -217,7 +233,7 @@ def _patch_integration_api_microops(*, openvm_install_path: Path, commit_or_bran
                 "payload_json": json!({ "core": &core_record }).to_string(),
             })
             .to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &core_chip, &gates, &core_locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &core_chip, "custom", &gates, &core_locals);
         }""",
             ),
         ],
@@ -319,10 +335,10 @@ def _patch_audit_integration_api_for_padding_samples(openvm_install_path: Path) 
                     "width": width,
                 })
                 .to_string();
-                fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+                fuzzer_utils::emit_chip_row_json("openvm", &chip, "memory", &gates, &locals);
                 let anchor_row_id = fuzzer_utils::get_last_row_id();
                 let payload = json!({"chip": chip, "row_idx": row_idx}).to_string();
-                fuzzer_utils::print_interaction_json(
+                fuzzer_utils::emit_interaction_json(
                     "PaddingSample",
                     "send",
                     "inactive_row",
@@ -385,10 +401,10 @@ def _patch_regzero_record_arena_for_padding_samples(openvm_install_path: Path) -
                     "{{\"chip\":\"{}\",\"row_idx\":{},\"real_rows\":{},\"total_rows\":{},\"width\":{}}}",
                     chip, row_idx, rows_used, height, width
                 );
-                fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+                fuzzer_utils::emit_chip_row_json("openvm", &chip, "memory", &gates, &locals);
                 let anchor_row_id = fuzzer_utils::get_last_row_id();
                 let payload = format!("{{\"chip\":\"{}\",\"row_idx\":{}}}", chip, row_idx);
-                fuzzer_utils::print_interaction_json(
+                fuzzer_utils::emit_interaction_json(
                     "PaddingSample",
                     "send",
                     "inactive_row",
@@ -520,7 +536,7 @@ def _patch_audit_segment_rs_for_microops(openvm_install_path: Path) -> None:
                     })
                     .to_string();
                     let chip = "ProgramChip".to_string();
-                    fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+                    fuzzer_utils::emit_chip_row_json("openvm", &chip, "program", &gates, &locals);
 
                     // Program-table interaction: lookup (pc -> opcode/operands).
                     let anchor_row_id = fuzzer_utils::get_last_row_id();
@@ -538,7 +554,7 @@ def _patch_audit_segment_rs_for_microops(openvm_install_path: Path) -> None:
                         ],
                     })
                     .to_string();
-                    fuzzer_utils::print_interaction_json(
+                    fuzzer_utils::emit_interaction_json(
                         "ProgramBus",
                         "recv",
                         "program",
@@ -606,9 +622,10 @@ def _patch_audit_segment_rs_for_microops(openvm_install_path: Path) -> None:
                                             "len": len,
                                         })
                                         .to_string();
-                                        fuzzer_utils::print_chip_row_json(
+                                        fuzzer_utils::emit_chip_row_json(
                                             "openvm",
                                             &chip,
+                                            "memory",
                                             &gates,
                                             &locals,
                                         );
@@ -622,7 +639,7 @@ def _patch_audit_segment_rs_for_microops(openvm_install_path: Path) -> None:
                                             "len": len,
                                         })
                                         .to_string();
-                                        fuzzer_utils::print_interaction_json(
+                                        fuzzer_utils::emit_interaction_json(
                                             "MemoryBus",
                                             "send",
                                             "memory",
@@ -649,9 +666,10 @@ def _patch_audit_segment_rs_for_microops(openvm_install_path: Path) -> None:
                                             "len": len,
                                         })
                                         .to_string();
-                                        fuzzer_utils::print_chip_row_json(
+                                        fuzzer_utils::emit_chip_row_json(
                                             "openvm",
                                             &chip,
+                                            "memory",
                                             &gates,
                                             &locals,
                                         );
@@ -665,7 +683,7 @@ def _patch_audit_segment_rs_for_microops(openvm_install_path: Path) -> None:
                                             "len": len,
                                         })
                                         .to_string();
-                                        fuzzer_utils::print_interaction_json(
+                                        fuzzer_utils::emit_interaction_json(
                                             "MemoryBus",
                                             "send",
                                             "memory",
@@ -687,14 +705,14 @@ def _patch_audit_segment_rs_for_microops(openvm_install_path: Path) -> None:
                                     "address_spaces": boundary_spaces,
                                 })
                                 .to_string();
-                                fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+                                fuzzer_utils::emit_chip_row_json("openvm", &chip, "memory", &gates, &locals);
                                 let anchor_row_id = fuzzer_utils::get_last_row_id();
                                 let payload = json!({
                                     "access_count": access_count,
                                     "address_spaces": boundary_spaces,
                                 })
                                 .to_string();
-                                fuzzer_utils::print_interaction_json(
+                                fuzzer_utils::emit_interaction_json(
                                     "Boundary",
                                     "send",
                                     "memory",
@@ -720,7 +738,7 @@ def _patch_audit_segment_rs_for_microops(openvm_install_path: Path) -> None:
                             })
                             .to_string();
                             let chip = "VmConnectorAir".to_string();
-                            fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+                            fuzzer_utils::emit_chip_row_json("openvm", &chip, "connector", &gates, &locals);
 
                             let anchor_row_id = fuzzer_utils::get_last_row_id();
                             let recv_payload = json!({
@@ -728,7 +746,7 @@ def _patch_audit_segment_rs_for_microops(openvm_install_path: Path) -> None:
                                 "timestamp": prev_timestamp,
                             })
                             .to_string();
-                            fuzzer_utils::print_interaction_json(
+                            fuzzer_utils::emit_interaction_json(
                                 "ExecutionBus",
                                 "recv",
                                 "global",
@@ -742,7 +760,7 @@ def _patch_audit_segment_rs_for_microops(openvm_install_path: Path) -> None:
                                 "timestamp": timestamp,
                             })
                             .to_string();
-                            fuzzer_utils::print_interaction_json(
+                            fuzzer_utils::emit_interaction_json(
                                 "ExecutionBus",
                                 "send",
                                 "global",
@@ -841,7 +859,7 @@ def _patch_regzero_interpreter_preflight_for_microops(openvm_install_path: Path)
             })
             .to_string();
             let chip = "ProgramChip".to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &chip, "program", &gates, &locals);
 
             let anchor_row_id = fuzzer_utils::get_last_row_id();
             let payload = json!({
@@ -858,7 +876,7 @@ def _patch_regzero_interpreter_preflight_for_microops(openvm_install_path: Path)
                 ],
             })
             .to_string();
-            fuzzer_utils::print_interaction_json(
+            fuzzer_utils::emit_interaction_json(
                 "ProgramBus",
                 "recv",
                 "program",
@@ -896,7 +914,7 @@ def _patch_regzero_interpreter_preflight_for_microops(openvm_install_path: Path)
             })
             .to_string();
             let chip = format!("Exec({})", opcode_name);
-            fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &chip, "cpu", &gates, &locals);
 
 """,
     )
@@ -921,7 +939,7 @@ def _patch_regzero_interpreter_preflight_for_microops(openvm_install_path: Path)
             })
             .to_string();
             let chip = "VmConnectorAir".to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &chip, "connector", &gates, &locals);
 
             let anchor_row_id = fuzzer_utils::get_last_row_id();
             let recv_payload = json!({
@@ -929,7 +947,7 @@ def _patch_regzero_interpreter_preflight_for_microops(openvm_install_path: Path)
                 "timestamp": from_timestamp,
             })
             .to_string();
-            fuzzer_utils::print_interaction_json(
+            fuzzer_utils::emit_interaction_json(
                 "ExecutionBus",
                 "recv",
                 "global",
@@ -943,7 +961,7 @@ def _patch_regzero_interpreter_preflight_for_microops(openvm_install_path: Path)
                 "timestamp": to_timestamp,
             })
             .to_string();
-            fuzzer_utils::print_interaction_json(
+            fuzzer_utils::emit_interaction_json(
                 "ExecutionBus",
                 "send",
                 "global",
@@ -1067,7 +1085,7 @@ def _patch_regzero_rv32im_adapters_for_microops(openvm_install_path: Path) -> No
             flags=re.DOTALL,
         )
         c = re.sub(
-            r"\n\s*// beak-fuzz: emit adapter ChipRow at tracegen time \(regzero snapshot\)\.\n\s*if fuzzer_utils::is_trace_logging\(\) \{\n.*?\n\s*fuzzer_utils::print_chip_row_json\(\"openvm\", &chip, &gates, &locals\);\n\s*\}\n",
+            r"\n\s*// beak-fuzz: emit adapter ChipRow at tracegen time \(regzero snapshot\)\.\n\s*if fuzzer_utils::is_trace_logging\(\) \{\n.*?\n\s*fuzzer_utils::(?:print|emit)_chip_row_json\(\"openvm\", &chip,.*?;\n\s*\}\n",
             "\n",
             c,
             flags=re.DOTALL,
@@ -1132,7 +1150,7 @@ def _patch_regzero_rv32im_adapters_for_microops(openvm_install_path: Path) -> No
 \g<indent>        ],
 \g<indent>    })
 \g<indent>    .to_string();
-\g<indent>    fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+\g<indent>    fuzzer_utils::emit_chip_row_json("openvm", &chip, "controlflow", &gates, &locals);
 \g<indent>}
 """,
                     c,
@@ -1162,7 +1180,7 @@ def _patch_regzero_rv32im_adapters_for_microops(openvm_install_path: Path) -> No
                 ],
             })
             .to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &chip, "controlflow", &gates, &locals);
         }
 """,
                 )
@@ -1178,7 +1196,7 @@ def _patch_regzero_rv32im_adapters_for_microops(openvm_install_path: Path) -> No
             flags=re.DOTALL,
         )
         c = re.sub(
-            r"\n\s*// beak-fuzz: emit adapter ChipRow at tracegen time \(regzero snapshot\)\.\n\s*if fuzzer_utils::is_trace_logging\(\) \{\n.*?\n\s*fuzzer_utils::print_chip_row_json\(\"openvm\", &chip, &gates, &locals\);\n\s*\}\n",
+            r"\n\s*// beak-fuzz: emit adapter ChipRow at tracegen time \(regzero snapshot\)\.\n\s*if fuzzer_utils::is_trace_logging\(\) \{\n.*?\n\s*fuzzer_utils::(?:print|emit)_chip_row_json\(\"openvm\", &chip,.*?;\n\s*\}\n",
             "\n",
             c,
             flags=re.DOTALL,
@@ -1253,7 +1271,7 @@ def _patch_regzero_rv32im_more_adapters_for_microops(openvm_install_path: Path) 
                 "writes_aux": {"prev_timestamp": beak_writes_prev_timestamp, "prev_data": beak_writes_prev_data},
             })
             .to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &chip, "alu", &gates, &locals);
         }
 """,
             )
@@ -1305,7 +1323,7 @@ def _patch_regzero_rv32im_more_adapters_for_microops(openvm_install_path: Path) 
                 "writes_aux": {"prev_timestamp": beak_writes_prev_timestamp, "prev_data": beak_writes_prev_data},
             })
             .to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &chip, "alu", &gates, &locals);
         }
 """,
             )
@@ -1348,7 +1366,7 @@ def _patch_regzero_rv32im_more_adapters_for_microops(openvm_install_path: Path) 
                 "rd_aux": {"prev_timestamp": beak_rd_prev_timestamp, "prev_data": beak_rd_prev_data},
             })
             .to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &chip, "cpu", &gates, &locals);
         }
 """,
             )
@@ -1380,7 +1398,7 @@ def _patch_regzero_rv32im_more_adapters_for_microops(openvm_install_path: Path) 
                 "rd_ptr": record.rd_ptr,
             })
             .to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &chip, "cpu", &gates, &locals);
         }
 """,
                 )
@@ -1439,7 +1457,7 @@ def _patch_regzero_rv32im_more_adapters_for_microops(openvm_install_path: Path) 
                 "write_base_aux": {"prev_timestamp": beak_write_prev_timestamp},
             })
             .to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &chip, "memory", &gates, &locals);
         }
 """,
             )
@@ -1484,7 +1502,7 @@ def _patch_regzero_rv32im_cores_for_microops(openvm_install_path: Path) -> None:
                 "rd_data": rd_data,
             })
             .to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &chip, "alu", &gates, &locals);
         }
 """,
             )
@@ -1510,12 +1528,12 @@ def _patch_regzero_rv32im_cores_for_microops(openvm_install_path: Path) -> None:
                 "a": a_,
             })
             .to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &chip, "alu", &gates, &locals);
         }
 """
         if "beak_fuzz_emit_chip_row_v3_base_alu_core" in c:
             c2 = re.sub(
-                r"\n\s*// beak_fuzz_emit_chip_row_v3_base_alu_core[\s\S]*?fuzzer_utils::print_chip_row_json\(\"openvm\", &chip, &gates, &locals\);\n\s*}\n",
+                r"\n\s*// beak_fuzz_emit_chip_row_v3_base_alu_core[\s\S]*?fuzzer_utils::(?:print|emit)_chip_row_json\(\"openvm\", &chip,.*?;\n\s*}\n",
                 block + "\n",
                 c,
                 count=1,
@@ -1556,12 +1574,12 @@ def _patch_regzero_rv32im_cores_for_microops(openvm_install_path: Path) -> None:
                 "case": format!("{:?}", case),
             })
             .to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &chip, "alu", &gates, &locals);
         }
 """
         if "beak_fuzz_emit_chip_row_v3_divrem_core" in c:
             c2 = re.sub(
-                r"\n\s*// beak_fuzz_emit_chip_row_v3_divrem_core[\s\S]*?fuzzer_utils::print_chip_row_json\(\"openvm\", &chip, &gates, &locals\);\n\s*}\n",
+                r"\n\s*// beak_fuzz_emit_chip_row_v3_divrem_core[\s\S]*?fuzzer_utils::(?:print|emit)_chip_row_json\(\"openvm\", &chip,.*?;\n\s*}\n",
                 block + "\n",
                 c,
                 count=1,
@@ -1597,12 +1615,12 @@ def _patch_regzero_rv32im_cores_for_microops(openvm_install_path: Path) -> None:
                 "read_data": read_data,
             })
             .to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &chip, "memory", &gates, &locals);
         }
 """
         if "beak_fuzz_emit_chip_row_v3_load_sign_extend_core" in c:
             c2 = re.sub(
-                r"\n\s*// beak_fuzz_emit_chip_row_v3_load_sign_extend_core[\s\S]*?fuzzer_utils::print_chip_row_json\(\"openvm\", &chip, &gates, &locals\);\n\s*}\n",
+                r"\n\s*// beak_fuzz_emit_chip_row_v3_load_sign_extend_core[\s\S]*?fuzzer_utils::(?:print|emit)_chip_row_json\(\"openvm\", &chip,.*?;\n\s*}\n",
                 block + "\n",
                 c,
                 count=1,
@@ -1640,12 +1658,12 @@ def _patch_regzero_rv32im_cores_for_microops(openvm_install_path: Path) -> None:
                 "write_data": write_data,
             })
             .to_string();
-            fuzzer_utils::print_chip_row_json("openvm", &chip, &gates, &locals);
+            fuzzer_utils::emit_chip_row_json("openvm", &chip, "memory", &gates, &locals);
         }
 """
         if "beak_fuzz_emit_chip_row_v3_loadstore_core" in c:
             c2 = re.sub(
-                r"\n\s*// beak_fuzz_emit_chip_row_v3_loadstore_core[\s\S]*?fuzzer_utils::print_chip_row_json\(\"openvm\", &chip, &gates, &locals\);\n\s*}\n",
+                r"\n\s*// beak_fuzz_emit_chip_row_v3_loadstore_core[\s\S]*?fuzzer_utils::(?:print|emit)_chip_row_json\(\"openvm\", &chip,.*?;\n\s*}\n",
                 block + "\n",
                 c,
                 count=1,

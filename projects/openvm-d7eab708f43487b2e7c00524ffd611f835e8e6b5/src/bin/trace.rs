@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use clap::{Arg, Command};
@@ -12,10 +11,7 @@ use openvm_sdk::{config::AppConfig, prover::verify_app_proof, Sdk, StdIn, F};
 use openvm_transpiler::transpiler::Transpiler;
 
 use beak_core::rv32im::oracle::RISCVOracle;
-use beak_core::trace::micro_ops::{
-    ChipRow, ChipRowKind, CustomInteraction, GateValue, Interaction, InteractionBase,
-    InteractionKind, InteractionMultiplicity, InteractionScope, InteractionType, MicroOp,
-};
+use beak_core::trace::micro_ops::MicroOp;
 
 fn main() {
     let matches = Command::new("beak-trace")
@@ -81,7 +77,9 @@ fn main() {
         .join()
         .expect("thread panicked");
 
-    return 0;
+    if !result {
+        std::process::exit(1);
+    }
 }
 
 fn run_trace(words: &[u32], print_micro_ops: bool) -> bool {
@@ -146,12 +144,15 @@ fn run_trace(words: &[u32], print_micro_ops: bool) -> bool {
     println!("\n=== Captured JSON logs ===");
     println!("  {} entr(y/ies)", json_logs.len());
 
-    // --- 6. Parse captured records into beak-core MicroOps ---
-    let micro_ops = micro_ops_from_json_logs(&json_logs);
-    println!("\n=== MicroOps (beak-core) ===");
-    println!("  micro_ops={}", micro_ops.len());
+    // --- 6. Parse captured records into beak-core structures ---
+    let (trace, insns) =
+        beak_core::trace::openvm::trace_and_insns_from_openvm_json_logs(&json_logs)
+            .expect("parse beak records");
+    println!("\n=== Parsed trace (beak-core) ===");
+    println!("  micro_ops={}", trace.micro_ops.len());
+    println!("  insns={}", insns.len());
     if print_micro_ops {
-        for (i, uop) in micro_ops.iter().enumerate() {
+        for (i, uop) in trace.micro_ops.iter().enumerate() {
             print_micro_op_line(i, uop);
         }
     }
@@ -189,196 +190,6 @@ fn run_trace(words: &[u32], print_micro_ops: bool) -> bool {
     }
 
     !mismatch
-}
-
-fn chip_kind_from_name(chip: &str) -> ChipRowKind {
-    // Heuristics only; we can refine once we start consuming these in fuzz.
-    if chip.contains("Program") {
-        ChipRowKind::PROGRAM
-    } else if chip.contains("Connector") {
-        ChipRowKind::CONNECTOR
-    } else if chip.contains("Memory") || chip.contains("Load") || chip.contains("Store") {
-        ChipRowKind::MEMORY
-    } else if chip.contains("Alu") || chip.contains("(ADD)") || chip.contains("(SUB)") || chip.contains("(MUL)") {
-        ChipRowKind::ALU
-    } else if chip.contains("Exec(") {
-        ChipRowKind::CPU
-    } else {
-        ChipRowKind::CUSTOM
-    }
-}
-
-fn parse_gate_map(v: &serde_json::Value) -> HashMap<String, GateValue> {
-    let mut out = HashMap::new();
-    let Some(obj) = v.as_object() else {
-        return out;
-    };
-    for (k, vv) in obj {
-        let n: Option<u64> = if let Some(b) = vv.as_bool() {
-            Some(if b { 1 } else { 0 })
-        } else {
-            vv.as_u64()
-        };
-        if let Some(n) = n {
-            out.insert(k.clone(), GateValue::from(n));
-        }
-    }
-    out
-}
-
-fn parse_interaction_kind(s: Option<&str>) -> InteractionKind {
-    match s.unwrap_or("") {
-        "memory" => InteractionKind::MEMORY,
-        "program" => InteractionKind::PROGRAM,
-        "instruction" => InteractionKind::INSTRUCTION,
-        "alu" => InteractionKind::ALU,
-        "byte" => InteractionKind::BYTE,
-        "range" => InteractionKind::RANGE,
-        "field" => InteractionKind::FIELD,
-        "syscall" => InteractionKind::SYSCALL,
-        "global" => InteractionKind::GLOBAL,
-        "poseidon2" => InteractionKind::POSEIDON2,
-        "bitwise" => InteractionKind::BITWISE,
-        "keccak" => InteractionKind::KECCAK,
-        "sha256" => InteractionKind::SHA256,
-        _ => InteractionKind::CUSTOM,
-    }
-}
-
-fn parse_interaction_type(s: Option<&str>) -> Option<InteractionType> {
-    match s? {
-        "send" => Some(InteractionType::SEND),
-        "recv" => Some(InteractionType::RECV),
-        _ => None,
-    }
-}
-
-fn parse_interaction_scope(s: Option<&str>) -> Option<InteractionScope> {
-    match s? {
-        "global" => Some(InteractionScope::GLOBAL),
-        "local" => Some(InteractionScope::LOCAL),
-        _ => None,
-    }
-}
-
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    // Small deterministic hash for collapsing arbitrary JSON payloads into a few FieldElements.
-    let mut h: u64 = 0xcbf29ce484222325;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
-}
-
-fn micro_ops_from_json_logs(json_logs: &[serde_json::Value]) -> Vec<MicroOp> {
-    let mut out = Vec::new();
-
-    for entry in json_logs {
-        let tag = entry.get("tag").and_then(|v| v.as_str());
-        if tag != Some("record") {
-            continue;
-        }
-        let Some(payload) = entry.get("payload") else {
-            continue;
-        };
-        if payload.get("context").and_then(|v| v.as_str()) != Some("micro_op") {
-            continue;
-        }
-        let Some(micro_op_type) = payload.get("micro_op_type").and_then(|v| v.as_str()) else {
-            continue;
-        };
-
-        match micro_op_type {
-            "chip_row" => {
-                let row_id = payload
-                    .get("row_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let domain = payload
-                    .get("domain")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let chip = payload
-                    .get("chip")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if row_id.is_empty() || domain.is_empty() || chip.is_empty() {
-                    continue;
-                }
-                let gates = payload
-                    .get("gates")
-                    .map(parse_gate_map)
-                    .unwrap_or_else(HashMap::new);
-                let kind = chip_kind_from_name(&chip);
-                out.push(MicroOp::ChipRow(ChipRow {
-                    row_id,
-                    domain,
-                    chip,
-                    kind,
-                    gates,
-                    event_id: None,
-                }));
-            }
-            "interaction" => {
-                let table_id = payload
-                    .get("table_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let io = parse_interaction_type(payload.get("io").and_then(|v| v.as_str()));
-                if table_id.is_empty() || io.is_none() {
-                    continue;
-                }
-
-                let mut base = InteractionBase::default();
-                base.table_id = table_id;
-                base.io = io.unwrap();
-                base.scope = parse_interaction_scope(payload.get("scope").and_then(|v| v.as_str()));
-                base.anchor_row_id = payload
-                    .get("anchor_row_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                base.event_id = payload
-                    .get("event_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                base.kind = parse_interaction_kind(payload.get("kind").and_then(|v| v.as_str()));
-
-                if let Some(mult) = payload.get("multiplicity").and_then(|v| v.as_object()) {
-                    let value = mult
-                        .get("value")
-                        .and_then(|v| v.as_u64())
-                        .map(|n| GateValue::from(n));
-                    let ref_ = mult
-                        .get("ref")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    base.multiplicity = Some(InteractionMultiplicity { value, ref_ });
-                }
-
-                let payload_json = payload
-                    .get("payload")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                let h = fnv1a64(payload_json.to_string().as_bytes());
-                let ci = CustomInteraction {
-                    base,
-                    a0: GateValue::from(h),
-                    a1: GateValue::from(0u64),
-                    a2: GateValue::from(0u64),
-                    a3: GateValue::from(0u64),
-                };
-                out.push(MicroOp::Interaction(Interaction::Custom(ci)));
-            }
-            _ => {}
-        }
-    }
-
-    out
 }
 
 fn print_micro_op_line(idx: usize, uop: &MicroOp) {

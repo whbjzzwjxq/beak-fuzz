@@ -59,6 +59,8 @@ pub struct GlobalState {
     pub pc_to_instruction: HashMap<u32, String>,
     pub pc_to_assembly: HashMap<u32, String>,
     pub current_air_name: String,
+    /// Best-effort set of chips observed during the current `step` (instruction-level record).
+    pub step_chips: Vec<String>,
 }
 
 impl GlobalState {
@@ -82,6 +84,7 @@ impl GlobalState {
             pc_to_instruction: HashMap::new(),
             pc_to_assembly: HashMap::new(),
             current_air_name: String::new(),
+            step_chips: Vec::new(),
         }
     }
 }
@@ -124,12 +127,12 @@ pub fn take_json_logs() -> Vec<Value> {
     std::mem::take(&mut cap.logs)
 }
 
-fn capture_json(tag: &'static str, payload: Value) {
+fn capture_json(payload: Value) {
     let mut cap = JSON_CAPTURE.lock().unwrap();
     if !cap.enabled {
         return;
     }
-    cap.logs.push(json!({ "tag": tag, "payload": payload }));
+    cap.logs.push(payload);
 }
 
 fn parse_json_or_string(raw: &str) -> Value {
@@ -191,6 +194,35 @@ pub fn set_seed(value: u64) {
     let mut state = GLOBAL_STATE.lock().unwrap();
     state.rng = StdRng::seed_from_u64(value);
     state.seed = value;
+}
+
+/// Reset per-run state so multiple prove runs can happen in-process safely.
+///
+/// Loop1 fuzzing runs many different programs in one process. Some attribution state (notably
+/// `pc_to_step` and instruction/asm hints) is built up during execution/preflight/tracegen and must
+/// not leak between programs.
+pub fn reset_for_new_run() {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+
+    // Keep configuration knobs (trace_logging/assertions/seed/rng) unchanged.
+    state.injection = false;
+    state.injection_kind.clear();
+    state.injection_step = 0;
+
+    state.step = 0;
+    state.micro_idx = 0;
+    state.row_seq = 0;
+
+    state.hint_instruction.clear();
+    state.hint_assembly.clear();
+    state.hint_pc = 0;
+
+    state.last_row_id.clear();
+    state.pc_to_step.clear();
+    state.pc_to_instruction.clear();
+    state.pc_to_assembly.clear();
+    state.current_air_name.clear();
+    state.step_chips.clear();
 }
 
 pub fn get_seed() -> u64 {
@@ -440,16 +472,24 @@ pub fn print_injection_info(
 }
 
 pub fn print_trace_info() {
-    let state = GLOBAL_STATE.lock().unwrap();
-    if state.trace_logging {
-        let payload = json!({
-            "step": state.step,
-            "pc": state.hint_pc,
-            "instruction": state.hint_instruction,
-            "assembly": state.hint_assembly,
-        });
-        capture_json("trace", payload.clone());
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    if !state.trace_logging {
+        return;
     }
+
+    // Emit one instruction-level record per step. This replaces the old `<trace>` printing.
+    // We also drain the per-step chip list to avoid unbounded growth if `print_trace_info` is
+    // called repeatedly without `inc_step`.
+    let chips = std::mem::take(&mut state.step_chips);
+    let payload = json!({
+        "type": "insn",
+        "step": state.step,
+        "pc": state.hint_pc,
+        "instruction": state.hint_instruction,
+        "assembly": state.hint_assembly,
+        "chips": chips,
+    });
+    capture_json(payload);
 }
 
 fn escape_json_string(value: &str) -> String {
@@ -511,40 +551,42 @@ pub fn print_micro_ops_deltas(air_names: &Vec<String>, prev_heights: &Vec<usize>
     }
     chips.push_str("]");
 
+    // This is also instruction-level; keep it within the beak protocol as an `insn` record with
+    // a structured `chip_deltas` field (and a redundant `chips` list for quick scanning).
+    let chip_deltas = parse_json_or_string(&chips);
+    let chip_names: Vec<String> = chip_deltas
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.get("chip").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
     let payload = json!({
-        "context": "micro_ops",
+        "type": "insn",
         "step": state.step,
         "pc": state.hint_pc,
         "instruction": state.hint_instruction,
         "assembly": state.hint_assembly,
-        "chips": parse_json_or_string(&chips),
+        "chips": chip_names,
+        "chip_deltas": chip_deltas,
     });
-    capture_json("record", payload.clone());
+    capture_json(payload);
 }
 
 pub fn print_micro_op_json(chip: &String, payload_json: &String) {
-    let mut state = GLOBAL_STATE.lock().unwrap();
-    if !state.trace_logging {
-        return;
-    }
-
-    let uop_idx = state.micro_idx;
-    state.micro_idx = state.micro_idx.wrapping_add(1);
-
-    let payload = json!({
-        "context": "micro_ops_uop",
-        "step": state.step,
-        "pc": state.hint_pc,
-        "instruction": state.hint_instruction,
-        "assembly": state.hint_assembly,
-        "chip": chip,
-        "uop_idx": uop_idx,
-        "payload": parse_json_or_string(payload_json),
-    });
-    capture_json("record", payload.clone());
+    // Deprecated: keep this function for local debugging, but do not emit JSON records.
+    // The beak protocol only includes: `chip_row`, `interaction`, `insn`.
+    let _ = (chip, payload_json);
 }
 
-pub fn print_chip_row_json(domain: &str, chip: &String, gates_json: &str, values_json: &str) {
+pub fn emit_chip_row_json(
+    domain: &str,
+    chip: &String,
+    chip_kind: &str,
+    gates_json: &str,
+    values_json: &str,
+) {
     let mut state = GLOBAL_STATE.lock().unwrap();
     if !state.trace_logging {
         return;
@@ -556,11 +598,14 @@ pub fn print_chip_row_json(domain: &str, chip: &String, gates_json: &str, values
     state.row_seq = state.row_seq.wrapping_add(1);
     let row_id = format!("openvm:{}:{}:{}", state.step, uop_idx, row_seq);
     state.last_row_id = row_id.clone();
+    state.step_chips.push(chip.clone());
 
     let payload = json!({
-        "context": "micro_op",
-        "micro_op_type": "chip_row",
+        "type": "chip_row",
         "step": state.step,
+        "op_idx": uop_idx,
+        "row_seq": row_seq,
+        "chip_kind": chip_kind,
         "pc": state.hint_pc,
         "instruction": state.hint_instruction,
         "assembly": state.hint_assembly,
@@ -570,14 +615,14 @@ pub fn print_chip_row_json(domain: &str, chip: &String, gates_json: &str, values
         "gates": parse_json_or_string(gates_json),
         "values": parse_json_or_string(values_json),
     });
-    capture_json("record", payload.clone());
+    capture_json(payload);
 }
 
 pub fn get_last_row_id() -> String {
     GLOBAL_STATE.lock().unwrap().last_row_id.clone()
 }
 
-pub fn print_interaction_json(
+pub fn emit_interaction_json(
     table_id: &str,
     io: &str,
     kind: &str,
@@ -592,9 +637,9 @@ pub fn print_interaction_json(
     }
 
     let payload = json!({
-        "context": "micro_op",
-        "micro_op_type": "interaction",
+        "type": "interaction",
         "step": state.step,
+        "op_idx": null,
         "pc": state.hint_pc,
         "instruction": state.hint_instruction,
         "assembly": state.hint_assembly,
@@ -606,7 +651,7 @@ pub fn print_interaction_json(
         "multiplicity": { "value": multiplicity_value, "ref": multiplicity_ref },
         "payload": parse_json_or_string(payload_json),
     });
-    capture_json("record", payload.clone());
+    capture_json(payload);
 }
 
 

@@ -5,6 +5,9 @@ edition = "2021"
 description = "OpenVM-specific beak binaries (commit d7eab708)"
 publish = false
 
+[lib]
+path = "src/lib/mod.rs"
+
 [[bin]]
 name = "beak-trace"
 path = "src/bin/trace.rs"
@@ -17,6 +20,9 @@ path = "src/bin/fuzz.rs"
 beak-core = { path = "../../crates/beak-core" }
 clap = "4.5"
 serde_json = "1"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2"
+strum = { version = "0.27", features = ["derive"] }
 
 # OpenVM path dependencies (scoped to one specific commit)
 fuzzer_utils = { path = "../../beak-py/out/openvm-d7eab708f43487b2e7c00524ffd611f835e8e6b5/openvm-src/crates/fuzzer_utils" }
