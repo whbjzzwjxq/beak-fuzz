@@ -50,6 +50,10 @@ pub struct Loop1Outputs {
 
 #[derive(Debug, Clone, Default)]
 pub struct BackendEval {
+    /// Backend-defined trace size metric used for reporting.
+    ///
+    /// Note: this is not necessarily “total micro-ops”. Some backends may report instruction count
+    /// as a proxy until full micro-op accounting is wired up.
     pub micro_op_count: usize,
     pub bucket_hits: Vec<BucketHit>,
     pub final_regs: Option<[u32; 32]>,
@@ -77,6 +81,7 @@ pub trait LoopBackend {
 struct RunStats {
     bucket_hits_sig: String,
     bucket_hit_count: usize,
+    /// Copied from `BackendEval::micro_op_count` for logging/bug records.
     micro_op_count: usize,
     bucket_hits: Vec<BucketHit>,
     mismatch_regs: Vec<(u32, u32, u32)>,

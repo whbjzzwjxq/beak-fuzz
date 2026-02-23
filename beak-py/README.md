@@ -36,17 +36,21 @@ uv run openvm-fuzzer install --commit-or-branch bmk-regzero
 
 ### 4. Run a seed (via Rust beak-trace)
 
-This repository's current integration test runner for OpenVM is the Rust binary:
-`projects/openvm` -> `beak-trace`.
+This repository's current integration test runner for OpenVM is the Rust binary in a commit-pinned project:
+`projects/openvm-<commit>` -> `beak-trace`.
 
 ```bash
-cd ../projects/openvm
+# From the repo root, use the Makefile helpers to resolve aliases and run the right project.
+cd ..
+
+# (If you haven't installed the snapshot yet)
+make openvm-install COMMIT=bmk-regzero
 
 # Baseline: should PASS (oracle regs match OpenVM regs)
-cargo run --bin beak-trace -- --bin "00100513 00200593 00b50633"
+make openvm-run COMMIT=bmk-regzero BIN=beak-trace ARGS='--bin "00100513 00200593 00b50633"'
 
 # Soundness example: writes x0 (rd=0), should DETECT mismatch
-cargo run --bin beak-trace -- --bin "12345017 00000533"
+make openvm-run COMMIT=bmk-regzero BIN=beak-trace ARGS='--bin "12345017 00000533"'
 ```
 
 ## Core Architecture
@@ -55,11 +59,14 @@ cargo run --bin beak-trace -- --bin "12345017 00000533"
 2. **`projects/*-fuzzer`**: Per-zkVM packages that can:
    - materialize a local zkVM repo snapshot into `out/<zkvm>-<commit>/...`
    - optionally apply instrumentation / fault-injection patches (where supported)
-3. **`crates/beak-core`** (Rust): shared canonical trace types and parsing used by Rust binaries (e.g. `beak-trace`).
+3. **`crates/beak-core`** (Rust): shared ISA/oracle, seed format, fuzz loop scaffolding, and bucket/feedback traits used by backend runners (e.g. `beak-trace`, `beak-fuzz`).
 
 ## Register Safety
 
-Beak-py uses a subset of safe RISC-V registers (`x5-x7`, `x10-x17`, `x28-x31`) to avoid conflicts with system-reserved registers like `sp` (stack pointer) and `gp` (global pointer).
+Some tooling/pipelines may prefer a subset of “safe” RISC-V registers (`x5-x7`, `x10-x17`, `x28-x31`)
+to avoid conflicts with system-reserved registers like `sp` and `gp`.
+
+Note: the current loop1 mutator/seed pipeline does not strictly enforce this constraint for all generated mutations.
 
 ## OpenVM Commit Options
 

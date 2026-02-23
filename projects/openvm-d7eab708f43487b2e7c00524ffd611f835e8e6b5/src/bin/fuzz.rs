@@ -37,7 +37,7 @@ fn resolve_path(root: &Path, arg: &str) -> PathBuf {
 
 fn main() {
     let matches = Command::new("beak-fuzz")
-        .about("Loop1: fuzz OpenVM prover vs oracle, bucket-guided.")
+        .about("Loop1: in-process mutational fuzzing (oracle vs OpenVM). Bucket feedback is WIP.")
         .arg(
             Arg::new("seeds_jsonl")
                 .long("seeds-jsonl")

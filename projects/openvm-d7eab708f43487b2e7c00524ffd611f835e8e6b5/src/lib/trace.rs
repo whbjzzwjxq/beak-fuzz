@@ -232,11 +232,18 @@ impl OpenVMTrace {
         &self.interactions[i]
     }
 
-    /// Slice of interactions for a row_id; prefer `interaction_indices_by_row_id` for zero-copy.
+    /// Slice of interactions for a row_id.
+    ///
+    /// Note: this is currently not implemented (would require allocation to materialize a slice of
+    /// references). Prefer `interaction_indices_by_row_id` / `interactions_for_step` instead.
     pub fn get_interactions_by_row_id(&self, _row_id: &str) -> &[OpenVMInteraction] {
         &[]
     }
 
+    /// Slice of interactions for a table_id.
+    ///
+    /// Note: currently not implemented; keep the API surface minimal until we settle on a stable
+    /// table-id taxonomy.
     pub fn get_interactions_by_table_id(&self, _table_id: &str) -> &[OpenVMInteraction] {
         &[]
     }

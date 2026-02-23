@@ -24,14 +24,16 @@ beak-py/
 - **Snapshot**: A checkout of a specific zkVM commit (or alias resolved to a commit) placed under
   `out/<zkvm>-<commit>/...`. Snapshots are treated as disposable build inputs.
 - **Patch pipeline**: A deterministic sequence of edits applied to a snapshot to:
-  - enable JSON trace emission (e.g. `<record>...</record>`)
+  - enable JSON trace emission (e.g. `{"type":"instruction"|"chip_row"|"interaction","data":{...}}`)
   - relax protections / assertions for fuzzing-style workloads
   - add small helper crates or wiring needed by the Rust-side runner
 - **Separation of concerns**:
   - Python: *fetch + patch + stage* zkVM sources
   - Rust: *execute + prove + verify + compare + analyze traces*
 
-Rust-side "facts/standards" (trace schema, buckets, invariants) live in `crates/beak-core`.
+Rust-side shared "facts/standards" live in `crates/beak-core` (ISA/oracle, seed format, fuzz-loop scaffolding,
+bucket/feedback traits). Backend-specific trace schemas and parsers typically live in the backend project under
+`projects/<zkvm>-<commit>/`, while snapshot-side emitters live in the injected `crates/fuzzer_utils`.
 
 ## OpenVM flow (current primary target)
 

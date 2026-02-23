@@ -17,7 +17,7 @@ This repository is organized to keep zkVM-specific code isolated, and keep share
   - Intended to be buildable on a stable toolchain when possible.
   - Example modules:
     - `rv32im`: RISC-V RV32IM instruction parsing/encoding and an oracle executor.
-    - `trace`: cross-zkVM-friendly trace/micro-op data structures.
+    - `trace`: bucket/feedback traits and canonicalization helpers (backend-specific trace schemas live in `projects/<zkvm>-<commit>/`).
     - `fuzz`: shared seed format (`FuzzingSeed`) and metadata helpers.
 - `projects/<zkvm>-<commit>/`
   - One independent Rust project per zkVM snapshot (zkVM + pinned commit).
@@ -56,8 +56,8 @@ Each zkVM snapshot project provides its own binaries under `projects/<zkvm>-<com
 
 For example, `projects/openvm-d7eab708f43487b2e7c00524ffd611f835e8e6b5` provides:
 
-- `beak-trace`: runs an oracle execution (rrs-lib) and compares it against OpenVM execution/proving/verification.
-- `beak-fuzz`: placeholder binary currently; intended to host fuzz loops and integration with fuzzing engines.
+- `beak-trace`: runs oracle execution and compares it against OpenVM execution/proving/verification; can also print captured trace JSON logs (when enabled by snapshot instrumentation).
+- `beak-fuzz`: runs loop1 (libAFL in-process mutational fuzzing) for oracle vs OpenVM differential checking. Bucket-guided feedback is currently best-effort and depends on backend bucket implementation.
 
 ## Data Flow (Typical Differential Check)
 

@@ -770,8 +770,8 @@ def _patch_regzero_system_connector_emit_chip_row(openvm_install_path: Path) -> 
 #     insert = r"""
 
 #         if fuzzer_utils::is_trace_logging() {
-#             // NOTE: We emit ChipRow-style micro-ops, i.e. per-chip payloads. This matches
-#             // the beak-core interface (MicroOp = ChipRow | InteractionBase).
+#             // NOTE: We emit ChipRow-style records, i.e. per-chip payloads, using the
+#             // `{"type":"chip_row","data":{...}}` JSON envelope emitted by fuzzer_utils.
 #             let gates = json!({"is_real": 1}).to_string();
 
 #             let adapter_chip = get_air_name(self.adapter.air());
@@ -866,8 +866,8 @@ def _patch_regzero_system_connector_emit_chip_row(openvm_install_path: Path) -> 
 #                 r"""\1
 
 #         if fuzzer_utils::is_trace_logging() {
-#             // NOTE: We emit ChipRow-style micro-ops, i.e. per-chip payloads. This matches
-#             // the beak-core interface (MicroOp = ChipRow | InteractionBase).
+#             // NOTE: We emit ChipRow-style records, i.e. per-chip payloads, using the
+#             // `{"type":"chip_row","data":{...}}` JSON envelope emitted by fuzzer_utils.
 #             let gates = json!({"is_real": 1}).to_string();
 
 #             let adapter_chip = get_air_name(self.adapter.air());

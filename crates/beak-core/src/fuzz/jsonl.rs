@@ -28,6 +28,7 @@ pub struct BugRecord {
     pub timed_out: bool,
     /// Canonical bucket signature for this run (backend-defined or derived from bucket hit signatures).
     pub bucket_hits_sig: String,
+    /// Backend-defined trace size metric (see `BackendEval::micro_op_count`).
     pub micro_op_count: usize,
     pub bucket_hits: Vec<BucketHit>,
     pub mismatch_regs: Vec<(u32, u32, u32)>, // (idx, oracle, prover)

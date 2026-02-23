@@ -15,7 +15,7 @@ use serde_json::Value;
 
 fn main() {
     let matches = Command::new("beak-trace")
-        .about("Disassembles and traces RISC-V instruction words (hex).")
+        .about("Run oracle vs OpenVM and optionally print captured trace JSON logs.")
         .arg(
             Arg::new("bin")
                 .long("bin")
@@ -26,7 +26,7 @@ fn main() {
         .arg(
             Arg::new("print_micro_ops")
                 .long("print-micro-ops")
-                .help("Parse captured JSON logs into beak-core MicroOp and print them.")
+                .help("Print captured JSON trace records (raw).")
                 .action(clap::ArgAction::SetTrue),
         )
         .after_help(
@@ -142,8 +142,8 @@ fn run_trace(words: &[u32], print_micro_ops: bool) -> bool {
 
     // --- 6. Print captured JSON records (raw) ---
     //
-    // Note: `beak-core` no longer exposes an OpenVM-specific `MicroOp` parser here. At this stage,
-    // we keep `beak-trace` useful by printing the raw captured JSON records.
+    // Note: `beak-trace` prints raw JSON records captured from the instrumented OpenVM snapshot.
+    // Typed parsing lives in the backend project (e.g. `OpenVMTrace::from_logs`).
     if print_micro_ops {
         for (i, v) in json_logs.iter().enumerate() {
             print_json_log_line(i, v);

@@ -1,3 +1,3 @@
-# Arguzz Utils
+# zkvm-fuzzer-utils
 
-Collection of useful utilities shared among the ZKVM fuzzer implementations.
+Collection of small utilities shared among zkVM fuzzer installers/patchers.

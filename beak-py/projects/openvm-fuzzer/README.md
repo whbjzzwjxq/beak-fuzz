@@ -1,4 +1,4 @@
-# Arguzz Fuzzer for OpenVM
+# OpenVM Fuzzer Installer/Patcher (beak-py)
 
 ## OpenVM Resources
   - https://book.openvm.dev/advanced-usage/sdk.html
