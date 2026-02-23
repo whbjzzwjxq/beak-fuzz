@@ -11,6 +11,8 @@ use openvm_sdk::{config::AppConfig, prover::verify_app_proof, Sdk, StdIn, F};
 use openvm_transpiler::transpiler::Transpiler;
 
 use beak_core::rv32im::oracle::RISCVOracle;
+use beak_core::trace::{sorted_signatures_from_hits, Trace};
+use beak_openvm_d7eab708::trace::OpenVMTrace;
 use serde_json::Value;
 
 fn main() {
@@ -27,6 +29,12 @@ fn main() {
             Arg::new("print_micro_ops")
                 .long("print-micro-ops")
                 .help("Print captured JSON trace records (raw).")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("print_buckets")
+                .long("print-buckets")
+                .help("Parse captured logs and print derived bucket hits (signatures).")
                 .action(clap::ArgAction::SetTrue),
         )
         .after_help(
@@ -57,6 +65,7 @@ fn main() {
 
     let args = input_words;
     let print_micro_ops = matches.get_flag("print_micro_ops");
+    let print_buckets = matches.get_flag("print_buckets");
 
     let words: Vec<u32> = args
         .iter()
@@ -72,7 +81,7 @@ fn main() {
     let result = std::thread::Builder::new()
         .name("trace-main".into())
         .stack_size(256 * 1024 * 1024)
-        .spawn(move || run_trace(&words, print_micro_ops))
+        .spawn(move || run_trace(&words, print_micro_ops, print_buckets))
         .expect("spawn thread")
         .join()
         .expect("thread panicked");
@@ -82,7 +91,7 @@ fn main() {
     }
 }
 
-fn run_trace(words: &[u32], print_micro_ops: bool) -> bool {
+fn run_trace(words: &[u32], print_micro_ops: bool, print_buckets: bool) -> bool {
     // --- 1. Oracle ---
     println!("\n=== Oracle (rrs-lib) ===");
     let oracle_regs = RISCVOracle::execute(words);
@@ -147,6 +156,22 @@ fn run_trace(words: &[u32], print_micro_ops: bool) -> bool {
     if print_micro_ops {
         for (i, v) in json_logs.iter().enumerate() {
             print_json_log_line(i, v);
+        }
+    }
+
+    if print_buckets {
+        println!("\n=== Derived bucket hits ===");
+        match OpenVMTrace::from_logs(json_logs) {
+            Ok(trace) => {
+                let hits = trace.bucket_hits();
+                println!("  {} hit(s)", hits.len());
+                for sig in sorted_signatures_from_hits(hits) {
+                    println!("  {sig}");
+                }
+            }
+            Err(e) => {
+                println!("  ERROR: failed to parse logs into OpenVMTrace: {e}");
+            }
         }
     }
 

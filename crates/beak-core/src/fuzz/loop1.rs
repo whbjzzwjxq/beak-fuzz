@@ -179,13 +179,22 @@ fn load_initial_seeds(
 struct BucketNoveltyFeedback {
     seen: HashSet<String>,
     corpus_writer: JsonlWriter,
+    bug_writer: JsonlWriter,
     cfg: Loop1Config,
     name: std::borrow::Cow<'static, str>,
+    written_bug_keys: HashSet<String>,
 }
 
 impl BucketNoveltyFeedback {
-    fn new(corpus_writer: JsonlWriter, cfg: Loop1Config) -> Self {
-        Self { seen: HashSet::new(), corpus_writer, cfg, name: "BucketNoveltyFeedback".into() }
+    fn new(corpus_writer: JsonlWriter, bug_writer: JsonlWriter, cfg: Loop1Config) -> Self {
+        Self {
+            seen: HashSet::new(),
+            corpus_writer,
+            bug_writer,
+            cfg,
+            name: "BucketNoveltyFeedback".into(),
+            written_bug_keys: HashSet::new(),
+        }
     }
 }
 
@@ -207,6 +216,32 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
         _exit_kind: &ExitKind,
     ) -> Result<bool, Error> {
         let stats = LAST_RUN.lock().unwrap().clone();
+
+        // Always record mismatches as "bugs" (independent of corpus novelty).
+        if !stats.mismatch_regs.is_empty() {
+            let words = decode_words_from_input(input, 2048);
+            let bug_key = format!(
+                "mismatch|{}|{}",
+                stats.bucket_hits_sig,
+                words.iter().map(|w| format!("{w:08x}")).collect::<Vec<_>>().join(",")
+            );
+            if self.written_bug_keys.insert(bug_key) {
+                let rec = BugRecord {
+                    zkvm_commit: self.cfg.zkvm_commit.clone(),
+                    rng_seed: self.cfg.rng_seed,
+                    timeout_ms: self.cfg.timeout_ms,
+                    timed_out: stats.timed_out,
+                    bucket_hits_sig: stats.bucket_hits_sig.clone(),
+                    micro_op_count: stats.micro_op_count,
+                    bucket_hits: stats.bucket_hits.clone(),
+                    mismatch_regs: stats.mismatch_regs.clone(),
+                    instructions: words,
+                    metadata: serde_json::json!({ "kind": "mismatch" }),
+                };
+                self.bug_writer.append_json_line(&rec).map_err(|e| Error::unknown(e))?;
+            }
+        }
+
         let sig = stats.bucket_hits_sig;
         if sig.is_empty() {
             return Ok(false);
@@ -231,55 +266,38 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
     }
 }
 
-/// Objective: treat mismatch as a \"crash\" signal and write a bug record.
-struct MismatchObjective {
-    bug_writer: JsonlWriter,
-    cfg: Loop1Config,
+/// Objective: never mark an input as a "solution".
+///
+/// We still record mismatches to `bugs.jsonl` in the feedback, so objective must stay "false"
+/// to let libAFL evaluate feedback (and thus write `corpus.jsonl`).
+struct NeverObjective {
     name: std::borrow::Cow<'static, str>,
 }
 
-impl MismatchObjective {
-    fn new(bug_writer: JsonlWriter, cfg: Loop1Config) -> Self {
-        Self { bug_writer, cfg, name: "MismatchObjective".into() }
+impl NeverObjective {
+    fn new() -> Self {
+        Self { name: "NeverObjective".into() }
     }
 }
 
-impl Named for MismatchObjective {
+impl Named for NeverObjective {
     fn name(&self) -> &std::borrow::Cow<'static, str> {
         &self.name
     }
 }
 
-impl StateInitializer<LoopState> for MismatchObjective {}
+impl StateInitializer<LoopState> for NeverObjective {}
 
-impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for MismatchObjective {
+impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for NeverObjective {
     fn is_interesting(
         &mut self,
         _state: &mut LoopState,
         _mgr: &mut EM,
-        input: &BytesInput,
+        _input: &BytesInput,
         _observers: &OT,
-        exit_kind: &ExitKind,
+        _exit_kind: &ExitKind,
     ) -> Result<bool, Error> {
-        if !matches!(exit_kind, ExitKind::Crash) {
-            return Ok(false);
-        }
-        let stats = LAST_RUN.lock().unwrap().clone();
-        let words = decode_words_from_input(input, 2048);
-        let rec = BugRecord {
-            zkvm_commit: self.cfg.zkvm_commit.clone(),
-            rng_seed: self.cfg.rng_seed,
-            timeout_ms: self.cfg.timeout_ms,
-            timed_out: stats.timed_out,
-            bucket_hits_sig: stats.bucket_hits_sig,
-            micro_op_count: stats.micro_op_count,
-            bucket_hits: stats.bucket_hits.clone(),
-            mismatch_regs: stats.mismatch_regs,
-            instructions: words,
-            metadata: serde_json::json!({ "kind": "mismatch" }),
-        };
-        self.bug_writer.append_json_line(&rec).map_err(|e| Error::unknown(e))?;
-        Ok(true)
+        Ok(false)
     }
 }
 
@@ -324,8 +342,8 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     let corpus = InMemoryCorpus::<BytesInput>::new();
     let solutions = InMemoryCorpus::<BytesInput>::new();
 
-    let mut feedback = BucketNoveltyFeedback::new(corpus_writer.clone(), cfg.clone());
-    let mut objective = MismatchObjective::new(bug_writer.clone(), cfg.clone());
+    let mut feedback = BucketNoveltyFeedback::new(corpus_writer.clone(), bug_writer.clone(), cfg.clone());
+    let mut objective = NeverObjective::new();
     let mut state: LoopState =
         StdState::new(rand, corpus, solutions, &mut feedback, &mut objective)
             .map_err(|e| format!("create state failed: {e}"))?;
@@ -395,19 +413,28 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
             timed_out,
         };
 
-        if timed_out {
-            ExitKind::Timeout
-        } else if !mismatches.is_empty() {
-            ExitKind::Crash
-        } else {
-            ExitKind::Ok
-        }
+        // We treat timeouts as a *soft* signal (recorded in `RunStats`) and do not propagate
+        // `ExitKind::Timeout` to libAFL, as it may short-circuit feedback/corpus logic on some
+        // platforms. The in-process hard timeout is handled separately.
+        ExitKind::Ok
     };
 
+    // libAFL's in-process executor has a *hard* timeout enforced by SIGALRM (default 5s) that
+    // calls `libc::_exit(55)` on macOS. OpenVM proving regularly exceeds seconds, so we must
+    // raise this hard timeout to keep the fuzzer alive. The loop's `timeout_ms` remains a
+    // *soft* metric (recorded as `timed_out`) and does not abort execution.
+    let inproc_hard_timeout = Duration::from_secs(10 * 60);
+
     let observers = tuple_list!();
-    let mut executor =
-        InProcessExecutor::new(&mut harness, observers, &mut fuzzer, &mut state, &mut mgr)
-            .map_err(|e| format!("create executor failed: {e}"))?;
+    let mut executor = InProcessExecutor::with_timeout::<NeverObjective>(
+        &mut harness,
+        observers,
+        &mut fuzzer,
+        &mut state,
+        &mut mgr,
+        inproc_hard_timeout,
+    )
+    .map_err(|e| format!("create executor failed: {e}"))?;
 
     let mut stages = tuple_list!(StdMutationalStage::new(SeedMutator::new(cfg.max_instructions)));
 

@@ -1,9 +1,4 @@
 use openvm_instructions::VmOpcode;
-use openvm_rv32im_transpiler::{
-    BaseAluOpcode, BranchEqualOpcode, BranchLessThanOpcode, DivRemOpcode, LessThanOpcode,
-    MulHOpcode, MulOpcode, Rv32AuipcOpcode, Rv32JalLuiOpcode, Rv32JalrOpcode, Rv32LoadStoreOpcode,
-    ShiftOpcode,
-};
 use serde::{Deserialize, Serialize};
 
 use crate::{FieldElement, Pc, Timestamp};
@@ -94,7 +89,11 @@ pub enum Rs2Source {
 pub enum OpenVMChipRowPayload {
     // ---- ALU family (always-write) ----
     BaseAlu {
-        op: BaseAluOpcode,
+        /// Local opcode value emitted by the instrumented OpenVM snapshot.
+        ///
+        /// Note: the tracer currently emits `u32` (not enum strings), so we keep this as `u32`
+        /// to ensure logs are always parseable.
+        op: u32,
         rd_ptr: u32,
         rs1_ptr: u32,
         rs2: Rs2Source,
@@ -107,7 +106,7 @@ pub enum OpenVMChipRowPayload {
     },
 
     Shift {
-        op: ShiftOpcode,
+        op: u32,
         rd_ptr: u32,
         rs1_ptr: u32,
         rs2: Rs2Source,
@@ -117,7 +116,7 @@ pub enum OpenVMChipRowPayload {
     },
 
     LessThan {
-        op: LessThanOpcode,
+        op: u32,
         rd_ptr: u32,
         rs1_ptr: u32,
         rs2: Rs2Source,
@@ -127,7 +126,7 @@ pub enum OpenVMChipRowPayload {
     },
 
     Mul {
-        op: MulOpcode,
+        op: u32,
         rd_ptr: u32,
         rs1_ptr: u32,
         rs2_ptr: u32,
@@ -137,7 +136,7 @@ pub enum OpenVMChipRowPayload {
     },
 
     MulH {
-        op: MulHOpcode,
+        op: u32,
         rd_ptr: u32,
         rs1_ptr: u32,
         rs2_ptr: u32,
@@ -147,7 +146,7 @@ pub enum OpenVMChipRowPayload {
     },
 
     DivRem {
-        op: DivRemOpcode,
+        op: u32,
         rd_ptr: u32,
         rs1_ptr: u32,
         rs2_ptr: u32,
@@ -158,7 +157,7 @@ pub enum OpenVMChipRowPayload {
 
     // ---- Branch family (no writes) ----
     BranchEqual {
-        op: BranchEqualOpcode,
+        op: u32,
         rs1_ptr: u32,
         rs2_ptr: u32,
         /// Signed immediate as used by the RISC-V-style branch.
@@ -174,7 +173,7 @@ pub enum OpenVMChipRowPayload {
     },
 
     BranchLessThan {
-        op: BranchLessThanOpcode,
+        op: u32,
         rs1_ptr: u32,
         rs2_ptr: u32,
         imm: i32,
@@ -188,7 +187,7 @@ pub enum OpenVMChipRowPayload {
 
     // ---- Jump family (conditional write) ----
     JalLui {
-        op: Rv32JalLuiOpcode,
+        op: u32,
         rd_ptr: u32,
         imm: u32,
         needs_write: bool,
@@ -199,7 +198,7 @@ pub enum OpenVMChipRowPayload {
     },
 
     Jalr {
-        op: Rv32JalrOpcode,
+        op: u32,
         rd_ptr: u32,
         rs1_ptr: u32,
         imm: i32,
@@ -213,7 +212,7 @@ pub enum OpenVMChipRowPayload {
 
     // ---- AUIPC ----
     Auipc {
-        op: Rv32AuipcOpcode,
+        op: u32,
         rd_ptr: u32,
         imm: u32,
         from_pc: Pc,
@@ -222,7 +221,7 @@ pub enum OpenVMChipRowPayload {
 
     // ---- Load/Store ----
     LoadStore {
-        op: Rv32LoadStoreOpcode,
+        op: u32,
         rs1_ptr: u32,
         rd_rs2_ptr: u32,
         imm: i32,
@@ -241,7 +240,7 @@ pub enum OpenVMChipRowPayload {
 
     LoadSignExtend {
         /// Typically LOADB / LOADH variants.
-        op: Rv32LoadStoreOpcode,
+        op: u32,
         rs1_ptr: u32,
         rd_ptr: u32,
         imm: i32,

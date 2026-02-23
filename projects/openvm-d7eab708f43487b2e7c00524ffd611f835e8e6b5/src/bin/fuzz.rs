@@ -3,19 +3,8 @@ use std::path::{Path, PathBuf};
 use clap::{Arg, Command};
 
 use beak_core::fuzz::loop1::{run_loop1_threaded, Loop1Config, DEFAULT_RNG_SEED};
-use beak_core::rv32im::instruction::RV32IMInstruction;
 
 use beak_openvm_d7eab708::backend::OpenVmBackend;
-use openvm_instructions::exe::VmExe;
-use openvm_instructions::instruction::Instruction;
-use openvm_instructions::program::Program;
-use openvm_instructions::riscv::RV32_REGISTER_AS;
-use openvm_instructions::LocalOpcode;
-use openvm_instructions::SystemOpcode;
-use openvm_rv32im_transpiler::{Rv32ITranspilerExtension, Rv32MTranspilerExtension};
-use openvm_sdk::config::AppConfig;
-use openvm_sdk::{Sdk, StdIn, F};
-use openvm_transpiler::transpiler::Transpiler;
 
 const ZKVM_COMMIT: &str = "d7eab708f43487b2e7c00524ffd611f835e8e6b5";
 
@@ -42,7 +31,9 @@ fn main() {
             Arg::new("seeds_jsonl")
                 .long("seeds-jsonl")
                 .default_value("storage/fuzzing_seeds/initial.jsonl")
-                .help("Path to the initial seed JSONL (relative to workspace root unless absolute)."),
+                .help(
+                    "Path to the initial seed JSONL (relative to workspace root unless absolute).",
+                ),
         )
         .arg(
             Arg::new("timeout_ms")
@@ -80,27 +71,14 @@ fn main() {
     let seeds_arg = matches.get_one::<String>("seeds_jsonl").unwrap().to_string();
     let seeds_path = resolve_path(&root, &seeds_arg);
 
-    let timeout_ms: u64 = matches
-        .get_one::<String>("timeout_ms")
-        .unwrap()
-        .parse()
-        .expect("timeout-ms");
-    let initial_limit: usize = matches
-        .get_one::<String>("initial_limit")
-        .unwrap()
-        .parse()
-        .expect("initial-limit");
+    let timeout_ms: u64 =
+        matches.get_one::<String>("timeout_ms").unwrap().parse().expect("timeout-ms");
+    let initial_limit: usize =
+        matches.get_one::<String>("initial_limit").unwrap().parse().expect("initial-limit");
     let no_initial_eval = matches.get_flag("no_initial_eval");
-    let max_instructions: usize = matches
-        .get_one::<String>("max_instructions")
-        .unwrap()
-        .parse()
-        .expect("max-instructions");
-    let iters: usize = matches
-        .get_one::<String>("iters")
-        .unwrap()
-        .parse()
-        .expect("iters");
+    let max_instructions: usize =
+        matches.get_one::<String>("max_instructions").unwrap().parse().expect("max-instructions");
+    let iters: usize = matches.get_one::<String>("iters").unwrap().parse().expect("iters");
 
     let cfg = Loop1Config {
         zkvm_tag: "openvm".to_string(),
@@ -129,4 +107,3 @@ fn main() {
         }
     }
 }
-

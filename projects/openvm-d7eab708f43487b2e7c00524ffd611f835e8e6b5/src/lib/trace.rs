@@ -156,7 +156,7 @@ impl OpenVMTrace {
             interactions_by_bus.entry(b.kind).or_default().push(i);
         }
 
-        Self {
+        let mut out = Self {
             instructions,
             chip_rows,
             interactions,
@@ -169,7 +169,12 @@ impl OpenVMTrace {
             interactions_by_step,
             interactions_by_row_id,
             interactions_by_bus,
-        }
+        };
+
+        // Derive trace feedback buckets (per-trace multi-hot).
+        let hits = crate::bucket::match_bucket_hits(&out);
+        out.bucket_hits = hits;
+        out
     }
 
     pub fn instructions(&self) -> &[OpenVMInsn] {

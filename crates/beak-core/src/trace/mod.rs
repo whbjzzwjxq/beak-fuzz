@@ -12,7 +12,18 @@ use serde_json::Value;
 pub enum BucketType {
     /// Placeholder bucket type until the cross-zkvm taxonomy is defined.
     Unknown = 0,
-    // TODO: Define the full cross-zkvm bucket taxonomy here.
+    // NOTE: This taxonomy is intentionally small and cross-backend.
+    // Backends should prefer putting fine-grained labels in `bucket_id`.
+    // TODO: Revisit this taxonomy once we have a full cross-zkvm bucket taxonomy.
+    Reg = 1,
+    RowValidity = 2,
+    Time = 3,
+    Memory = 4,
+    Immediate = 5,
+    ControlFlow = 6,
+    DivRem = 7,
+    AluBitwise = 8,
+    System = 9,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
