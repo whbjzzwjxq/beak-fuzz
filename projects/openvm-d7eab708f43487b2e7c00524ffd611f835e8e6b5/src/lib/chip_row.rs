@@ -1,274 +1,341 @@
-use beak_core::trace::micro_ops::chip_row::ChipRow;
 use openvm_instructions::VmOpcode;
 use openvm_rv32im_transpiler::{
-    BaseAluOpcode, BranchEqualOpcode, BranchLessThanOpcode, DivRemOpcode,
-    LessThanOpcode, MulHOpcode, MulOpcode, Rv32AuipcOpcode, Rv32JalLuiOpcode,
-    Rv32JalrOpcode, Rv32LoadStoreOpcode, ShiftOpcode,
+    BaseAluOpcode, BranchEqualOpcode, BranchLessThanOpcode, DivRemOpcode, LessThanOpcode,
+    MulHOpcode, MulOpcode, Rv32AuipcOpcode, Rv32JalLuiOpcode, Rv32JalrOpcode, Rv32LoadStoreOpcode,
+    ShiftOpcode,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{FieldElement, Pc, Timestamp};
 
-// ---------------------------------------------------------------------------
-// Base
-// ---------------------------------------------------------------------------
+// -----------------------------
+// Envelope/base
+// -----------------------------
 
-/// Fields shared by every chip row.
-///
-/// Key differences from the previous design:
-/// - No `op_idx`: each instruction execution maps to exactly one chip row.
-/// - No `kind` enum: the variant of `OpenVMChipRow` itself carries the kind.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenVMChipRowBase {
-    /// Global sequence number.
     pub seq: u64,
-
-    /// Step index — matches `OpenVMInsn.step_idx` for the same execution.
     pub step_idx: u64,
 
-    /// Whether this row is a real execution (vs. padding).
+    /// Chip-row index within a step (0..N-1).
+    ///
+    /// This enables representing multiple chip rows per instruction execution.
+    pub op_idx: u64,
     pub is_valid: bool,
 
-    /// Starting timestamp of the execution that produced this row.
-    pub timestamp: Timestamp,
+    /// Prefer Some(..). If you truly can't get it, emit None.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<Timestamp>,
 
-    /// Human-readable name of the chip instance (e.g. "Rv32BaseAlu").
+    /// Human-readable chip instance name, e.g. "Rv32BaseAlu".
     pub chip_name: String,
 }
 
-// ---------------------------------------------------------------------------
-// rs2 source (shared by ALU-family chips)
-// ---------------------------------------------------------------------------
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenVMChipRowKind {
+    BaseAlu,
+    Shift,
+    LessThan,
+    Mul,
+    MulH,
+    DivRem,
+    BranchEqual,
+    BranchLessThan,
+    JalLui,
+    Jalr,
+    Auipc,
+    LoadStore,
+    LoadSignExtend,
+    Phantom,
+    Program,
+    Connector,
+    Padding,
+}
+
+/// One JSON object per chip row:
+/// - `base` is uniform
+/// - `kind` is uniform
+/// - `payload` is a serde-oneof tagged enum
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenVMChipRowEnvelope {
+    pub base: OpenVMChipRowBase,
+    pub kind: OpenVMChipRowKind,
+    pub payload: OpenVMChipRowPayload,
+}
+
+/// Public type used throughout this crate.
+///
+/// We keep the `Envelope` name for JSON clarity but expose a shorter alias for code.
+pub type OpenVMChipRow = OpenVMChipRowEnvelope;
+
+// -----------------------------
+// Shared helper types
+// -----------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "src", rename_all = "snake_case")]
 pub enum Rs2Source {
     Reg { ptr: u32 },
     Imm { value: i32 },
 }
 
-// ---------------------------------------------------------------------------
-// Chip-specific rows (one struct per OpenVM chip)
-// ---------------------------------------------------------------------------
-
-// ---- ALU family (always-write, no needs_write) ----------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BaseAluChipRow {
-    pub base: OpenVMChipRowBase,
-    pub op: BaseAluOpcode,
-    pub rd_ptr: u32,
-    pub rs1_ptr: u32,
-    pub rs2: Rs2Source,
-}
+// -----------------------------
+// Payload (oneof)
+// -----------------------------
+//
+// We encode payload as:
+// { "type": "...", "data": { ... } }
+//
+// This keeps JSON stable and explicit.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShiftChipRow {
-    pub base: OpenVMChipRowBase,
-    pub op: ShiftOpcode,
-    pub rd_ptr: u32,
-    pub rs1_ptr: u32,
-    pub rs2: Rs2Source,
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum OpenVMChipRowPayload {
+    // ---- ALU family (always-write) ----
+    BaseAlu {
+        op: BaseAluOpcode,
+        rd_ptr: u32,
+        rs1_ptr: u32,
+        rs2: Rs2Source,
+        /// Output limbs (rd value).
+        a: Vec<u8>,
+        /// Input limbs (rs1 value).
+        b: Vec<u8>,
+        /// Input limbs (rs2 value / imm-expanded limbs).
+        c: Vec<u8>,
+    },
+
+    Shift {
+        op: ShiftOpcode,
+        rd_ptr: u32,
+        rs1_ptr: u32,
+        rs2: Rs2Source,
+        a: Vec<u8>,
+        b: Vec<u8>,
+        c: Vec<u8>,
+    },
+
+    LessThan {
+        op: LessThanOpcode,
+        rd_ptr: u32,
+        rs1_ptr: u32,
+        rs2: Rs2Source,
+        a: Vec<u8>,
+        b: Vec<u8>,
+        c: Vec<u8>,
+    },
+
+    Mul {
+        op: MulOpcode,
+        rd_ptr: u32,
+        rs1_ptr: u32,
+        rs2_ptr: u32,
+        a: Vec<u8>,
+        b: Vec<u8>,
+        c: Vec<u8>,
+    },
+
+    MulH {
+        op: MulHOpcode,
+        rd_ptr: u32,
+        rs1_ptr: u32,
+        rs2_ptr: u32,
+        a: Vec<u8>,
+        b: Vec<u8>,
+        c: Vec<u8>,
+    },
+
+    DivRem {
+        op: DivRemOpcode,
+        rd_ptr: u32,
+        rs1_ptr: u32,
+        rs2_ptr: u32,
+        a: Vec<u8>,
+        b: Vec<u8>,
+        c: Vec<u8>,
+    },
+
+    // ---- Branch family (no writes) ----
+    BranchEqual {
+        op: BranchEqualOpcode,
+        rs1_ptr: u32,
+        rs2_ptr: u32,
+        /// Signed immediate as used by the RISC-V-style branch.
+        imm: i32,
+        is_taken: bool,
+        from_pc: Pc,
+        to_pc: Pc,
+        /// Core-side input limbs.
+        a: Vec<u8>,
+        b: Vec<u8>,
+        /// Core comparison result (`cmp_result` column).
+        cmp_result: bool,
+    },
+
+    BranchLessThan {
+        op: BranchLessThanOpcode,
+        rs1_ptr: u32,
+        rs2_ptr: u32,
+        imm: i32,
+        is_taken: bool,
+        from_pc: Pc,
+        to_pc: Pc,
+        a: Vec<u8>,
+        b: Vec<u8>,
+        cmp_result: bool,
+    },
+
+    // ---- Jump family (conditional write) ----
+    JalLui {
+        op: Rv32JalLuiOpcode,
+        rd_ptr: u32,
+        imm: u32,
+        needs_write: bool,
+        from_pc: Pc,
+        to_pc: Pc,
+        rd_data: Vec<u8>,
+        is_jal: bool,
+    },
+
+    Jalr {
+        op: Rv32JalrOpcode,
+        rd_ptr: u32,
+        rs1_ptr: u32,
+        imm: i32,
+        imm_sign: bool,
+        needs_write: bool,
+        from_pc: Pc,
+        to_pc: Pc,
+        rs1_val: u32,
+        rd_data: Vec<u8>,
+    },
+
+    // ---- AUIPC ----
+    Auipc {
+        op: Rv32AuipcOpcode,
+        rd_ptr: u32,
+        imm: u32,
+        from_pc: Pc,
+        rd_data: Vec<u8>,
+    },
+
+    // ---- Load/Store ----
+    LoadStore {
+        op: Rv32LoadStoreOpcode,
+        rs1_ptr: u32,
+        rd_rs2_ptr: u32,
+        imm: i32,
+        imm_sign: bool,
+        mem_as: u32,
+        effective_ptr: u32,
+        is_store: bool,
+        needs_write: bool,
+        is_load: bool,
+        /// Core flags (usually 4 entries for the RV32IM load/store chip).
+        flags: [u32; 4],
+        read_data: Vec<u8>,
+        prev_data: Vec<u32>,
+        write_data: Vec<u32>,
+    },
+
+    LoadSignExtend {
+        /// Typically LOADB / LOADH variants.
+        op: Rv32LoadStoreOpcode,
+        rs1_ptr: u32,
+        rd_ptr: u32,
+        imm: i32,
+        imm_sign: bool,
+        mem_as: u32,
+        effective_ptr: u32,
+        needs_write: bool,
+        prev_data: Vec<u8>,
+        shifted_read_data: Vec<u8>,
+        data_most_sig_bit: bool,
+        shift_most_sig_bit: bool,
+        opcode_loadh_flag: bool,
+        opcode_loadb_flag1: bool,
+        opcode_loadb_flag0: bool,
+    },
+
+    // ---- System chips ----
+    Phantom {},
+
+    Program {
+        opcode: VmOpcode,
+        operands: [FieldElement; 7],
+        execution_frequency: u32,
+    },
+
+    Connector {
+        from_pc: Pc,
+        to_pc: Pc,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from_timestamp: Option<Timestamp>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        to_timestamp: Option<Timestamp>,
+        is_terminate: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exit_code: Option<u32>,
+    },
+
+    Padding {
+        data: String,
+    },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LessThanChipRow {
-    pub base: OpenVMChipRowBase,
-    pub op: LessThanOpcode,
-    pub rd_ptr: u32,
-    pub rs1_ptr: u32,
-    pub rs2: Rs2Source,
-}
+// -----------------------------
+// Optional: consistency checks
+// -----------------------------
+//
+// If you want, you can enforce that `kind` matches `payload` at runtime.
+// (Good to catch bugs early.)
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MulChipRow {
-    pub base: OpenVMChipRowBase,
-    pub op: MulOpcode,
-    pub rd_ptr: u32,
-    pub rs1_ptr: u32,
-    pub rs2_ptr: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MulHChipRow {
-    pub base: OpenVMChipRowBase,
-    pub op: MulHOpcode,
-    pub rd_ptr: u32,
-    pub rs1_ptr: u32,
-    pub rs2_ptr: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DivRemChipRow {
-    pub base: OpenVMChipRowBase,
-    pub op: DivRemOpcode,
-    pub rd_ptr: u32,
-    pub rs1_ptr: u32,
-    pub rs2_ptr: u32,
-}
-
-// ---- Branch family (no register writes) -----------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BranchEqualChipRow {
-    pub base: OpenVMChipRowBase,
-    pub op: BranchEqualOpcode,
-    pub rs1_ptr: u32,
-    pub rs2_ptr: u32,
-    pub imm: i32,
-    pub is_taken: bool,
-    pub from_pc: Pc,
-    pub to_pc: Pc,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BranchLessThanChipRow {
-    pub base: OpenVMChipRowBase,
-    pub op: BranchLessThanOpcode,
-    pub rs1_ptr: u32,
-    pub rs2_ptr: u32,
-    pub imm: i32,
-    pub is_taken: bool,
-    pub from_pc: Pc,
-    pub to_pc: Pc,
-}
-
-// ---- Jump family (conditional write) --------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JalLuiChipRow {
-    pub base: OpenVMChipRowBase,
-    pub op: Rv32JalLuiOpcode,
-    pub rd_ptr: u32,
-    pub imm: i32,
-    pub needs_write: bool,
-    pub from_pc: Pc,
-    pub to_pc: Pc,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JalrChipRow {
-    pub base: OpenVMChipRowBase,
-    pub op: Rv32JalrOpcode,
-    pub rd_ptr: u32,
-    pub rs1_ptr: u32,
-    pub imm: i32,
-    pub needs_write: bool,
-    pub from_pc: Pc,
-    pub to_pc: Pc,
-}
-
-// ---- AUIPC (always-write, the soundness-bug chip) -------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuipcChipRow {
-    pub base: OpenVMChipRowBase,
-    pub op: Rv32AuipcOpcode,
-    pub rd_ptr: u32,
-    pub imm: u32,
-}
-
-// ---- Load / Store (conditional write for loads) ---------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoadStoreChipRow {
-    pub base: OpenVMChipRowBase,
-    pub op: Rv32LoadStoreOpcode,
-    pub rs1_ptr: u32,
-    pub rd_rs2_ptr: u32,
-    pub imm: i32,
-    pub imm_sign: bool,
-    pub mem_as: u32,
-    pub effective_ptr: u32,
-    pub is_store: bool,
-    /// true when the op actually writes back to a register (load to x0 is gated off).
-    pub needs_write: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoadSignExtendChipRow {
-    pub base: OpenVMChipRowBase,
-    pub op: Rv32LoadStoreOpcode,
-    pub rs1_ptr: u32,
-    pub rd_ptr: u32,
-    pub imm: i32,
-    pub imm_sign: bool,
-    pub mem_as: u32,
-    pub effective_ptr: u32,
-    pub needs_write: bool,
-}
-
-// ---- System chips ---------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PhantomChipRow {
-    pub base: OpenVMChipRowBase,
-}
-
-/// Program chip: one row per instruction in the program (not per execution).
-/// Tracks execution frequency.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramChipRow {
-    pub base: OpenVMChipRowBase,
-    pub opcode: VmOpcode,
-    pub operands: [FieldElement; 7],
-    pub execution_frequency: u32,
-}
-
-/// Connector chip: exactly 2 rows per segment (initial + final boundary).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectorChipRow {
-    pub base: OpenVMChipRowBase,
-    pub from_pc: Pc,
-    pub to_pc: Pc,
-    pub from_timestamp: Timestamp,
-    pub to_timestamp: Timestamp,
-    pub is_terminate: bool,
-    pub exit_code: Option<u32>,
-}
-
-// ---------------------------------------------------------------------------
-// Top-level enum
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum OpenVMChipRow {
-    BaseAlu(BaseAluChipRow),
-    Shift(ShiftChipRow),
-    LessThan(LessThanChipRow),
-    Mul(MulChipRow),
-    MulH(MulHChipRow),
-    DivRem(DivRemChipRow),
-    BranchEqual(BranchEqualChipRow),
-    BranchLessThan(BranchLessThanChipRow),
-    JalLui(JalLuiChipRow),
-    Jalr(JalrChipRow),
-    Auipc(AuipcChipRow),
-    LoadStore(LoadStoreChipRow),
-    LoadSignExtend(LoadSignExtendChipRow),
-    Phantom(PhantomChipRow),
-    Program(ProgramChipRow),
-    Connector(ConnectorChipRow),
-}
-
-impl OpenVMChipRow {
+impl OpenVMChipRowEnvelope {
     pub fn base(&self) -> &OpenVMChipRowBase {
-        match self {
-            Self::BaseAlu(r) => &r.base,
-            Self::Shift(r) => &r.base,
-            Self::LessThan(r) => &r.base,
-            Self::Mul(r) => &r.base,
-            Self::MulH(r) => &r.base,
-            Self::DivRem(r) => &r.base,
-            Self::BranchEqual(r) => &r.base,
-            Self::BranchLessThan(r) => &r.base,
-            Self::JalLui(r) => &r.base,
-            Self::Jalr(r) => &r.base,
-            Self::Auipc(r) => &r.base,
-            Self::LoadStore(r) => &r.base,
-            Self::LoadSignExtend(r) => &r.base,
-            Self::Phantom(r) => &r.base,
-            Self::Program(r) => &r.base,
-            Self::Connector(r) => &r.base,
+        &self.base
+    }
+
+    pub fn validate_kind_matches_payload(&self) -> Result<(), String> {
+        let expected = match &self.payload {
+            OpenVMChipRowPayload::BaseAlu { .. } => OpenVMChipRowKind::BaseAlu,
+
+            OpenVMChipRowPayload::Shift { .. } => OpenVMChipRowKind::Shift,
+
+            OpenVMChipRowPayload::LessThan { .. } => OpenVMChipRowKind::LessThan,
+
+            OpenVMChipRowPayload::Mul { .. } => OpenVMChipRowKind::Mul,
+
+            OpenVMChipRowPayload::MulH { .. } => OpenVMChipRowKind::MulH,
+
+            OpenVMChipRowPayload::DivRem { .. } => OpenVMChipRowKind::DivRem,
+
+            OpenVMChipRowPayload::BranchEqual { .. } => OpenVMChipRowKind::BranchEqual,
+
+            OpenVMChipRowPayload::BranchLessThan { .. } => OpenVMChipRowKind::BranchLessThan,
+
+            OpenVMChipRowPayload::JalLui { .. } => OpenVMChipRowKind::JalLui,
+
+            OpenVMChipRowPayload::Jalr { .. } => OpenVMChipRowKind::Jalr,
+
+            OpenVMChipRowPayload::Auipc { .. } => OpenVMChipRowKind::Auipc,
+
+            OpenVMChipRowPayload::LoadStore { .. } => OpenVMChipRowKind::LoadStore,
+
+            OpenVMChipRowPayload::LoadSignExtend { .. } => OpenVMChipRowKind::LoadSignExtend,
+
+            OpenVMChipRowPayload::Phantom { .. } => OpenVMChipRowKind::Phantom,
+            OpenVMChipRowPayload::Program { .. } => OpenVMChipRowKind::Program,
+            OpenVMChipRowPayload::Connector { .. } => OpenVMChipRowKind::Connector,
+            OpenVMChipRowPayload::Padding { .. } => OpenVMChipRowKind::Padding,
+        };
+
+        if self.kind != expected {
+            return Err(format!(
+                "kind/payload mismatch: kind={:?}, payload expects {:?}",
+                self.kind, expected
+            ));
         }
+        Ok(())
     }
 }

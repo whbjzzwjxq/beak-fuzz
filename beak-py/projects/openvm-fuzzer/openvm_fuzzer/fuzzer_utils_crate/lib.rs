@@ -1,39 +1,43 @@
-use std::sync::Mutex;
-use std::collections::HashMap;
 use lazy_static::lazy_static;
 use openvm_stark_backend::p3_field::{Field, PrimeField32};
-use serde_json::{json, Value};
+use serde_json::json;
+use serde_json::{Map, Value};
+use std::sync::Mutex;
 
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
-use rand::seq::SliceRandom;
 use rand::seq::IndexedRandom;
+use rand::seq::SliceRandom;
+use rand::Rng;
 
 use openvm_rv32im_transpiler::{
     BaseAluOpcode,
-    ShiftOpcode,
-    LessThanOpcode,
-    Rv32LoadStoreOpcode,
     BranchEqualOpcode,
     BranchLessThanOpcode,
-    Rv32JalLuiOpcode,
-    Rv32JalrOpcode,
-    Rv32AuipcOpcode,
-    MulOpcode,
-    MulHOpcode,
     DivRemOpcode,
+    LessThanOpcode,
+    MulHOpcode,
+    MulOpcode,
+    Rv32AuipcOpcode,
     Rv32HintStoreOpcode,
     // Rv32Phantom,
+    Rv32JalLuiOpcode,
+    Rv32JalrOpcode,
+    Rv32LoadStoreOpcode,
+    ShiftOpcode,
 };
 
 use openvm_instructions::{
-    VmOpcode,
-    LocalOpcode,
-    SystemOpcode,
-    PublishOpcode,
-    instruction::Instruction,
+    instruction::Instruction, LocalOpcode, PublishOpcode, SystemOpcode, VmOpcode,
 };
 
+// -----------------------------------------------------------------------------
+// Row shape constants
+// -----------------------------------------------------------------------------
+//
+// These are used by the micro-op JSON schema (loop1) so that core-side emitters
+// can pass limbs as fixed-size arrays at call sites.
+pub const NUM_LIMBS: usize = 4;
+pub const LIMB_BITS: usize = 8;
 
 ////////////////
 // GLOBAL STATE
@@ -41,51 +45,704 @@ use openvm_instructions::{
 
 #[derive(Debug, Clone)]
 pub struct GlobalState {
-    pub trace_logging: bool,
-    pub injection: bool,
-    pub assertions: bool,
-    pub seed: u64,
-    pub step: u64,
-    pub micro_idx: u32,
-    pub row_seq: u64,
+    //////////////////////////////////////////////////////////////////////////////
+    /// The state for the micro-operation emission (loop1).
+    /// The number of times the zkvm has emitted a micro-operation: insn/chip_row/interaction.
+    pub seq: u64,
+
+    /// The number of times the zkvm has executed an insn.
+    pub step_idx: u64,
+
+    /// Interaction index within the current step (0..N-1).
+    pub op_idx_in_step: u64,
+
+    /// Chip-row index within the current step (0..N-1).
+    pub chip_row_op_idx_in_step: u64,
+
+    /// The number of times the zkvm has emitted a chip row.
+    pub row_count: u64,
+
+    /// Anchor id of the most recently emitted chip row.
+    /// Interactions can reference this to tie back to a chip row.
+    pub last_row_id: Option<String>,
+
+    /// Stored emitted micro-operations.
+    pub emitted_micro_ops: Vec<serde_json::Value>,
+
+    //////////////////////////////////////////////////////////////////////////////
+    /// TODO: Implement the state for the fault injection (loop2).
+    pub injection_enabled: bool,
     pub injection_kind: String,
     pub injection_step: u64,
+    pub assertions_enabled: bool,
+
     pub rng: StdRng,
-    pub hint_instruction: String,  // the default is an empty string
-    pub hint_assembly: String,  // the default is an empty string
-    pub hint_pc: u32,  // the default is an empty string
-    pub last_row_id: String,
-    pub pc_to_step: HashMap<u32, u64>,
-    pub pc_to_instruction: HashMap<u32, String>,
-    pub pc_to_assembly: HashMap<u32, String>,
-    pub current_air_name: String,
-    /// Best-effort set of chips observed during the current `step` (instruction-level record).
-    pub step_chips: Vec<String>,
+    pub seed: u64,
+    //////////////////////////////////////////////////////////////////////////////
 }
 
 impl GlobalState {
     fn new() -> Self {
-        Self {
-            trace_logging: false,
-            injection: false,
-            assertions: true,
-            seed: 0,
-            injection_kind: String::new(),
-            step: 0,
-            micro_idx: 0,
-            row_seq: 0,
-            injection_step: 0,
-            rng: StdRng::seed_from_u64(0),
-            hint_instruction: String::new(),
-            hint_assembly: String::new(),
-            hint_pc: 0,
-            last_row_id: String::new(),
-            pc_to_step: HashMap::new(),
-            pc_to_instruction: HashMap::new(),
-            pc_to_assembly: HashMap::new(),
-            current_air_name: String::new(),
-            step_chips: Vec::new(),
+        todo!()
+    }
+
+    fn emit_micro_op(&mut self, micro_op: serde_json::Value) {
+        self.emitted_micro_ops.push(micro_op);
+        self.seq += 1;
+    }
+
+    fn rs2_source_json(rs2: i32, is_rs2_imm: bool) -> Value {
+        if is_rs2_imm {
+            json!({ "src": "imm", "value": rs2 })
+        } else {
+            // When rs2 is a register pointer, callers should pass a non-negative value.
+            json!({ "src": "reg", "ptr": rs2.max(0) as u32 })
         }
+    }
+
+    pub fn emit_instruction(
+        &mut self,
+        pc: u32,
+        timestamp: u32,
+        next_pc: u32,
+        next_timestamp: u32,
+        opcode: u32,
+        operands: [u32; 7],
+    ) {
+        // Start a new step: reset per-step interaction counter and anchor.
+        self.op_idx_in_step = 0;
+        self.chip_row_op_idx_in_step = 0;
+        self.last_row_id = None;
+
+        let micro_op = json!(
+        {"type": "instruction",
+        "data": {
+            "seq": self.seq,
+            "step_idx": self.step_idx,
+            "pc": pc,
+            "timestamp": timestamp,
+            "next_pc": next_pc,
+            "next_timestamp": next_timestamp,
+            "opcode": opcode,
+            "operands": operands,
+        }});
+        self.emit_micro_op(micro_op);
+    }
+
+    pub fn inc_step(&mut self) {
+        self.step_idx += 1;
+    }
+
+    fn emit_chip_row_envelope(
+        &mut self,
+        kind: &str,
+        chip_name: &str,
+        timestamp: Option<u32>,
+        payload_type: &str,
+        payload_data: Value,
+    ) {
+        // Generate an anchor row id for downstream interaction events.
+        // Format is intentionally simple and stable.
+        let row_id = format!("step{}_row{}", self.step_idx, self.row_count);
+
+        // Keep the JSON stable and explicit:
+        // { "type": "chip_row", "data": { "base": {..}, "kind": "...", "payload": { "type": "...", "data": {..} } } }
+        let mut base = Map::new();
+        base.insert("seq".to_string(), json!(self.seq));
+        base.insert("step_idx".to_string(), json!(self.step_idx));
+        base.insert("op_idx".to_string(), json!(self.chip_row_op_idx_in_step));
+        base.insert("is_valid".to_string(), json!(true));
+        if let Some(ts) = timestamp {
+            base.insert("timestamp".to_string(), json!(ts));
+        }
+        base.insert("chip_name".to_string(), json!(chip_name));
+
+        let micro_op = json!({
+            "type": "chip_row",
+            "data": {
+                "base": Value::Object(base),
+                "kind": kind,
+                "payload": {
+                    "type": payload_type,
+                    "data": payload_data,
+                }
+            }
+        });
+
+        self.row_count += 1;
+        self.chip_row_op_idx_in_step += 1;
+        self.last_row_id = Some(row_id);
+        self.emit_micro_op(micro_op);
+    }
+
+    fn emit_interaction_envelope(
+        &mut self,
+        kind: &str,
+        direction: &str,
+        row_id: Option<&str>,
+        timestamp: Option<u32>,
+        payload_type: &str,
+        payload_data: Value,
+    ) {
+        if direction != "send" && direction != "receive" {
+            panic!("Invalid direction: {}", direction);
+        }
+
+        // Prefer explicit row_id; otherwise anchor to the most recent chip row.
+        let row_id = row_id
+            .map(|s| s.to_string())
+            .or_else(|| self.last_row_id.clone())
+            .unwrap_or_default();
+
+        let base = json!({
+            "seq": self.seq,
+            "step_idx": self.step_idx,
+            "op_idx": self.op_idx_in_step,
+            "row_id": row_id,
+            "direction": direction,
+            "kind": kind,
+            "timestamp": timestamp,
+        });
+
+        // JSON shape:
+        // { "type": "interaction", "data": { "base": {...}, "payload": { "type": "...", "data": {...} } } }
+        let micro_op = json!({
+            "type": "interaction",
+            "data": {
+                "base": base,
+                "payload": {
+                    "type": payload_type,
+                    "data": payload_data,
+                }
+            }
+        });
+
+        self.op_idx_in_step += 1;
+        self.emit_micro_op(micro_op);
+    }
+
+    pub fn emit_base_alu_chip_row<const N: usize>(
+        &mut self,
+        opcode: u32,
+        rd_ptr: u32,
+        rs1_ptr: u32,
+        rs2: i32,
+        is_rs2_imm: bool,
+        a: [u8; N],
+        b: [u8; N],
+        c: [u8; N],
+    ) {
+        let rs2 = Self::rs2_source_json(rs2, is_rs2_imm);
+        let payload_data = json!({
+            "op": opcode,
+            "rd_ptr": rd_ptr,
+            "rs1_ptr": rs1_ptr,
+            "rs2": rs2,
+            "a": a.to_vec(),
+            "b": b.to_vec(),
+            "c": c.to_vec(),
+        });
+        self.emit_chip_row_envelope("base_alu", "Rv32BaseAlu", None, "base_alu", payload_data);
+    }
+
+    pub fn emit_shift_chip_row<const N: usize>(
+        &mut self,
+        opcode: u32,
+        rd_ptr: u32,
+        rs1_ptr: u32,
+        rs2: i32,
+        is_rs2_imm: bool,
+        a: [u8; N],
+        b: [u8; N],
+        c: [u8; N],
+    ) {
+        let rs2 = Self::rs2_source_json(rs2, is_rs2_imm);
+        let payload_data = json!({
+            "op": opcode,
+            "rd_ptr": rd_ptr,
+            "rs1_ptr": rs1_ptr,
+            "rs2": rs2,
+            "a": a.to_vec(),
+            "b": b.to_vec(),
+            "c": c.to_vec(),
+        });
+        self.emit_chip_row_envelope("shift", "Rv32Shift", None, "shift", payload_data);
+    }
+
+    pub fn emit_less_than_chip_row<const N: usize>(
+        &mut self,
+        opcode: u32,
+        rd_ptr: u32,
+        rs1_ptr: u32,
+        rs2: i32,
+        is_rs2_imm: bool,
+        a: [u8; N],
+        b: [u8; N],
+        c: [u8; N],
+    ) {
+        let rs2 = Self::rs2_source_json(rs2, is_rs2_imm);
+        let payload_data = json!({
+            "op": opcode,
+            "rd_ptr": rd_ptr,
+            "rs1_ptr": rs1_ptr,
+            "rs2": rs2,
+            "a": a.to_vec(),
+            "b": b.to_vec(),
+            "c": c.to_vec(),
+        });
+        self.emit_chip_row_envelope("less_than", "Rv32LessThan", None, "less_than", payload_data);
+    }
+
+    pub fn emit_mul_chip_row<const N: usize>(
+        &mut self,
+        opcode: u32,
+        rd_ptr: u32,
+        rs1_ptr: u32,
+        rs2_ptr: u32,
+        a: [u8; N],
+        b: [u8; N],
+        c: [u8; N],
+    ) {
+        let payload_data = json!({
+            "op": opcode,
+            "rd_ptr": rd_ptr,
+            "rs1_ptr": rs1_ptr,
+            "rs2_ptr": rs2_ptr,
+            "a": a.to_vec(),
+            "b": b.to_vec(),
+            "c": c.to_vec(),
+        });
+        self.emit_chip_row_envelope("mul", "Rv32Mul", None, "mul", payload_data);
+    }
+
+    pub fn emit_mulh_chip_row<const N: usize>(
+        &mut self,
+        opcode: u32,
+        rd_ptr: u32,
+        rs1_ptr: u32,
+        rs2_ptr: u32,
+        a: [u8; N],
+        b: [u8; N],
+        c: [u8; N],
+    ) {
+        let payload_data = json!({
+            "op": opcode,
+            "rd_ptr": rd_ptr,
+            "rs1_ptr": rs1_ptr,
+            "rs2_ptr": rs2_ptr,
+            "a": a.to_vec(),
+            "b": b.to_vec(),
+            "c": c.to_vec(),
+        });
+        self.emit_chip_row_envelope("mul_h", "Rv32MulH", None, "mul_h", payload_data);
+    }
+
+    pub fn emit_divrem_chip_row<const N: usize>(
+        &mut self,
+        opcode: u32,
+        rd_ptr: u32,
+        rs1_ptr: u32,
+        rs2_ptr: u32,
+        a: [u8; N],
+        b: [u8; N],
+        c: [u8; N],
+    ) {
+        let payload_data = json!({
+            "op": opcode,
+            "rd_ptr": rd_ptr,
+            "rs1_ptr": rs1_ptr,
+            "rs2_ptr": rs2_ptr,
+            "a": a.to_vec(),
+            "b": b.to_vec(),
+            "c": c.to_vec(),
+        });
+        self.emit_chip_row_envelope("div_rem", "Rv32DivRem", None, "div_rem", payload_data);
+    }
+
+    pub fn emit_branch_equal_chip_row<const N: usize>(
+        &mut self,
+        opcode: u32,
+        rs1_ptr: u32,
+        rs2_ptr: u32,
+        imm: i32,
+        is_taken: bool,
+        from_pc: u32,
+        to_pc: u32,
+        a: [u8; N],
+        b: [u8; N],
+        cmp_result: bool,
+    ) {
+        let payload_data = json!({
+            "op": opcode,
+            "rs1_ptr": rs1_ptr,
+            "rs2_ptr": rs2_ptr,
+            "imm": imm,
+            "is_taken": is_taken,
+            "from_pc": from_pc,
+            "to_pc": to_pc,
+            "a": a.to_vec(),
+            "b": b.to_vec(),
+            "cmp_result": cmp_result,
+        });
+        self.emit_chip_row_envelope(
+            "branch_equal",
+            "Rv32BranchEqual",
+            None,
+            "branch_equal",
+            payload_data,
+        );
+    }
+
+    pub fn emit_branch_less_than_chip_row<const N: usize>(
+        &mut self,
+        opcode: u32,
+        rs1_ptr: u32,
+        rs2_ptr: u32,
+        imm: i32,
+        is_taken: bool,
+        from_pc: u32,
+        to_pc: u32,
+        a: [u8; N],
+        b: [u8; N],
+        cmp_result: bool,
+    ) {
+        let payload_data = json!({
+            "op": opcode,
+            "rs1_ptr": rs1_ptr,
+            "rs2_ptr": rs2_ptr,
+            "imm": imm,
+            "is_taken": is_taken,
+            "from_pc": from_pc,
+            "to_pc": to_pc,
+            "a": a.to_vec(),
+            "b": b.to_vec(),
+            "cmp_result": cmp_result,
+        });
+        self.emit_chip_row_envelope(
+            "branch_less_than",
+            "Rv32BranchLessThan",
+            None,
+            "branch_less_than",
+            payload_data,
+        );
+    }
+
+    pub fn emit_jal_lui_chip_row<const N: usize>(
+        &mut self,
+        opcode: u32,
+        rd_ptr: u32,
+        imm: u32,
+        needs_write: bool,
+        from_pc: u32,
+        to_pc: u32,
+        rd_data: [u8; N],
+        is_jal: bool,
+    ) {
+        let payload_data = json!({
+            "op": opcode,
+            "rd_ptr": rd_ptr,
+            "imm": imm,
+            "needs_write": needs_write,
+            "from_pc": from_pc,
+            "to_pc": to_pc,
+            "rd_data": rd_data.to_vec(),
+            "is_jal": is_jal,
+        });
+        self.emit_chip_row_envelope("jal_lui", "Rv32JalLui", None, "jal_lui", payload_data);
+    }
+
+    pub fn emit_jalr_chip_row<const N: usize>(
+        &mut self,
+        opcode: u32,
+        rd_ptr: u32,
+        rs1_ptr: u32,
+        imm: i32,
+        imm_sign: bool,
+        needs_write: bool,
+        from_pc: u32,
+        to_pc: u32,
+        rs1_val: u32,
+        rd_data: [u8; N],
+    ) {
+        let payload_data = json!({
+            "op": opcode,
+            "rd_ptr": rd_ptr,
+            "rs1_ptr": rs1_ptr,
+            "imm": imm,
+            "imm_sign": imm_sign,
+            "needs_write": needs_write,
+            "from_pc": from_pc,
+            "to_pc": to_pc,
+            "rs1_val": rs1_val,
+            "rd_data": rd_data.to_vec(),
+        });
+        self.emit_chip_row_envelope("jalr", "Rv32Jalr", None, "jalr", payload_data);
+    }
+
+    pub fn emit_auipc_chip_row<const N: usize>(
+        &mut self,
+        opcode: u32,
+        rd_ptr: u32,
+        imm: u32,
+        from_pc: u32,
+        rd_data: [u8; N],
+    ) {
+        let payload_data = json!({
+            "op": opcode,
+            "rd_ptr": rd_ptr,
+            "imm": imm,
+            "from_pc": from_pc,
+            "rd_data": rd_data.to_vec(),
+        });
+        self.emit_chip_row_envelope("auipc", "Rv32Auipc", None, "auipc", payload_data);
+    }
+
+    pub fn emit_load_store_chip_row<const N: usize>(
+        &mut self,
+        opcode: u32,
+        rs1_ptr: u32,
+        rd_rs2_ptr: u32,
+        imm: i32,
+        imm_sign: bool,
+        mem_as: u32,
+        effective_ptr: u32,
+        is_store: bool,
+        needs_write: bool,
+        is_load: bool,
+        flags: [u32; 4],
+        read_data: [u8; N],
+        prev_data: [u32; N],
+        write_data: [u32; N],
+    ) {
+        let payload_data = json!({
+            "op": opcode,
+            "rs1_ptr": rs1_ptr,
+            "rd_rs2_ptr": rd_rs2_ptr,
+            "imm": imm,
+            "imm_sign": imm_sign,
+            "mem_as": mem_as,
+            "effective_ptr": effective_ptr,
+            "is_store": is_store,
+            "needs_write": needs_write,
+            "is_load": is_load,
+            "flags": flags,
+            "read_data": read_data.to_vec(),
+            "prev_data": prev_data.to_vec(),
+            "write_data": write_data.to_vec(),
+        });
+        self.emit_chip_row_envelope(
+            "load_store",
+            "Rv32LoadStore",
+            None,
+            "load_store",
+            payload_data,
+        );
+    }
+
+    pub fn emit_load_sign_extend_chip_row<const N: usize>(
+        &mut self,
+        opcode: u32,
+        rs1_ptr: u32,
+        rd_ptr: u32,
+        imm: i32,
+        imm_sign: bool,
+        mem_as: u32,
+        effective_ptr: u32,
+        needs_write: bool,
+        prev_data: [u8; N],
+        shifted_read_data: [u8; N],
+        data_most_sig_bit: bool,
+        shift_most_sig_bit: bool,
+        opcode_loadh_flag: bool,
+        opcode_loadb_flag1: bool,
+        opcode_loadb_flag0: bool,
+    ) {
+        let payload_data = json!({
+            "op": opcode,
+            "rs1_ptr": rs1_ptr,
+            "rd_ptr": rd_ptr,
+            "imm": imm,
+            "imm_sign": imm_sign,
+            "mem_as": mem_as,
+            "effective_ptr": effective_ptr,
+            "needs_write": needs_write,
+            "prev_data": prev_data.to_vec(),
+            "shifted_read_data": shifted_read_data.to_vec(),
+            "data_most_sig_bit": data_most_sig_bit,
+            "shift_most_sig_bit": shift_most_sig_bit,
+            "opcode_loadh_flag": opcode_loadh_flag,
+            "opcode_loadb_flag1": opcode_loadb_flag1,
+            "opcode_loadb_flag0": opcode_loadb_flag0,
+        });
+        self.emit_chip_row_envelope(
+            "load_sign_extend",
+            "Rv32LoadSignExtend",
+            None,
+            "load_sign_extend",
+            payload_data,
+        );
+    }
+
+    pub fn emit_phantom_chip_row(&mut self) {
+        self.emit_chip_row_envelope("phantom", "Phantom", None, "phantom", json!({}));
+    }
+
+    pub fn emit_program_chip_row(
+        &mut self,
+        opcode: u32,
+        operands: [u32; 7],
+        execution_frequency: u32,
+    ) {
+        // Keep the wire format close to the typed version:
+        // opcode: VmOpcode, operands: [FieldElement; 7]
+        let payload_data = json!({
+            "opcode": opcode,
+            "operands": operands,
+            "execution_frequency": execution_frequency,
+        });
+        self.emit_chip_row_envelope("program", "ProgramChip", None, "program", payload_data);
+    }
+
+    pub fn emit_connector_chip_row(
+        &mut self,
+        from_pc: u32,
+        to_pc: u32,
+        from_timestamp: Option<u32>,
+        to_timestamp: Option<u32>,
+        is_terminate: bool,
+        exit_code: Option<u32>,
+    ) {
+        let payload_data = json!({
+            "from_pc": from_pc,
+            "to_pc": to_pc,
+            "from_timestamp": from_timestamp,
+            "to_timestamp": to_timestamp,
+            "is_terminate": is_terminate,
+            "exit_code": exit_code,
+        });
+        self.emit_chip_row_envelope(
+            "connector",
+            "VmConnectorAir",
+            None,
+            "connector",
+            payload_data,
+        );
+    }
+
+    pub fn emit_padding_chip_row(&mut self, data: &str) {
+        let payload_data = json!({
+            "data": data.to_string(),
+        });
+        self.emit_chip_row_envelope("padding", "RowMajorMatrix", None, "padding", payload_data);
+    }
+
+    pub fn get_last_row_id(&self) -> String {
+        self.last_row_id.clone().unwrap_or_default()
+    }
+
+    // -------------------------------------------------------------------------
+    // Interactions (envelope)
+    // -------------------------------------------------------------------------
+
+    pub fn emit_execution_interaction(
+        &mut self,
+        direction: &str,
+        row_id: Option<&str>,
+        pc: u32,
+        timestamp: u32,
+    ) {
+        let payload_data = json!({
+            "pc": pc,
+            "timestamp": timestamp,
+        });
+        self.emit_interaction_envelope(
+            "execution",
+            direction,
+            row_id,
+            Some(timestamp),
+            "execution",
+            payload_data,
+        );
+    }
+
+    pub fn emit_program_interaction(
+        &mut self,
+        direction: &str,
+        row_id: Option<&str>,
+        pc: u32,
+        opcode: u32,
+        operands: [u32; 7],
+    ) {
+        let payload_data = json!({
+            "pc": pc,
+            "opcode": opcode,
+            "operands": operands,
+        });
+        self.emit_interaction_envelope("program", direction, row_id, None, "program", payload_data);
+    }
+
+    pub fn emit_memory_interaction(
+        &mut self,
+        direction: &str,
+        row_id: Option<&str>,
+        address_space: u32,
+        pointer: u32,
+        data: Vec<u32>,
+        timestamp: u32,
+    ) {
+        let payload_data = json!({
+            "address_space": address_space,
+            "pointer": pointer,
+            "data": data,
+            "timestamp": timestamp,
+        });
+        self.emit_interaction_envelope(
+            "memory",
+            direction,
+            row_id,
+            Some(timestamp),
+            "memory",
+            payload_data,
+        );
+    }
+
+    pub fn emit_range_check_interaction(
+        &mut self,
+        direction: &str,
+        row_id: Option<&str>,
+        value: u32,
+        max_bits: u32,
+    ) {
+        let payload_data = json!({
+            "value": value,
+            "max_bits": max_bits,
+        });
+        self.emit_interaction_envelope(
+            "range_check",
+            direction,
+            row_id,
+            None,
+            "range_check",
+            payload_data,
+        );
+    }
+
+    pub fn emit_bitwise_interaction(
+        &mut self,
+        direction: &str,
+        row_id: Option<&str>,
+        x: u32,
+        y: u32,
+        z: u32,
+        op: u32,
+    ) {
+        let payload_data = json!({
+            "x": x,
+            "y": y,
+            "z": z,
+            "op": op,
+        });
+        self.emit_interaction_envelope("bitwise", direction, row_id, None, "bitwise", payload_data);
     }
 }
 
@@ -93,264 +750,364 @@ lazy_static! {
     static ref GLOBAL_STATE: Mutex<GlobalState> = Mutex::new(GlobalState::new());
 }
 
-lazy_static! {
-    static ref JSON_CAPTURE: Mutex<JsonCapture> = Mutex::new(JsonCapture::new());
-}
+// -----------------------------------------------------------------------------
+// Module-level emit API (locks GLOBAL_STATE internally)
+// -----------------------------------------------------------------------------
 
-struct JsonCapture {
-    enabled: bool,
-    logs: Vec<Value>,
-}
-
-impl JsonCapture {
-    fn new() -> Self {
-        Self {
-            enabled: false,
-            logs: Vec::new(),
-        }
-    }
-}
-
-pub fn enable_json_capture() {
-    let mut cap = JSON_CAPTURE.lock().unwrap();
-    cap.enabled = true;
-    cap.logs.clear();
-}
-
-pub fn disable_json_capture() {
-    let mut cap = JSON_CAPTURE.lock().unwrap();
-    cap.enabled = false;
-}
-
-pub fn take_json_logs() -> Vec<Value> {
-    let mut cap = JSON_CAPTURE.lock().unwrap();
-    std::mem::take(&mut cap.logs)
-}
-
-fn capture_json(payload: Value) {
-    let mut cap = JSON_CAPTURE.lock().unwrap();
-    if !cap.enabled {
-        return;
-    }
-    cap.logs.push(payload);
-}
-
-fn parse_json_or_string(raw: &str) -> Value {
-    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
-}
-
-pub fn is_trace_logging() -> bool {
-    GLOBAL_STATE.lock().unwrap().trace_logging
-}
-
-pub fn set_trace_logging(value: bool) {
+pub fn emit_instruction(
+    pc: u32,
+    timestamp: u32,
+    next_pc: u32,
+    next_timestamp: u32,
+    opcode: u32,
+    operands: [u32; 7],
+) {
     let mut state = GLOBAL_STATE.lock().unwrap();
-    state.trace_logging = value;
+    state.emit_instruction(pc, timestamp, next_pc, next_timestamp, opcode, operands);
 }
 
-pub fn enable_trace_logging() {
-    set_trace_logging(true);
-}
-
-pub fn disable_trace_logging() {
-    set_trace_logging(false);
-}
-
-pub fn is_injection() -> bool {
-    GLOBAL_STATE.lock().unwrap().injection
-}
-
-pub fn set_injection(value: bool) {
+pub fn emit_base_alu_chip_row<const N: usize>(
+    opcode: u32,
+    rd_ptr: u32,
+    rs1_ptr: u32,
+    rs2: i32,
+    is_rs2_imm: bool,
+    a: [u8; N],
+    b: [u8; N],
+    c: [u8; N],
+) {
     let mut state = GLOBAL_STATE.lock().unwrap();
-    state.injection = value;
+    state.emit_base_alu_chip_row(opcode, rd_ptr, rs1_ptr, rs2, is_rs2_imm, a, b, c);
 }
 
-pub fn enable_injection() {
-    set_injection(true);
-}
-
-pub fn disable_injection() {
-    set_injection(false);
-}
-
-pub fn is_assertions() -> bool {
-    GLOBAL_STATE.lock().unwrap().assertions
-}
-
-pub fn set_assertions(value: bool) {
+pub fn emit_shift_chip_row<const N: usize>(
+    opcode: u32,
+    rd_ptr: u32,
+    rs1_ptr: u32,
+    rs2: i32,
+    is_rs2_imm: bool,
+    a: [u8; N],
+    b: [u8; N],
+    c: [u8; N],
+) {
     let mut state = GLOBAL_STATE.lock().unwrap();
-    state.assertions = value;
+    state.emit_shift_chip_row(opcode, rd_ptr, rs1_ptr, rs2, is_rs2_imm, a, b, c);
 }
 
-pub fn enable_assertions() {
-    set_assertions(true);
-}
-
-pub fn disable_assertions() {
-    set_assertions(false);
-}
-
-pub fn set_seed(value: u64) {
+pub fn emit_less_than_chip_row<const N: usize>(
+    opcode: u32,
+    rd_ptr: u32,
+    rs1_ptr: u32,
+    rs2: i32,
+    is_rs2_imm: bool,
+    a: [u8; N],
+    b: [u8; N],
+    c: [u8; N],
+) {
     let mut state = GLOBAL_STATE.lock().unwrap();
-    state.rng = StdRng::seed_from_u64(value);
-    state.seed = value;
+    state.emit_less_than_chip_row(opcode, rd_ptr, rs1_ptr, rs2, is_rs2_imm, a, b, c);
 }
 
-/// Reset per-run state so multiple prove runs can happen in-process safely.
-///
-/// Loop1 fuzzing runs many different programs in one process. Some attribution state (notably
-/// `pc_to_step` and instruction/asm hints) is built up during execution/preflight/tracegen and must
-/// not leak between programs.
-pub fn reset_for_new_run() {
+pub fn emit_mul_chip_row<const N: usize>(
+    opcode: u32,
+    rd_ptr: u32,
+    rs1_ptr: u32,
+    rs2_ptr: u32,
+    a: [u8; N],
+    b: [u8; N],
+    c: [u8; N],
+) {
     let mut state = GLOBAL_STATE.lock().unwrap();
-
-    // Keep configuration knobs (trace_logging/assertions/seed/rng) unchanged.
-    state.injection = false;
-    state.injection_kind.clear();
-    state.injection_step = 0;
-
-    state.step = 0;
-    state.micro_idx = 0;
-    state.row_seq = 0;
-
-    state.hint_instruction.clear();
-    state.hint_assembly.clear();
-    state.hint_pc = 0;
-
-    state.last_row_id.clear();
-    state.pc_to_step.clear();
-    state.pc_to_instruction.clear();
-    state.pc_to_assembly.clear();
-    state.current_air_name.clear();
-    state.step_chips.clear();
+    state.emit_mul_chip_row(opcode, rd_ptr, rs1_ptr, rs2_ptr, a, b, c);
 }
 
-pub fn get_seed() -> u64 {
-    GLOBAL_STATE.lock().unwrap().seed
-}
-
-pub fn is_injection_kind(value: &str) -> bool {
-    GLOBAL_STATE.lock().unwrap().injection_kind == value
-}
-
-pub fn set_injection_kind(value: String) {
+pub fn emit_mulh_chip_row<const N: usize>(
+    opcode: u32,
+    rd_ptr: u32,
+    rs1_ptr: u32,
+    rs2_ptr: u32,
+    a: [u8; N],
+    b: [u8; N],
+    c: [u8; N],
+) {
     let mut state = GLOBAL_STATE.lock().unwrap();
-    state.injection_kind = value.clone();
+    state.emit_mulh_chip_row(opcode, rd_ptr, rs1_ptr, rs2_ptr, a, b, c);
 }
 
-pub fn get_injection_kind() -> String {
-    GLOBAL_STATE.lock().unwrap().injection_kind.clone()
-}
-
-pub fn inc_step() {
+pub fn emit_divrem_chip_row<const N: usize>(
+    opcode: u32,
+    rd_ptr: u32,
+    rs1_ptr: u32,
+    rs2_ptr: u32,
+    a: [u8; N],
+    b: [u8; N],
+    c: [u8; N],
+) {
     let mut state = GLOBAL_STATE.lock().unwrap();
-    state.step += 1;
-
-    // TODO: in the future this should be either dynamic or a setting
-    if state.step > 1000000 {
-        panic!("Endless loop detection step bound triggered! Bound: 1000000 steps");
-    }
+    state.emit_divrem_chip_row(opcode, rd_ptr, rs1_ptr, rs2_ptr, a, b, c);
 }
 
-pub fn get_step() -> u64 {
-    GLOBAL_STATE.lock().unwrap().step
-}
-
-pub fn get_injection_step() -> u64 {
-    GLOBAL_STATE.lock().unwrap().injection_step
-}
-
-pub fn set_injection_step(value: u64) {
+pub fn emit_branch_equal_chip_row<const N: usize>(
+    opcode: u32,
+    rs1_ptr: u32,
+    rs2_ptr: u32,
+    imm: i32,
+    is_taken: bool,
+    from_pc: u32,
+    to_pc: u32,
+    a: [u8; N],
+    b: [u8; N],
+    cmp_result: bool,
+) {
     let mut state = GLOBAL_STATE.lock().unwrap();
-    state.injection_step = value;
+    state.emit_branch_equal_chip_row(
+        opcode, rs1_ptr, rs2_ptr, imm, is_taken, from_pc, to_pc, a, b, cmp_result,
+    );
 }
 
-pub fn is_injection_at_step(kind: &str) -> bool {
+pub fn emit_branch_less_than_chip_row<const N: usize>(
+    opcode: u32,
+    rs1_ptr: u32,
+    rs2_ptr: u32,
+    imm: i32,
+    is_taken: bool,
+    from_pc: u32,
+    to_pc: u32,
+    a: [u8; N],
+    b: [u8; N],
+    cmp_result: bool,
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_branch_less_than_chip_row(
+        opcode, rs1_ptr, rs2_ptr, imm, is_taken, from_pc, to_pc, a, b, cmp_result,
+    );
+}
+
+pub fn emit_jal_lui_chip_row<const N: usize>(
+    opcode: u32,
+    rd_ptr: u32,
+    imm: u32,
+    needs_write: bool,
+    from_pc: u32,
+    to_pc: u32,
+    rd_data: [u8; N],
+    is_jal: bool,
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_jal_lui_chip_row(
+        opcode,
+        rd_ptr,
+        imm,
+        needs_write,
+        from_pc,
+        to_pc,
+        rd_data,
+        is_jal,
+    );
+}
+
+pub fn emit_jalr_chip_row<const N: usize>(
+    opcode: u32,
+    rd_ptr: u32,
+    rs1_ptr: u32,
+    imm: i32,
+    imm_sign: bool,
+    needs_write: bool,
+    from_pc: u32,
+    to_pc: u32,
+    rs1_val: u32,
+    rd_data: [u8; N],
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_jalr_chip_row(
+        opcode,
+        rd_ptr,
+        rs1_ptr,
+        imm,
+        imm_sign,
+        needs_write,
+        from_pc,
+        to_pc,
+        rs1_val,
+        rd_data,
+    );
+}
+
+pub fn emit_auipc_chip_row<const N: usize>(
+    opcode: u32,
+    rd_ptr: u32,
+    imm: u32,
+    from_pc: u32,
+    rd_data: [u8; N],
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_auipc_chip_row(opcode, rd_ptr, imm, from_pc, rd_data);
+}
+
+pub fn emit_load_store_chip_row<const N: usize>(
+    opcode: u32,
+    rs1_ptr: u32,
+    rd_rs2_ptr: u32,
+    imm: i32,
+    imm_sign: bool,
+    mem_as: u32,
+    effective_ptr: u32,
+    is_store: bool,
+    needs_write: bool,
+    is_load: bool,
+    flags: [u32; 4],
+    read_data: [u8; N],
+    prev_data: [u32; N],
+    write_data: [u32; N],
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_load_store_chip_row(
+        opcode,
+        rs1_ptr,
+        rd_rs2_ptr,
+        imm,
+        imm_sign,
+        mem_as,
+        effective_ptr,
+        is_store,
+        needs_write,
+        is_load,
+        flags,
+        read_data,
+        prev_data,
+        write_data,
+    );
+}
+
+pub fn emit_load_sign_extend_chip_row<const N: usize>(
+    opcode: u32,
+    rs1_ptr: u32,
+    rd_ptr: u32,
+    imm: i32,
+    imm_sign: bool,
+    mem_as: u32,
+    effective_ptr: u32,
+    needs_write: bool,
+    prev_data: [u8; N],
+    shifted_read_data: [u8; N],
+    data_most_sig_bit: bool,
+    shift_most_sig_bit: bool,
+    opcode_loadh_flag: bool,
+    opcode_loadb_flag1: bool,
+    opcode_loadb_flag0: bool,
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_load_sign_extend_chip_row(
+        opcode,
+        rs1_ptr,
+        rd_ptr,
+        imm,
+        imm_sign,
+        mem_as,
+        effective_ptr,
+        needs_write,
+        prev_data,
+        shifted_read_data,
+        data_most_sig_bit,
+        shift_most_sig_bit,
+        opcode_loadh_flag,
+        opcode_loadb_flag1,
+        opcode_loadb_flag0,
+    );
+}
+
+pub fn emit_phantom_chip_row() {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_phantom_chip_row();
+}
+
+pub fn emit_program_chip_row(opcode: u32, operands: [u32; 7], execution_frequency: u32) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_program_chip_row(opcode, operands, execution_frequency);
+}
+
+pub fn emit_connector_chip_row(
+    from_pc: u32,
+    to_pc: u32,
+    from_timestamp: Option<u32>,
+    to_timestamp: Option<u32>,
+    is_terminate: bool,
+    exit_code: Option<u32>,
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_connector_chip_row(
+        from_pc,
+        to_pc,
+        from_timestamp,
+        to_timestamp,
+        is_terminate,
+        exit_code,
+    );
+}
+
+pub fn emit_padding_chip_row(data: &str) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_padding_chip_row(data);
+}
+
+pub fn get_last_row_id() -> String {
     let state = GLOBAL_STATE.lock().unwrap();
-    state.injection &&
-        state.step == state.injection_step &&
-        state.injection_kind == kind
+    state.get_last_row_id()
 }
 
-pub fn set_hint_instruction(value: &String) {
+pub fn emit_execution_interaction(direction: &str, row_id: Option<&str>, pc: u32, timestamp: u32) {
     let mut state = GLOBAL_STATE.lock().unwrap();
-    state.hint_instruction = value.clone();
+    state.emit_execution_interaction(direction, row_id, pc, timestamp);
 }
 
-pub fn get_hint_instruction() -> String {
+pub fn emit_program_interaction(
+    direction: &str,
+    row_id: Option<&str>,
+    pc: u32,
+    opcode: u32,
+    operands: [u32; 7],
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_program_interaction(direction, row_id, pc, opcode, operands);
+}
+
+pub fn emit_memory_interaction(
+    direction: &str,
+    row_id: Option<&str>,
+    address_space: u32,
+    pointer: u32,
+    data: Vec<u32>,
+    timestamp: u32,
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_memory_interaction(direction, row_id, address_space, pointer, data, timestamp);
+}
+
+pub fn emit_range_check_interaction(
+    direction: &str,
+    row_id: Option<&str>,
+    value: u32,
+    max_bits: u32,
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_range_check_interaction(direction, row_id, value, max_bits);
+}
+
+pub fn emit_bitwise_interaction(
+    direction: &str,
+    row_id: Option<&str>,
+    x: u32,
+    y: u32,
+    z: u32,
+    op: u32,
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_bitwise_interaction(direction, row_id, x, y, z, op);
+}
+
+pub fn is_assertions_enabled() -> bool {
     let state = GLOBAL_STATE.lock().unwrap();
-    state.hint_instruction.clone()
-}
-
-pub fn set_hint_assembly(value: &String) {
-    let mut state = GLOBAL_STATE.lock().unwrap();
-    state.hint_assembly = value.clone();
-}
-
-pub fn get_hint_assembly() -> String {
-    let state = GLOBAL_STATE.lock().unwrap();
-    state.hint_assembly.clone()
-}
-
-pub fn set_hint_pc(value: u32) {
-    let mut state = GLOBAL_STATE.lock().unwrap();
-    state.hint_pc = value;
-}
-
-pub fn get_hint_pc() -> u32 {
-    let state = GLOBAL_STATE.lock().unwrap();
-    state.hint_pc
-}
-
-pub fn update_hints(pc: u32, instruction: &String, assembly: &String) {
-    let mut state = GLOBAL_STATE.lock().unwrap();
-    state.hint_pc = pc;
-    state.hint_instruction = instruction.clone();
-    state.hint_assembly = assembly.clone();
-    state.micro_idx = 0;
-}
-
-/// Record the mapping from `pc` -> current `step` (instruction index).
-/// This is used to reconstruct per-instruction step indices during tracegen (fill_trace_row),
-/// where we only have access to AIR records (which typically include `from_pc`).
-pub fn record_pc_step(pc: u32) {
-    let mut state = GLOBAL_STATE.lock().unwrap();
-    let step = state.step;
-    state.pc_to_step.insert(pc, step);
-}
-
-pub fn record_pc_hints(pc: u32) {
-    let mut state = GLOBAL_STATE.lock().unwrap();
-    let instr = state.hint_instruction.clone();
-    let asm = state.hint_assembly.clone();
-    state.pc_to_instruction.insert(pc, instr);
-    state.pc_to_assembly.insert(pc, asm);
-}
-
-/// Best-effort: set the global `step` based on `pc` (if previously recorded),
-/// and reset per-op micro index so tracegen-emitted micro-ops get stable `row_id`s.
-pub fn set_step_from_pc(pc: u32) {
-    let mut state = GLOBAL_STATE.lock().unwrap();
-    if let Some(step) = state.pc_to_step.get(&pc).copied() {
-        state.step = step;
-    }
-    if let Some(instr) = state.pc_to_instruction.get(&pc).cloned() {
-        state.hint_instruction = instr;
-    }
-    if let Some(asm) = state.pc_to_assembly.get(&pc).cloned() {
-        state.hint_assembly = asm;
-    }
-    state.hint_pc = pc;
-}
-
-pub fn set_current_air_name(value: &str) {
-    let mut state = GLOBAL_STATE.lock().unwrap();
-    state.current_air_name = value.to_string();
-}
-
-pub fn get_current_air_name() -> String {
-    let state = GLOBAL_STATE.lock().unwrap();
-    state.current_air_name.clone()
+    state.assertions_enabled
 }
 
 ////////////////
@@ -361,14 +1118,14 @@ pub fn get_current_air_name() -> String {
 #[macro_export]
 macro_rules! fuzzer_assert {
     ($cond:expr $(,)?) => {{
-        if $crate::is_assertions() {
+        if $crate::is_assertions_enabled() {
             assert!($cond);
         } else if !$cond {
             println!("Warning: fuzzer_assert! failed: {}", stringify!($cond));
         }
     }};
     ($cond:expr, $($arg:tt)+) => {{
-        if $crate::is_assertions() {
+        if $crate::is_assertions_enabled() {
             assert!($cond, $($arg)+);
         } else if !$cond {
             println!("Warning: fuzzer_assert! failed: {}", format_args!($($arg)+));
@@ -380,7 +1137,7 @@ macro_rules! fuzzer_assert {
 #[macro_export]
 macro_rules! fuzzer_assert_eq {
     ($left:expr, $right:expr $(,)?) => {{
-        if $crate::is_assertions() {
+        if $crate::is_assertions_enabled() {
             assert_eq!($left, $right);
         } else {
             let left_val = $left;
@@ -397,7 +1154,7 @@ macro_rules! fuzzer_assert_eq {
         }
     }};
     ($left:expr, $right:expr, $($arg:tt)+) => {{
-        if $crate::is_assertions() {
+        if $crate::is_assertions_enabled() {
             assert_eq!($left, $right, $($arg)+);
         } else {
             let left_val = $left;
@@ -420,7 +1177,7 @@ macro_rules! fuzzer_assert_eq {
 #[macro_export]
 macro_rules! fuzzer_assert_ne {
     ($left:expr, $right:expr $(,)?) => {{
-        if $crate::is_assertions() {
+        if $crate::is_assertions_enabled() {
             assert_ne!($left, $right);
         } else {
             let left_val = $left;
@@ -437,7 +1194,7 @@ macro_rules! fuzzer_assert_ne {
         }
     }};
     ($left:expr, $right:expr, $($arg:tt)+) => {{
-        if $crate::is_assertions() {
+        if $crate::is_assertions_enabled() {
             assert_ne!($left, $right, $($arg)+);
         } else {
             let left_val = $left;
@@ -456,205 +1213,6 @@ macro_rules! fuzzer_assert_ne {
     }};
 }
 
-
-////////////////
-// LOGGING
-/////////
-
-pub fn print_injection_info(
-    inject_kind: &str,
-    info: &String,
-) {
-    let state = GLOBAL_STATE.lock().unwrap();
-    if state.trace_logging {
-        let _ = (inject_kind, info);
-    }
-}
-
-pub fn print_trace_info() {
-    let mut state = GLOBAL_STATE.lock().unwrap();
-    if !state.trace_logging {
-        return;
-    }
-
-    // Emit one instruction-level record per step. This replaces the old `<trace>` printing.
-    // We also drain the per-step chip list to avoid unbounded growth if `print_trace_info` is
-    // called repeatedly without `inc_step`.
-    let chips = std::mem::take(&mut state.step_chips);
-    let payload = json!({
-        "type": "insn",
-        "step": state.step,
-        "pc": state.hint_pc,
-        "instruction": state.hint_instruction,
-        "assembly": state.hint_assembly,
-        "chips": chips,
-    });
-    capture_json(payload);
-}
-
-fn escape_json_string(value: &str) -> String {
-    // Minimal JSON string escaping (sufficient for our trace/record payloads).
-    let mut out = String::with_capacity(value.len() + 8);
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => {
-                out.push('\\');
-                out.push('"');
-            }
-            '\n' => {
-                out.push('\\');
-                out.push('n');
-            }
-            '\r' => {
-                out.push('\\');
-                out.push('r');
-            }
-            '\t' => {
-                out.push('\\');
-                out.push('t');
-            }
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-pub fn print_micro_ops_deltas(air_names: &Vec<String>, prev_heights: &Vec<usize>, curr_heights: &Vec<usize>) {
-    let state = GLOBAL_STATE.lock().unwrap();
-    if !state.trace_logging {
-        return;
-    }
-
-    let mut chips = String::from("[");
-    let mut first = true;
-    for (i, chip_name) in air_names.iter().enumerate() {
-        let prev = *prev_heights.get(i).unwrap_or(&0);
-        let curr = *curr_heights.get(i).unwrap_or(&prev);
-        if curr < prev {
-            continue;
-        }
-        let delta = curr - prev;
-        if delta == 0 {
-            continue;
-        }
-        if !first {
-            chips.push_str(",");
-        }
-        first = false;
-        chips.push_str(&format!(
-            "{{\"chip\":\"{}\",\"delta\":{},\"height\":{}}}",
-            escape_json_string(chip_name),
-            delta,
-            curr
-        ));
-    }
-    chips.push_str("]");
-
-    // This is also instruction-level; keep it within the beak protocol as an `insn` record with
-    // a structured `chip_deltas` field (and a redundant `chips` list for quick scanning).
-    let chip_deltas = parse_json_or_string(&chips);
-    let chip_names: Vec<String> = chip_deltas
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|x| x.get("chip").and_then(|v| v.as_str()).map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let payload = json!({
-        "type": "insn",
-        "step": state.step,
-        "pc": state.hint_pc,
-        "instruction": state.hint_instruction,
-        "assembly": state.hint_assembly,
-        "chips": chip_names,
-        "chip_deltas": chip_deltas,
-    });
-    capture_json(payload);
-}
-
-pub fn print_micro_op_json(chip: &String, payload_json: &String) {
-    // Deprecated: keep this function for local debugging, but do not emit JSON records.
-    // The beak protocol only includes: `chip_row`, `interaction`, `insn`.
-    let _ = (chip, payload_json);
-}
-
-pub fn emit_chip_row_json(
-    domain: &str,
-    chip: &String,
-    chip_kind: &str,
-    gates_json: &str,
-    values_json: &str,
-) {
-    let mut state = GLOBAL_STATE.lock().unwrap();
-    if !state.trace_logging {
-        return;
-    }
-
-    let uop_idx = state.micro_idx;
-    state.micro_idx = state.micro_idx.wrapping_add(1);
-    let row_seq = state.row_seq;
-    state.row_seq = state.row_seq.wrapping_add(1);
-    let row_id = format!("openvm:{}:{}:{}", state.step, uop_idx, row_seq);
-    state.last_row_id = row_id.clone();
-    state.step_chips.push(chip.clone());
-
-    let payload = json!({
-        "type": "chip_row",
-        "step": state.step,
-        "op_idx": uop_idx,
-        "row_seq": row_seq,
-        "chip_kind": chip_kind,
-        "pc": state.hint_pc,
-        "instruction": state.hint_instruction,
-        "assembly": state.hint_assembly,
-        "row_id": row_id,
-        "domain": domain,
-        "chip": chip,
-        "gates": parse_json_or_string(gates_json),
-        "values": parse_json_or_string(values_json),
-    });
-    capture_json(payload);
-}
-
-pub fn get_last_row_id() -> String {
-    GLOBAL_STATE.lock().unwrap().last_row_id.clone()
-}
-
-pub fn emit_interaction_json(
-    table_id: &str,
-    io: &str,
-    kind: &str,
-    anchor_row_id: &str,
-    payload_json: &str,
-    multiplicity_value: u64,
-    multiplicity_ref: &str,
-) {
-    let state = GLOBAL_STATE.lock().unwrap();
-    if !state.trace_logging {
-        return;
-    }
-
-    let payload = json!({
-        "type": "interaction",
-        "step": state.step,
-        "op_idx": null,
-        "pc": state.hint_pc,
-        "instruction": state.hint_instruction,
-        "assembly": state.hint_assembly,
-        "table_id": table_id,
-        "io": io,
-        "kind": kind,
-        "scope": "global",
-        "anchor_row_id": anchor_row_id,
-        "multiplicity": { "value": multiplicity_value, "ref": multiplicity_ref },
-        "payload": parse_json_or_string(payload_json),
-    });
-    capture_json(payload);
-}
-
-
 ////////////////
 // RANDOMNESS
 /////////
@@ -665,24 +1223,25 @@ pub fn random_bool() -> bool {
 }
 
 pub fn random_from_choices<T>(choices: Vec<T>) -> T
-    where T : Clone
+where
+    T: Clone,
 {
     let mut state = GLOBAL_STATE.lock().unwrap();
     choices.choose(&mut state.rng).unwrap().clone()
 }
 
-pub fn random_opcode(rng: &mut StdRng) ->  VmOpcode {
+pub fn random_opcode(rng: &mut StdRng) -> VmOpcode {
     match rng.random_range(0..=40) {
-         0 => BaseAluOpcode::ADD.global_opcode(),
-         1 => BaseAluOpcode::SUB.global_opcode(),
-         2 => BaseAluOpcode::XOR.global_opcode(),
-         3 => BaseAluOpcode::OR.global_opcode(),
-         4 => BaseAluOpcode::AND.global_opcode(),
-         5 => ShiftOpcode::SLL.global_opcode(),
-         6 => ShiftOpcode::SRL.global_opcode(),
-         7 => ShiftOpcode::SRA.global_opcode(),
-         8 => LessThanOpcode::SLT.global_opcode(),
-         9 => LessThanOpcode::SLTU.global_opcode(),
+        0 => BaseAluOpcode::ADD.global_opcode(),
+        1 => BaseAluOpcode::SUB.global_opcode(),
+        2 => BaseAluOpcode::XOR.global_opcode(),
+        3 => BaseAluOpcode::OR.global_opcode(),
+        4 => BaseAluOpcode::AND.global_opcode(),
+        5 => ShiftOpcode::SLL.global_opcode(),
+        6 => ShiftOpcode::SRL.global_opcode(),
+        7 => ShiftOpcode::SRA.global_opcode(),
+        8 => LessThanOpcode::SLT.global_opcode(),
+        9 => LessThanOpcode::SLTU.global_opcode(),
         10 => Rv32LoadStoreOpcode::LOADW.global_opcode(),
         11 => Rv32LoadStoreOpcode::LOADBU.global_opcode(),
         12 => Rv32LoadStoreOpcode::LOADHU.global_opcode(),
@@ -718,7 +1277,7 @@ pub fn random_opcode(rng: &mut StdRng) ->  VmOpcode {
         // ? => Rv32Phantom::PrintStr.global_opcode(),
         // ? => Rv32Phantom::HintRandom.global_opcode(),
         // ? => Rv32Phantom::HintLoadByKey.global_opcode(),
-        _  => panic!("selector value was out of bounds!"),
+        _ => panic!("selector value was out of bounds!"),
     }
 }
 
@@ -736,10 +1295,10 @@ fn internal_random_mod_of_u32(element: u32, rng: &mut StdRng) -> u32 {
     while new_element == element {
         let selector: u32 = rng.random_range(0..=7);
         new_element = match selector {
-            0 => { 0 },
-            1 => { 1 },
-            2 => { 0xffffffff },
-            3 => { 0xfffffffe },
+            0 => 0,
+            1 => 1,
+            2 => 0xffffffff,
+            3 => 0xfffffffe,
             4 => {
                 let n = rng.random_range(1..=31);
                 let bits_to_flip = rand::seq::index::sample(rng, 31, n).into_vec();
@@ -748,10 +1307,10 @@ fn internal_random_mod_of_u32(element: u32, rng: &mut StdRng) -> u32 {
                     flipped_element ^= 1 << bit_to_flip;
                 }
                 flipped_element
-            },
-            5 => { element.saturating_add(1) },
-            6 => { element.saturating_sub(1) },
-            7 => { rng.random::<u32>() },
+            }
+            5 => element.saturating_add(1),
+            6 => element.saturating_sub(1),
+            7 => rng.random::<u32>(),
             _ => unreachable!(),
         };
     }
@@ -764,7 +1323,7 @@ pub fn random_mod_of_u32_array<const LEN: usize>(elements: &[u32; LEN]) -> [u32;
     let mut new_elements = *elements;
     let mut indices: Vec<usize> = (0..LEN).collect();
     indices.shuffle(&mut state.rng);
-    let num_to_modify = state.rng.gen_range(1..=LEN);
+    let num_to_modify = state.rng.random_range(1..=LEN);
 
     for &i in indices.iter().take(num_to_modify) {
         new_elements[i] = internal_random_mod_of_u32(elements[i], &mut state.rng);
@@ -777,7 +1336,9 @@ pub fn random_mutate_field_element<F: Field + PrimeField32>(element: F, rng: &mu
     F::from_canonical_u32(internal_random_mod_of_u32(element.as_canonical_u32(), rng))
 }
 
-pub fn random_mutate_instruction<F: Field + PrimeField32>(instruction: &Instruction<F>) ->  Instruction<F> {
+pub fn random_mutate_instruction<F: Field + PrimeField32>(
+    instruction: &Instruction<F>,
+) -> Instruction<F> {
     let mut state = GLOBAL_STATE.lock().unwrap();
 
     // create a mutable copy of the old instruction
@@ -800,18 +1361,31 @@ pub fn random_mutate_instruction<F: Field + PrimeField32>(instruction: &Instruct
             0 => {
                 new_instruction = Instruction::default(); // full reset
                 new_instruction.opcode = random_new_opcode(instruction.opcode, &mut state.rng);
-            },
-            1 => { new_instruction.a = random_mutate_field_element(new_instruction.a, &mut state.rng); },
-            2 => { new_instruction.b = random_mutate_field_element(new_instruction.b, &mut state.rng); },
-            3 => { new_instruction.c = random_mutate_field_element(new_instruction.c, &mut state.rng); },
-            4 => { new_instruction.d = random_mutate_field_element(new_instruction.d, &mut state.rng); },
-            5 => { new_instruction.e = random_mutate_field_element(new_instruction.e, &mut state.rng); },
-            6 => { new_instruction.f = random_mutate_field_element(new_instruction.f, &mut state.rng); },
-            7 => { new_instruction.g = random_mutate_field_element(new_instruction.g, &mut state.rng); },
+            }
+            1 => {
+                new_instruction.a = random_mutate_field_element(new_instruction.a, &mut state.rng);
+            }
+            2 => {
+                new_instruction.b = random_mutate_field_element(new_instruction.b, &mut state.rng);
+            }
+            3 => {
+                new_instruction.c = random_mutate_field_element(new_instruction.c, &mut state.rng);
+            }
+            4 => {
+                new_instruction.d = random_mutate_field_element(new_instruction.d, &mut state.rng);
+            }
+            5 => {
+                new_instruction.e = random_mutate_field_element(new_instruction.e, &mut state.rng);
+            }
+            6 => {
+                new_instruction.f = random_mutate_field_element(new_instruction.f, &mut state.rng);
+            }
+            7 => {
+                new_instruction.g = random_mutate_field_element(new_instruction.g, &mut state.rng);
+            }
             _ => unreachable!(),
         };
     }
 
     new_instruction
 }
-

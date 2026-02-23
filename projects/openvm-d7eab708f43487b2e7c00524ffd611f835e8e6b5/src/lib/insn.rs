@@ -25,6 +25,9 @@ pub struct OpenVMInsn {
     /// Program counter after this instruction completes.
     pub next_pc: Pc,
 
+    /// Timestamp after this instruction completes.
+    pub next_timestamp: Timestamp,
+
     /// OpenVM global opcode.
     pub opcode: VmOpcode,
 
