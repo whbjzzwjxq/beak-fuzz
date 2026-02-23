@@ -118,10 +118,6 @@ fn run_trace(words: &[u32], print_micro_ops: bool) -> bool {
 
     // --- 3. SDK setup ---
     println!("\n=== OpenVM SDK ===");
-    fuzzer_utils::set_trace_logging(true);
-    fuzzer_utils::disable_assertions();
-    fuzzer_utils::enable_json_capture();
-
     let mut app_config = AppConfig::riscv32();
     app_config.app_vm_config.system.config =
         app_config.app_vm_config.system.config.with_max_segment_len(256).with_continuations();

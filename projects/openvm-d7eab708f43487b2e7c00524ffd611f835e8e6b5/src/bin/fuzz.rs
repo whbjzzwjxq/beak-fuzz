@@ -2,9 +2,10 @@ use std::path::{Path, PathBuf};
 
 use clap::{Arg, Command};
 
-use beak_core::fuzz::loop1::{run_loop1_threaded, BackendEval, Loop1Config, LoopBackend, DEFAULT_RNG_SEED};
+use beak_core::fuzz::loop1::{run_loop1_threaded, Loop1Config, DEFAULT_RNG_SEED};
 use beak_core::rv32im::instruction::RV32IMInstruction;
 
+use beak_openvm_d7eab708::backend::OpenVmBackend;
 use openvm_instructions::exe::VmExe;
 use openvm_instructions::instruction::Instruction;
 use openvm_instructions::program::Program;
@@ -31,112 +32,6 @@ fn resolve_path(root: &Path, arg: &str) -> PathBuf {
         p
     } else {
         root.join(p)
-    }
-}
-
-fn build_sdk() -> Sdk {
-    let mut app_config = AppConfig::riscv32();
-    app_config.app_vm_config.system.config = app_config
-        .app_vm_config
-        .system
-        .config
-        .with_max_segment_len(256)
-        .with_continuations();
-    Sdk::new(app_config).expect("sdk init")
-}
-
-fn build_exe(words: &[u32]) -> Result<std::sync::Arc<VmExe<F>>, String> {
-    let transpiler = Transpiler::<F>::default()
-        .with_extension(Rv32ITranspilerExtension)
-        .with_extension(Rv32MTranspilerExtension);
-    let transpiled = transpiler
-        .transpile(words)
-        .map_err(|e| format!("transpile failed: {e:?}"))?;
-
-    let mut instructions: Vec<Instruction<F>> = Vec::new();
-    for opt in transpiled.into_iter().flatten() {
-        instructions.push(opt);
-    }
-    instructions.push(Instruction::from_usize(
-        SystemOpcode::TERMINATE.global_opcode(),
-        [0, 0, 0],
-    ));
-
-    let program = Program::from_instructions(&instructions);
-    Ok(std::sync::Arc::new(VmExe::new(program)))
-}
-
-fn is_openvm_supported_rv32_word(word: u32) -> bool {
-    // OpenVM's RV32IM toolchain does not currently support system/CSR or fence in our harness.
-    // Avoid feeding them to the transpiler/prover since it may terminate the process.
-    let opcode = word & 0x7f;
-    opcode != 0x73 && opcode != 0x0f
-}
-
-struct OpenVmBackend {
-    sdk: Sdk,
-    max_instructions: usize,
-}
-
-impl OpenVmBackend {
-    fn new(max_instructions: usize) -> Self {
-        Self {
-            sdk: build_sdk(),
-            max_instructions,
-        }
-    }
-}
-
-impl LoopBackend for OpenVmBackend {
-    fn is_usable_seed(&self, words: &[u32]) -> bool {
-        if words.is_empty() {
-            return false;
-        }
-        if words.len() > self.max_instructions {
-            return false;
-        }
-        words.iter().all(|w| is_openvm_supported_rv32_word(*w) && RV32IMInstruction::from_word(*w).is_ok())
-    }
-
-    fn prepare_for_run(&mut self, rng_seed: u64) {
-        // NOTE: `reset_for_new_run()` is intended for in-process fuzzing, but we keep it disabled
-        // for now because OpenVM internals may depend on some global fuzzer_utils state across the
-        // prove pipeline (preflight -> tracegen). Re-enable once validated.
-        fuzzer_utils::set_seed(rng_seed);
-        fuzzer_utils::set_trace_logging(true);
-        fuzzer_utils::disable_assertions();
-        fuzzer_utils::enable_json_capture();
-    }
-
-    fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
-        let exe = build_exe(words)?;
-        let mut app_prover = self
-            .sdk
-            .app_prover(exe)
-            .map_err(|e| format!("app_prover failed: {e:?}"))?;
-        let _proof = app_prover
-            .prove(StdIn::default())
-            .map_err(|e| format!("prove failed: {e:?}"))?;
-
-        let state = app_prover
-            .instance()
-            .state()
-            .as_ref()
-            .ok_or_else(|| "no final state".to_string())?;
-        let mut regs = [0u32; 32];
-        for i in 0..32u32 {
-            let bytes: [u8; 4] = unsafe { state.memory.read::<u8, 4>(RV32_REGISTER_AS, i * 4) };
-            regs[i as usize] = u32::from_le_bytes(bytes);
-        }
-        Ok(regs)
-    }
-
-    fn collect_eval(&mut self) -> BackendEval {
-        // TODO: The user is refactoring `crates/beak-core/src/trace/**`.
-        // Once trace/bucket evaluation is stable again, populate:
-        // - bucket_ids (preferred) or bucket_sig
-        // - micro_ops_len/op_count/bucket_hit_count
-        BackendEval::default()
     }
 }
 

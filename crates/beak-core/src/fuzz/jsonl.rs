@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
+use crate::trace::BucketHit;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CorpusRecord {
     pub zkvm_commit: String,
@@ -13,7 +15,7 @@ pub struct CorpusRecord {
     pub timed_out: bool,
     pub mismatch: bool,
     /// Canonical bucket signature for this run (backend-defined or derived from bucket hit signatures).
-    pub bucket_sig: String,
+    pub bucket_hits_sig: String,
     pub instructions: Vec<u32>,
     pub metadata: serde_json::Value,
 }
@@ -25,10 +27,9 @@ pub struct BugRecord {
     pub timeout_ms: u64,
     pub timed_out: bool,
     /// Canonical bucket signature for this run (backend-defined or derived from bucket hit signatures).
-    pub bucket_sig: String,
-    pub micro_ops_len: usize,
-    pub op_count: usize,
-    pub bucket_hit_count: usize,
+    pub bucket_hits_sig: String,
+    pub micro_op_count: usize,
+    pub bucket_hits: Vec<BucketHit>,
     pub mismatch_regs: Vec<(u32, u32, u32)>, // (idx, oracle, prover)
     pub instructions: Vec<u32>,
     pub metadata: serde_json::Value,

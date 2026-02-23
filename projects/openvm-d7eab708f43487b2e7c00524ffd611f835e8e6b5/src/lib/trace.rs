@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use beak_core::trace::micro_ops::trace::Trace;
+use beak_core::trace::{BucketHit, Trace};
+use serde_json::Value;
 
 use crate::chip_row::OpenVMChipRow;
 use crate::insn::OpenVMInsn;
@@ -11,6 +12,9 @@ pub struct OpenVMTrace {
     instructions: Vec<OpenVMInsn>,
     chip_rows: Vec<OpenVMChipRow>,
     interactions: Vec<OpenVMInteraction>,
+
+    /// Bucket hits derived from this trace (e.g. via match_hit); empty until implemented.
+    bucket_hits: Vec<BucketHit>,
 
     // ---- Global seq -> vec index -------------------------------------------
     insn_by_seq: Vec<Option<usize>>,
@@ -27,7 +31,7 @@ pub struct OpenVMTrace {
 
     // ---- row_id / bus_kind -> interaction indices (no cloning) --------------
     interactions_by_row_id: HashMap<String, Vec<usize>>,
-    interactions_by_bus: HashMap<u8, Vec<usize>>,
+    interactions_by_bus: HashMap<crate::interaction::OpenVMInteractionKind, Vec<usize>>,
 }
 
 impl OpenVMTrace {
@@ -36,81 +40,53 @@ impl OpenVMTrace {
             v.resize(idx + 1, T::default());
         }
     }
+
+    /// Build an `OpenVMTrace` from fuzzer_utils emitted JSON logs.
+    ///
+    /// Each log entry is `{ "type": "instruction"|"chip_row"|"interaction", "data": {...} }`.
+    pub fn from_logs(logs: Vec<Value>) -> Result<Self, String> {
+        let mut instructions = Vec::new();
+        let mut chip_rows = Vec::new();
+        let mut interactions = Vec::new();
+
+        for (idx, log) in logs.into_iter().enumerate() {
+            let obj = log.as_object().ok_or_else(|| format!("log[{}]: not an object", idx))?;
+            let ty = obj
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("log[{}]: missing or invalid \"type\"", idx))?;
+            let data = obj
+                .get("data")
+                .cloned()
+                .ok_or_else(|| format!("log[{}]: missing \"data\"", idx))?;
+
+            match ty {
+                "instruction" => {
+                    let insn: OpenVMInsn =
+                        serde_json::from_value(data).map_err(|e| format!("log[{}] instruction: {}", idx, e))?;
+                    instructions.push(insn);
+                }
+                "chip_row" => {
+                    let row: OpenVMChipRow =
+                        serde_json::from_value(data).map_err(|e| format!("log[{}] chip_row: {}", idx, e))?;
+                    chip_rows.push(row);
+                }
+                "interaction" => {
+                    let ia: OpenVMInteraction =
+                        serde_json::from_value(data).map_err(|e| format!("log[{}] interaction: {}", idx, e))?;
+                    interactions.push(ia);
+                }
+                _ => return Err(format!("log[{}]: unknown type \"{}\"", idx, ty)),
+            }
+        }
+
+        Ok(Self::new(instructions, chip_rows, interactions))
+    }
 }
 
-impl Trace<OpenVMInteraction, OpenVMChipRow, OpenVMInsn> for OpenVMTrace {
-    fn instructions(&self) -> &[OpenVMInsn] {
-        &self.instructions
-    }
-
-    fn chip_rows(&self) -> &[OpenVMChipRow] {
-        &self.chip_rows
-    }
-
-    fn interactions(&self) -> &[OpenVMInteraction] {
-        &self.interactions
-    }
-
-    fn get_instruction_global(&self, seq: usize) -> &OpenVMInsn {
-        let i = self.insn_by_seq[seq].expect("missing insn for seq");
-        &self.instructions[i]
-    }
-
-    fn get_chip_row_global(&self, seq: usize) -> &OpenVMChipRow {
-        let i = self.chip_row_by_seq[seq].expect("missing chip_row for seq");
-        &self.chip_rows[i]
-    }
-
-    fn get_interaction_global(&self, seq: usize) -> &OpenVMInteraction {
-        let i = self.interaction_by_seq[seq].expect("missing interaction for seq");
-        &self.interactions[i]
-    }
-
-    fn get_instruction_in_step(&self, step_idx: usize, op_idx: usize) -> &OpenVMInsn {
-        assert_eq!(op_idx, 0, "OpenVMInsn is 1-per-step; op_idx must be 0");
-        let i = self.insn_by_step[step_idx].expect("missing insn for step");
-        &self.instructions[i]
-    }
-
-    fn get_chip_row_in_step(&self, step_idx: usize, op_idx: usize) -> &OpenVMChipRow {
-        let indices = self
-            .chip_rows_by_step
-            .get(step_idx)
-            .unwrap_or_else(|| panic!("missing chip_rows for step={}", step_idx));
-        let i = indices
-            .iter()
-            .find(|&&idx| self.chip_rows[idx].base().op_idx == op_idx as u64)
-            .copied()
-            .unwrap_or_else(|| {
-                panic!("missing chip_row for step={}, op_idx={}", step_idx, op_idx)
-            });
-        &self.chip_rows[i]
-    }
-
-    fn get_interaction_in_step(&self, step_idx: usize, op_idx: usize) -> &OpenVMInteraction {
-        let indices = &self.interactions_by_step[step_idx];
-        let i = indices
-            .iter()
-            .find(|&&idx| self.interactions[idx].base().op_idx == op_idx as u64)
-            .copied()
-            .unwrap_or_else(|| {
-                panic!("missing interaction for step={}, op_idx={}", step_idx, op_idx)
-            });
-        &self.interactions[i]
-    }
-
-    fn get_interactions_by_row_id(&self, row_id: &str) -> &[OpenVMInteraction] {
-        // This trait method returns a slice, but we store indices.
-        // Callers should use `interaction_indices_by_row_id` for zero-copy access.
-        // As a fallback, return empty.
-        &[]
-    }
-
-    fn get_interactions_by_table_id(&self, table_id: &str) -> &[OpenVMInteraction] {
-        &[]
-    }
-
-    fn new(
+impl OpenVMTrace {
+    /// Instructions, chip_rows, and interactions with index maps. Use `from_logs` to build from JSON.
+    pub fn new(
         instructions: Vec<OpenVMInsn>,
         chip_rows: Vec<OpenVMChipRow>,
         interactions: Vec<OpenVMInteraction>,
@@ -124,7 +100,8 @@ impl Trace<OpenVMInteraction, OpenVMChipRow, OpenVMInsn> for OpenVMTrace {
         let mut interactions_by_step: Vec<Vec<usize>> = Vec::new();
 
         let mut interactions_by_row_id: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut interactions_by_bus: HashMap<u8, Vec<usize>> = HashMap::new();
+        let mut interactions_by_bus: HashMap<crate::interaction::OpenVMInteractionKind, Vec<usize>> =
+            HashMap::new();
 
         for (i, insn) in instructions.iter().enumerate() {
             let seq = insn.seq as usize;
@@ -176,13 +153,14 @@ impl Trace<OpenVMInteraction, OpenVMChipRow, OpenVMInsn> for OpenVMTrace {
             interactions_by_step[step].push(i);
 
             interactions_by_row_id.entry(b.row_id.clone()).or_default().push(i);
-            interactions_by_bus.entry(b.bus as u8).or_default().push(i);
+            interactions_by_bus.entry(b.kind).or_default().push(i);
         }
 
         Self {
             instructions,
             chip_rows,
             interactions,
+            bucket_hits: Vec::new(),
             insn_by_seq,
             chip_row_by_seq,
             interaction_by_seq,
@@ -192,6 +170,75 @@ impl Trace<OpenVMInteraction, OpenVMChipRow, OpenVMInsn> for OpenVMTrace {
             interactions_by_row_id,
             interactions_by_bus,
         }
+    }
+
+    pub fn instructions(&self) -> &[OpenVMInsn] {
+        &self.instructions
+    }
+
+    pub fn chip_rows(&self) -> &[OpenVMChipRow] {
+        &self.chip_rows
+    }
+
+    pub fn interactions(&self) -> &[OpenVMInteraction] {
+        &self.interactions
+    }
+
+    pub fn get_instruction_global(&self, seq: usize) -> &OpenVMInsn {
+        let i = self.insn_by_seq[seq].expect("missing insn for seq");
+        &self.instructions[i]
+    }
+
+    pub fn get_chip_row_global(&self, seq: usize) -> &OpenVMChipRow {
+        let i = self.chip_row_by_seq[seq].expect("missing chip_row for seq");
+        &self.chip_rows[i]
+    }
+
+    pub fn get_interaction_global(&self, seq: usize) -> &OpenVMInteraction {
+        let i = self.interaction_by_seq[seq].expect("missing interaction for seq");
+        &self.interactions[i]
+    }
+
+    pub fn get_instruction_in_step(&self, step_idx: usize, op_idx: usize) -> &OpenVMInsn {
+        assert_eq!(op_idx, 0, "OpenVMInsn is 1-per-step; op_idx must be 0");
+        let i = self.insn_by_step[step_idx].expect("missing insn for step");
+        &self.instructions[i]
+    }
+
+    pub fn get_chip_row_in_step(&self, step_idx: usize, op_idx: usize) -> &OpenVMChipRow {
+        let indices = self
+            .chip_rows_by_step
+            .get(step_idx)
+            .unwrap_or_else(|| panic!("missing chip_rows for step={}", step_idx));
+        let i = indices
+            .iter()
+            .find(|&&idx| self.chip_rows[idx].base().op_idx == op_idx as u64)
+            .copied()
+            .unwrap_or_else(|| {
+                panic!("missing chip_row for step={}, op_idx={}", step_idx, op_idx)
+            });
+        &self.chip_rows[i]
+    }
+
+    pub fn get_interaction_in_step(&self, step_idx: usize, op_idx: usize) -> &OpenVMInteraction {
+        let indices = &self.interactions_by_step[step_idx];
+        let i = indices
+            .iter()
+            .find(|&&idx| self.interactions[idx].base().op_idx == op_idx as u64)
+            .copied()
+            .unwrap_or_else(|| {
+                panic!("missing interaction for step={}, op_idx={}", step_idx, op_idx)
+            });
+        &self.interactions[i]
+    }
+
+    /// Slice of interactions for a row_id; prefer `interaction_indices_by_row_id` for zero-copy.
+    pub fn get_interactions_by_row_id(&self, _row_id: &str) -> &[OpenVMInteraction] {
+        &[]
+    }
+
+    pub fn get_interactions_by_table_id(&self, _table_id: &str) -> &[OpenVMInteraction] {
+        &[]
     }
 }
 
@@ -211,9 +258,12 @@ impl OpenVMTrace {
         self.interactions_by_row_id.get(row_id).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// All interaction indices on a specific bus.
-    pub fn interaction_indices_by_bus(&self, bus: crate::interaction::BusKind) -> &[usize] {
-        self.interactions_by_bus.get(&(bus as u8)).map(|v| v.as_slice()).unwrap_or(&[])
+    /// All interaction indices on a specific bus (interaction kind).
+    pub fn interaction_indices_by_bus(
+        &self,
+        kind: crate::interaction::OpenVMInteractionKind,
+    ) -> &[usize] {
+        self.interactions_by_bus.get(&kind).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// Iterate over all interactions for a step, yielding references.
@@ -230,10 +280,15 @@ impl OpenVMTrace {
             .iter()
             .map(|&i| &self.chip_rows[i])
     }
+
+    /// Number of instructions in this trace (for micro_op_count / feedback).
+    pub fn instruction_count(&self) -> usize {
+        self.instructions.len()
+    }
 }
 
 impl Trace for OpenVMTrace {
-    fn match_hit(&self, ctx: &Context) -> Option<BucketHit> {
-        todo!()
+    fn bucket_hits(&self) -> &[BucketHit] {
+        &self.bucket_hits
     }
 }

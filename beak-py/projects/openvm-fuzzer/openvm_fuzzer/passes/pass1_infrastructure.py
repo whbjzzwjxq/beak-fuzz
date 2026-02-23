@@ -177,6 +177,29 @@ def _rv32im_circuit_add_deps(*, openvm_install_path: Path) -> None:
         )
 
 
+def _patch_instructions_opcode_serde(*, openvm_install_path: Path) -> None:
+    """Add Serialize and Deserialize to Opcode enums in rv32im transpiler instructions.rs.
+
+    Some enums (Rv32JalLuiOpcode, Rv32JalrOpcode, Rv32AuipcOpcode, MulOpcode,
+    Rv32HintStoreOpcode) use a single-line derive without Serialize/Deserialize;
+    this patch appends them so trace serialization works.
+    """
+    instructions_rs = (
+        openvm_install_path / "extensions" / "rv32im" / "transpiler" / "src" / "instructions.rs"
+    )
+    if not instructions_rs.exists():
+        return
+    contents = instructions_rs.read_text()
+    # One-line derive ending with LocalOpcode,)] -> add Serialize, Deserialize
+    if "LocalOpcode,\n)]" not in contents:
+        return
+    contents = contents.replace(
+        "LocalOpcode,\n)]",
+        "LocalOpcode,\n    Serialize,\n    Deserialize,\n)]",
+    )
+    instructions_rs.write_text(contents)
+
+
 def apply(*, openvm_install_path: Path, commit_or_branch: str) -> None:
     _rewrite_private_stark_backend(
         openvm_install_path=openvm_install_path,
@@ -186,4 +209,5 @@ def apply(*, openvm_install_path: Path, commit_or_branch: str) -> None:
     _add_fuzzer_utils_to_workspace(openvm_install_path=openvm_install_path)
     _vm_add_serde_json_dep(openvm_install_path=openvm_install_path)
     _rv32im_circuit_add_deps(openvm_install_path=openvm_install_path)
+    _patch_instructions_opcode_serde(openvm_install_path=openvm_install_path)
 

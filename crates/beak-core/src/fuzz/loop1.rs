@@ -14,13 +14,14 @@ use crate::fuzz::jsonl::{BugRecord, CorpusRecord, JsonlWriter};
 use crate::fuzz::seed::FuzzingSeed;
 use crate::rv32im::instruction::RV32IMInstruction;
 use crate::rv32im::oracle::RISCVOracle;
-use crate::trace::trace::{sorted_bucket_signatures, OwnedTrace};
+use crate::trace::{sorted_signatures_from_hits, BucketHit};
 
 use super::mutators::SeedMutator;
 
 pub const DEFAULT_RNG_SEED: u64 = 2026;
 
-type LoopState = StdState<InMemoryCorpus<BytesInput>, BytesInput, StdRand, InMemoryCorpus<BytesInput>>;
+type LoopState =
+    StdState<InMemoryCorpus<BytesInput>, BytesInput, StdRand, InMemoryCorpus<BytesInput>>;
 
 #[derive(Debug, Clone)]
 pub struct Loop1Config {
@@ -49,13 +50,8 @@ pub struct Loop1Outputs {
 
 #[derive(Debug, Clone, Default)]
 pub struct BackendEval {
-    /// Backend-produced trace for this run (may be empty on error / best-effort paths).
-    pub trace: OwnedTrace,
-
-    pub micro_ops_len: usize,
-    pub op_count: usize,
-    /// Best-effort bucket hit count (should match `trace.bucket_hits.len()` when populated).
-    pub bucket_hit_count: usize,
+    pub micro_op_count: usize,
+    pub bucket_hits: Vec<BucketHit>,
     pub final_regs: Option<[u32; 32]>,
     pub backend_error: Option<String>,
 }
@@ -79,10 +75,10 @@ pub trait LoopBackend {
 
 #[derive(Debug, Clone, Default)]
 struct RunStats {
-    bucket_sig: String,
-    micro_ops_len: usize,
-    op_count: usize,
+    bucket_hits_sig: String,
     bucket_hit_count: usize,
+    micro_op_count: usize,
+    bucket_hits: Vec<BucketHit>,
     mismatch_regs: Vec<(u32, u32, u32)>,
     timed_out: bool,
 }
@@ -90,10 +86,7 @@ struct RunStats {
 static LAST_RUN: LazyLock<Mutex<RunStats>> = LazyLock::new(|| Mutex::new(RunStats::default()));
 
 fn now_ts_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_secs()
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs()
 }
 
 fn decode_words_from_input(input: &BytesInput, max_instructions: usize) -> Vec<u32> {
@@ -187,12 +180,7 @@ struct BucketNoveltyFeedback {
 
 impl BucketNoveltyFeedback {
     fn new(corpus_writer: JsonlWriter, cfg: Loop1Config) -> Self {
-        Self {
-            seen: HashSet::new(),
-            corpus_writer,
-            cfg,
-            name: "BucketNoveltyFeedback".into(),
-        }
+        Self { seen: HashSet::new(), corpus_writer, cfg, name: "BucketNoveltyFeedback".into() }
     }
 }
 
@@ -214,7 +202,7 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
         _exit_kind: &ExitKind,
     ) -> Result<bool, Error> {
         let stats = LAST_RUN.lock().unwrap().clone();
-        let sig = stats.bucket_sig;
+        let sig = stats.bucket_hits_sig;
         if sig.is_empty() {
             return Ok(false);
         }
@@ -229,13 +217,11 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
             timeout_ms: self.cfg.timeout_ms,
             timed_out: stats.timed_out,
             mismatch: !stats.mismatch_regs.is_empty(),
-            bucket_sig: sig,
+            bucket_hits_sig: sig,
             instructions: words,
             metadata: serde_json::json!({ "kind": "interesting" }),
         };
-        self.corpus_writer
-            .append_json_line(&rec)
-            .map_err(|e| Error::unknown(e))?;
+        self.corpus_writer.append_json_line(&rec).map_err(|e| Error::unknown(e))?;
         Ok(true)
     }
 }
@@ -249,11 +235,7 @@ struct MismatchObjective {
 
 impl MismatchObjective {
     fn new(bug_writer: JsonlWriter, cfg: Loop1Config) -> Self {
-        Self {
-            bug_writer,
-            cfg,
-            name: "MismatchObjective".into(),
-        }
+        Self { bug_writer, cfg, name: "MismatchObjective".into() }
     }
 }
 
@@ -284,17 +266,14 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for MismatchObjective {
             rng_seed: self.cfg.rng_seed,
             timeout_ms: self.cfg.timeout_ms,
             timed_out: stats.timed_out,
-            bucket_sig: stats.bucket_sig,
-            micro_ops_len: stats.micro_ops_len,
-            op_count: stats.op_count,
-            bucket_hit_count: stats.bucket_hit_count,
+            bucket_hits_sig: stats.bucket_hits_sig,
+            micro_op_count: stats.micro_op_count,
+            bucket_hits: stats.bucket_hits.clone(),
             mismatch_regs: stats.mismatch_regs,
             instructions: words,
             metadata: serde_json::json!({ "kind": "mismatch" }),
         };
-        self.bug_writer
-            .append_json_line(&rec)
-            .map_err(|e| Error::unknown(e))?;
+        self.bug_writer.append_json_line(&rec).map_err(|e| Error::unknown(e))?;
         Ok(true)
     }
 }
@@ -343,32 +322,23 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     let mut feedback = BucketNoveltyFeedback::new(corpus_writer.clone(), cfg.clone());
     let mut objective = MismatchObjective::new(bug_writer.clone(), cfg.clone());
     let mut state: LoopState =
-        StdState::new(rand, corpus, solutions, &mut feedback, &mut objective).map_err(|e| {
-            format!("create state failed: {e}")
-        })?;
+        StdState::new(rand, corpus, solutions, &mut feedback, &mut objective)
+            .map_err(|e| format!("create state failed: {e}"))?;
 
     // Seed corpus with the initial JSONL.
-    for (input, _meta) in load_initial_seeds(
-        &cfg.seeds_jsonl,
-        cfg.max_instructions,
-        &|words| backend.is_usable_seed(words),
-    )
+    for (input, _meta) in load_initial_seeds(&cfg.seeds_jsonl, cfg.max_instructions, &|words| {
+        backend.is_usable_seed(words)
+    })
     .into_iter()
-    .take(if cfg.initial_limit == 0 {
-        usize::MAX
-    } else {
-        cfg.initial_limit
-    }) {
+    .take(if cfg.initial_limit == 0 { usize::MAX } else { cfg.initial_limit })
+    {
         state
             .corpus_mut()
             .add(Testcase::new(input))
             .map_err(|e| format!("add initial seed failed: {e}"))?;
     }
     if state.corpus().count() == 0 {
-        return Err(format!(
-            "No usable initial seeds loaded from {}",
-            cfg.seeds_jsonl.display()
-        ));
+        return Err(format!("No usable initial seeds loaded from {}", cfg.seeds_jsonl.display()));
     }
 
     let scheduler = QueueScheduler::new();
@@ -381,7 +351,9 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     let mut harness = |input: &BytesInput| -> ExitKind {
         let start = Instant::now();
         let words = decode_words_from_input(input, cfg.max_instructions);
-        if !backend.is_usable_seed(&words) || words.iter().any(|w| RV32IMInstruction::from_word(*w).is_err()) {
+        if !backend.is_usable_seed(&words)
+            || words.iter().any(|w| RV32IMInstruction::from_word(*w).is_err())
+        {
             let mut last = LAST_RUN.lock().unwrap();
             *last = RunStats::default();
             return ExitKind::Ok;
@@ -398,28 +370,22 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
             Ok(Err(_)) => None,
             Err(_) => None,
         };
-        let mismatches = final_regs
-            .as_ref()
-            .map(|r| mismatch_regs(&oracle_regs, r))
-            .unwrap_or_default();
+        let mismatches =
+            final_regs.as_ref().map(|r| mismatch_regs(&oracle_regs, r)).unwrap_or_default();
 
         let eval = backend.collect_eval();
-        let bucket_sigs = sorted_bucket_signatures(&eval.trace);
+        let bucket_sigs = sorted_signatures_from_hits(&eval.bucket_hits);
         let sig = canonical_bucket_sig(&bucket_sigs);
-        let bucket_hit_count = if !eval.trace.bucket_hits.is_empty() {
-            eval.trace.bucket_hits.len()
-        } else {
-            eval.bucket_hit_count
-        };
+        let bucket_hit_count = eval.bucket_hits.len();
 
         let timed_out = start.elapsed() > timeout;
 
         let mut last = LAST_RUN.lock().unwrap();
         *last = RunStats {
-            bucket_sig: sig,
-            micro_ops_len: eval.micro_ops_len,
-            op_count: eval.op_count,
+            bucket_hits_sig: sig,
             bucket_hit_count,
+            micro_op_count: eval.micro_op_count,
+            bucket_hits: eval.bucket_hits.clone(),
             mismatch_regs: mismatches.clone(),
             timed_out,
         };
@@ -461,9 +427,5 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     corpus_writer.flush()?;
     bug_writer.flush()?;
 
-    Ok(Loop1Outputs {
-        corpus_path,
-        bugs_path,
-    })
+    Ok(Loop1Outputs { corpus_path, bugs_path })
 }
-

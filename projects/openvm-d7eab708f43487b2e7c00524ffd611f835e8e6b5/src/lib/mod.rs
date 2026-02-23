@@ -1,3 +1,4 @@
+pub mod backend;
 pub mod bucket;
 pub mod chip_row;
 pub mod insn;
