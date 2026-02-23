@@ -254,7 +254,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             r"""
 
         // BEAK-INSERT: Emit chip-row micro-op.
-        let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_row.borrow();
+        let adapter_slice: &[F] = adapter_row;
+        let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_slice.borrow();
         let rd_ptr = beak_cols.rd_ptr.as_canonical_u32();
         let rs1_ptr = beak_cols.rs1_ptr.as_canonical_u32();
 
@@ -274,7 +275,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             r"""
 
         // BEAK-INSERT: Emit chip-row micro-op.
-        let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_row.borrow();
+        let adapter_slice: &[F] = adapter_row;
+        let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_slice.borrow();
         let rd_ptr = beak_cols.rd_ptr.as_canonical_u32();
         let rs1_ptr = beak_cols.rs1_ptr.as_canonical_u32();
 
@@ -294,7 +296,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             r"""
 
         // BEAK-INSERT: Emit chip-row micro-op.
-        let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_row.borrow();
+        let adapter_slice: &[F] = adapter_row;
+        let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_slice.borrow();
         let rd_ptr = beak_cols.rd_ptr.as_canonical_u32();
         let rs1_ptr = beak_cols.rs1_ptr.as_canonical_u32();
 
@@ -318,7 +321,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             r"""
 
         // BEAK-INSERT: Emit chip-row micro-op.
-        let beak_cols: &Rv32MultAdapterCols<F> = adapter_row.borrow();
+        let adapter_slice: &[F] = adapter_row;
+        let beak_cols: &Rv32MultAdapterCols<F> = adapter_slice.borrow();
         let rd_ptr = beak_cols.rd_ptr.as_canonical_u32();
         let rs1_ptr = beak_cols.rs1_ptr.as_canonical_u32();
         let rs2_ptr = beak_cols.rs2_ptr.as_canonical_u32();
@@ -334,7 +338,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             r"""
 
         // BEAK-INSERT: Emit chip-row micro-op.
-        let beak_cols: &Rv32MultAdapterCols<F> = adapter_row.borrow();
+        let adapter_slice: &[F] = adapter_row;
+        let beak_cols: &Rv32MultAdapterCols<F> = adapter_slice.borrow();
         let rd_ptr = beak_cols.rd_ptr.as_canonical_u32();
         let rs1_ptr = beak_cols.rs1_ptr.as_canonical_u32();
         let rs2_ptr = beak_cols.rs2_ptr.as_canonical_u32();
@@ -351,7 +356,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             r"""
 
         // BEAK-INSERT: Emit chip-row micro-op.
-        let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_row.borrow();
+        let adapter_slice: &[F] = adapter_row;
+        let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_slice.borrow();
         let rd_ptr = beak_cols.rd_ptr.as_canonical_u32();
         let rs1_ptr = beak_cols.rs1_ptr.as_canonical_u32();
         let rs2_ptr = beak_cols.rs2.as_canonical_u32();
@@ -370,7 +376,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             r"""
 
         // BEAK-INSERT: Emit chip-row micro-op.
-        let beak_cols: &Rv32BranchAdapterCols<F> = adapter_row.borrow();
+        let adapter_slice: &[F] = adapter_row;
+        let beak_cols: &Rv32BranchAdapterCols<F> = adapter_slice.borrow();
         let rs1_ptr = beak_cols.rs1_ptr.as_canonical_u32();
         let rs2_ptr = beak_cols.rs2_ptr.as_canonical_u32();
         let from_pc = beak_cols.from_state.pc.as_canonical_u32();
@@ -407,7 +414,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             r"""
 
         // BEAK-INSERT: Emit chip-row micro-op.
-        let beak_cols: &Rv32BranchAdapterCols<F> = adapter_row.borrow();
+        let adapter_slice: &[F] = adapter_row;
+        let beak_cols: &Rv32BranchAdapterCols<F> = adapter_slice.borrow();
         let rs1_ptr = beak_cols.rs1_ptr.as_canonical_u32();
         let rs2_ptr = beak_cols.rs2_ptr.as_canonical_u32();
         let from_pc = beak_cols.from_state.pc.as_canonical_u32();
@@ -443,7 +451,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             r"""
 
         // BEAK-INSERT: Emit chip-row micro-op.
-        let beak_cols: &Rv32CondRdWriteAdapterCols<F> = adapter_row.borrow();
+        let adapter_slice: &[F] = adapter_row;
+        let beak_cols: &Rv32CondRdWriteAdapterCols<F> = adapter_slice.borrow();
         let needs_write = beak_cols.needs_write.as_canonical_u32() == 1;
         let rd_ptr = beak_cols.inner.rd_ptr.as_canonical_u32();
         let from_pc = beak_cols.inner.from_state.pc.as_canonical_u32();
@@ -480,7 +489,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             r"""
 
         // BEAK-INSERT: Emit chip-row micro-op.
-        let beak_cols: &Rv32JalrAdapterCols<F> = adapter_row.borrow();
+        let adapter_slice: &[F] = adapter_row;
+        let beak_cols: &Rv32JalrAdapterCols<F> = adapter_slice.borrow();
 
         let needs_write = beak_cols.needs_write.as_canonical_u32() == 1;
         let rd_ptr = beak_cols.rd_ptr.as_canonical_u32();
@@ -516,7 +526,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             r"""
 
         // BEAK-INSERT: Emit chip-row micro-op.
-        let beak_cols: &Rv32RdWriteAdapterCols<F> = adapter_row.borrow();
+        let adapter_slice: &[F] = adapter_row;
+        let beak_cols: &Rv32RdWriteAdapterCols<F> = adapter_slice.borrow();
         let rd_ptr = beak_cols.rd_ptr.as_canonical_u32();
         fuzzer_utils::emit_auipc_chip_row(0, rd_ptr, record.imm, record.from_pc, rd_data);
         // BEAK-INSERT-END
@@ -529,7 +540,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             r"""
 
         // BEAK-INSERT: Emit chip-row micro-op.
-        let beak_cols: &Rv32LoadStoreAdapterCols<F> = adapter_row.borrow();
+        let adapter_slice: &[F] = adapter_row;
+        let beak_cols: &Rv32LoadStoreAdapterCols<F> = adapter_slice.borrow();
 
         let rs1_ptr = beak_cols.rs1_ptr.as_canonical_u32();
         let rd_rs2_ptr = beak_cols.rd_rs2_ptr.as_canonical_u32();
@@ -574,7 +586,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             r"""
 
         // BEAK-INSERT: Emit chip-row micro-op.
-        let beak_cols: &Rv32LoadStoreAdapterCols<F> = adapter_row.borrow();
+        let adapter_slice: &[F] = adapter_row;
+        let beak_cols: &Rv32LoadStoreAdapterCols<F> = adapter_slice.borrow();
 
         let rs1_ptr = beak_cols.rs1_ptr.as_canonical_u32();
         // LoadStore adapter uses a unified pointer: rd for loads, rs2 for stores.
@@ -683,22 +696,24 @@ def _patch_regzero_system_connector_emit_chip_row(openvm_install_path: Path) -> 
             anchor="assert!(self.filtered_exec_frequencies.len() <= cached.trace.height());",
             guard="emit_program_chip_row(",
             insert=r"""
-        // BEAK-INSERT: Emit chip-row micro-op.
+        // BEAK-INSERT: Emit chip-row micro-op. Trace is BabyBear; reinterpret as &BabyBear and use as_canonical_u32().
+        use p3_baby_bear::BabyBear;
         for (i, freq) in self.filtered_exec_frequencies.iter().copied().enumerate() {
             if freq == 0 {
                 continue;
             }
             // ProgramExecutionCols: [pc, opcode, a, b, c, d, e, f, g]
             let row = cached.trace.row_slice(i);
-            let opcode_u32 = row[1].as_canonical_u32();
+            let as_babybear = |j: usize| -> &BabyBear { unsafe { &*(&row[j] as *const _ as *const BabyBear) } };
+            let opcode_u32 = as_babybear(1).as_canonical_u32();
             let operands: [u32; 7] = [
-                row[2].as_canonical_u32(),
-                row[3].as_canonical_u32(),
-                row[4].as_canonical_u32(),
-                row[5].as_canonical_u32(),
-                row[6].as_canonical_u32(),
-                row[7].as_canonical_u32(),
-                row[8].as_canonical_u32(),
+                as_babybear(2).as_canonical_u32(),
+                as_babybear(3).as_canonical_u32(),
+                as_babybear(4).as_canonical_u32(),
+                as_babybear(5).as_canonical_u32(),
+                as_babybear(6).as_canonical_u32(),
+                as_babybear(7).as_canonical_u32(),
+                as_babybear(8).as_canonical_u32(),
             ];
             fuzzer_utils::emit_program_chip_row(opcode_u32, operands, freq);
         }

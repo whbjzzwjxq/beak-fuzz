@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use rand::rngs::StdRng;
 use rand::seq::IndexedRandom;
 use rand::seq::SliceRandom;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 
 use openvm_rv32im_transpiler::{
     BaseAluOpcode,
@@ -83,7 +83,23 @@ pub struct GlobalState {
 
 impl GlobalState {
     fn new() -> Self {
-        todo!()
+        // Default state so that proc-macro (e.g. derive) can call fuzzer_assert! without
+        // panicking when GLOBAL_STATE is first accessed.
+        Self {
+            seq: 0,
+            step_idx: 0,
+            op_idx_in_step: 0,
+            chip_row_op_idx_in_step: 0,
+            row_count: 0,
+            last_row_id: None,
+            emitted_micro_ops: Vec::new(),
+            injection_enabled: false,
+            injection_kind: String::new(),
+            injection_step: 0,
+            assertions_enabled: false,
+            rng: StdRng::seed_from_u64(0),
+            seed: 0,
+        }
     }
 
     fn emit_micro_op(&mut self, micro_op: serde_json::Value) {
@@ -1133,22 +1149,22 @@ macro_rules! fuzzer_assert {
     }};
 }
 
-/// Custom assert_eq! macro
+/// Custom assert_eq! macro. Only borrows the expressions (like assert_eq!), never moves.
 #[macro_export]
 macro_rules! fuzzer_assert_eq {
     ($left:expr, $right:expr $(,)?) => {{
         if $crate::is_assertions_enabled() {
             assert_eq!($left, $right);
         } else {
-            let left_val = $left;
-            let right_val = $right;
-            if left_val != right_val {
+            let left_val = &$left;
+            let right_val = &$right;
+            if *left_val != *right_val {
                 println!(
                     "Warning: fuzzer_assert_eq! failed: `{} != {}` (left: `{:?}`, right: `{:?}`)",
                     stringify!($left),
                     stringify!($right),
-                    &left_val,
-                    &right_val,
+                    left_val,
+                    right_val,
                 );
             }
         }
@@ -1157,15 +1173,15 @@ macro_rules! fuzzer_assert_eq {
         if $crate::is_assertions_enabled() {
             assert_eq!($left, $right, $($arg)+);
         } else {
-            let left_val = $left;
-            let right_val = $right;
-            if left_val != right_val {
+            let left_val = &$left;
+            let right_val = &$right;
+            if *left_val != *right_val {
                 println!(
                     "Warning: fuzzer_assert_eq! failed: `{} != {}` (left: `{:?}`, right: `{:?}`): {}",
                     stringify!($left),
                     stringify!($right),
-                    &left_val,
-                    &right_val,
+                    left_val,
+                    right_val,
                     format_args!($($arg)+),
                 );
             }
@@ -1173,22 +1189,22 @@ macro_rules! fuzzer_assert_eq {
     }};
 }
 
-/// Custom assert_ne! macro
+/// Custom assert_ne! macro. Only borrows the expressions (like assert_ne!), never moves.
 #[macro_export]
 macro_rules! fuzzer_assert_ne {
     ($left:expr, $right:expr $(,)?) => {{
         if $crate::is_assertions_enabled() {
             assert_ne!($left, $right);
         } else {
-            let left_val = $left;
-            let right_val = $right;
-            if left_val == right_val {
+            let left_val = &$left;
+            let right_val = &$right;
+            if *left_val == *right_val {
                 println!(
                     "Warning: fuzzer_assert_ne! failed: `{} == {}` (left: `{:?}`, right: `{:?}`)",
                     stringify!($left),
                     stringify!($right),
-                    &left_val,
-                    &right_val,
+                    left_val,
+                    right_val,
                 );
             }
         }
@@ -1197,15 +1213,15 @@ macro_rules! fuzzer_assert_ne {
         if $crate::is_assertions_enabled() {
             assert_ne!($left, $right, $($arg)+);
         } else {
-            let left_val = $left;
-            let right_val = $right;
-            if left_val == right_val {
+            let left_val = &$left;
+            let right_val = &$right;
+            if *left_val == *right_val {
                 println!(
                     "Warning: fuzzer_assert_ne! failed: `{} == {}` (left: `{:?}`, right: `{:?}`): {}",
                     stringify!($left),
                     stringify!($right),
-                    &left_val,
-                    &right_val,
+                    left_val,
+                    right_val,
                     format_args!($($arg)+),
                 );
             }
