@@ -63,6 +63,9 @@ openvm-run:
 	echo "Running $${proj} (BIN=$(BIN))" && \
 	cd "$${proj}" && CARGO_TARGET_DIR="$$PWD/target" cargo run --bin "$(BIN)" -- $(ARGS)
 
+openvm-example-x0:
+	@$(MAKE) openvm-run COMMIT=bmk-regzero BIN=beak-trace ARGS='--bin "12345017 00000533"'
+
 # --- Loop1 fuzzing (beak-fuzz) ---
 openvm-fuzz-build:
 	$(_require_commit)
@@ -83,9 +86,3 @@ openvm-fuzz: openvm-fuzz-build
 		--max-instructions "$(MAX_INSTRUCTIONS)" \
 		$(if $(filter 1 true yes,$(NO_INITIAL_EVAL)),--no-initial-eval,) \
 		--iters "$(ITERS)"
-
-# Example: run a seed that writes x0 (should detect mismatch).
-# Prereq: install the OpenVM snapshot first:
-#   make openvm-install COMMIT=bmk-regzero
-openvm-example-x0:
-	@$(MAKE) openvm-run COMMIT=bmk-regzero BIN=beak-trace ARGS='--bin "12345017 00000533"'

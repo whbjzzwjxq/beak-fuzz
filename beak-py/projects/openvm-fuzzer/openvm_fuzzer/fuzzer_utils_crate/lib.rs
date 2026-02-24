@@ -120,7 +120,7 @@ impl GlobalState {
 
     pub fn take_json_logs(&mut self) -> Vec<serde_json::Value> {
         let out = std::mem::take(&mut self.emitted_micro_ops);
-        // Reset per-run counters so each prove starts at step/seq 0.
+        // Reset per-run counters so each backend run starts at step/seq 0.
         self.seq = 0;
         self.step_idx = 0;
         self.did_emit_instruction = false;

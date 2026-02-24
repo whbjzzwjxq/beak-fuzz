@@ -394,7 +394,7 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     let monitor = SimpleMonitor::new(|_s| {});
     let mut mgr = SimpleEventManager::new(monitor);
 
-    // Executor harness: run prove, build trace, compute signature, compare regs.
+    // Executor harness: run backend execution, collect trace/eval, and compare regs.
     let timeout = Duration::from_millis(cfg.timeout_ms);
     let mut harness = |input: &BytesInput| -> ExitKind {
         let start = Instant::now();

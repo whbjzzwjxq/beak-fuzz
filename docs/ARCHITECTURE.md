@@ -56,23 +56,49 @@ Each zkVM snapshot project provides its own binaries under `projects/<zkvm>-<com
 
 For example, `projects/openvm-d7eab708f43487b2e7c00524ffd611f835e8e6b5` provides:
 
-- `beak-trace`: runs oracle execution and compares it against OpenVM execution/proving/verification; can also print captured trace JSON logs (when enabled by snapshot instrumentation).
-- `beak-fuzz`: runs loop1 (libAFL in-process mutational fuzzing) for oracle vs OpenVM differential checking. Bucket-guided feedback is currently best-effort and depends on backend bucket implementation.
+- `beak-trace`: runs oracle execution and compares it against OpenVM execution for a given input; can also print captured trace JSON logs (when enabled by snapshot instrumentation).
+- `beak-fuzz`: runs loop1 (libAFL in-process mutational fuzzing) for oracle vs OpenVM differential checking with bucket-guided feedback.
 
-## Data Flow (Typical Differential Check)
+## Data Flow (Loop1, Current OpenVM Path)
 
-At a high level, a backend-specific tracer/fuzzer typically follows this shape:
+At a high level, loop1 for OpenVM currently follows this shape:
 
 ```text
 seed/input_words
   -> oracle_execute (beak-core, rrs-lib based)
-  -> transpile_to_backend_program (backend-specific)
-  -> run/prove/verify (backend-specific SDK)
-  -> extract_backend_state (e.g., registers/memory)
-  -> compare (oracle vs backend state)
+  -> transpile_to_openvm_program
+  -> execute+tracegen (OpenVM SDK)
+  -> extract backend final registers + micro-op logs
+  -> derive bucket hits
+  -> compare (oracle regs vs backend regs)
 ```
 
-The oracle and shared data structures live in `beak-core`; transpilation and execution live in the backend project.
+OpenVM loop1 intentionally uses **trace-only + execute-only** for speed:
+
+- Runs metered execution and preflight execution.
+- Runs proving-context generation (`generate_proving_ctx`) to trigger chip trace generation (`fill_trace_row` path).
+- Skips `engine.prove` (the expensive proof generation stage).
+
+This preserves differential checking and bucket extraction while keeping per-input runtime much lower than full proof generation.
+
+## Loop1 Execution Model
+
+- Initial seeds are loaded from `--seeds-jsonl` (optionally capped by `--initial-limit`).
+- If `--no-initial-eval` is not set, loop1 evaluates each initial corpus entry once before mutational fuzzing.
+- Then loop1 runs `--iters` times, where each iteration executes one `fuzz_one` step.
+- A single `fuzz_one` can evaluate multiple candidate inputs internally, so backend run counters can exceed `--iters`.
+
+## Timeout Semantics
+
+- `--timeout-ms` is a **soft timeout signal** used for run classification/metadata (`timed_out`), not an immediate interrupt.
+- libAFL in-process execution also has a separate **hard timeout** configured in code (`InProcessExecutor::with_timeout`).
+
+## Bucket and Feedback Model
+
+- Backend traces are converted to bucket hits (`BucketHit`), each identified by `bucket_id` (string).
+- OpenVM bucket IDs are defined in `projects/openvm-<commit>/src/lib/bucket_id.rs` using `strum`.
+- Loop1 canonicalizes hit bucket IDs into a stable signature (`bucket_hits_sig`, separated by `;`) for novelty tracking.
+- Mutator arm selection is controlled by a multi-armed bandit (`crates/beak-core/src/fuzz/bandit.rs`).
 
 ## How to Build / Test
 
@@ -83,6 +109,7 @@ Because each sub-project is independent:
 - OpenVM project (explicit snapshot):
   - `cd projects/openvm-<commit> && cargo build --bin beak-trace`
   - `cd projects/openvm-<commit> && cargo run --bin beak-trace -- --bin <hex_word> ...`
+  - `cd projects/openvm-<commit> && FAST_TEST=1 cargo run --release --bin beak-fuzz -- --seeds-jsonl <path> --iters 500 --timeout-ms 2000`
 
 Note: backend projects may pull git dependencies; network access may be required for a first build.
 

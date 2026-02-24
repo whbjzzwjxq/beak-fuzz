@@ -59,7 +59,7 @@ pub struct OpenVmBackend {
     sdk: Sdk,
     max_instructions: usize,
     eval: BackendEval,
-    /// Trace built from fuzzer_utils logs after a successful prove.
+    /// Trace built from fuzzer_utils logs after a successful backend run.
     trace: Option<OpenVMTrace>,
     last_words: Vec<u32>,
     current_iteration: u64,
