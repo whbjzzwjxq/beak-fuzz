@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod bucket;
+pub mod bucket_id;
 pub mod chip_row;
 pub mod insn;
 pub mod interaction;

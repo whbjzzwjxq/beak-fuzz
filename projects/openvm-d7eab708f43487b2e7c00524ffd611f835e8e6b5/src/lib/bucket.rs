@@ -1,10 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
-use beak_core::trace::{BucketHit, BucketType};
+use beak_core::trace::BucketHit;
 use serde_json::{json, Value};
 
+use crate::bucket_id::OpenVMBucketId;
 use crate::chip_row::{OpenVMChipRowKind, OpenVMChipRowPayload, Rs2Source};
+use crate::interaction::OpenVMInteractionPayload;
 use crate::trace::OpenVMTrace;
+use openvm_instructions::riscv::RV32_REGISTER_AS;
 
 fn kind_snake(kind: OpenVMChipRowKind) -> String {
     // `OpenVMChipRowKind` has `#[serde(rename_all = "snake_case")]`, so serializing it yields
@@ -43,13 +46,11 @@ fn access_alignment_buckets(
     seen: &mut HashSet<String>,
     effective_ptr: u32,
 ) {
-    // We keep this opcode-agnostic because the tracer currently emits local opcodes as integers.
     if effective_ptr % 2 != 0 {
         push_hit(
             hits,
             seen,
-            BucketType::Memory,
-            "openvm.mem.effective_ptr_unaligned2".to_string(),
+            OpenVMBucketId::MemEffectivePtrUnaligned2,
             details_kv(&[("effective_ptr", json!(effective_ptr))]),
         );
     }
@@ -57,8 +58,7 @@ fn access_alignment_buckets(
         push_hit(
             hits,
             seen,
-            BucketType::Memory,
-            "openvm.mem.effective_ptr_unaligned4".to_string(),
+            OpenVMBucketId::MemEffectivePtrUnaligned4,
             details_kv(&[("effective_ptr", json!(effective_ptr))]),
         );
     }
@@ -67,14 +67,14 @@ fn access_alignment_buckets(
 fn push_hit(
     hits: &mut Vec<BucketHit>,
     seen: &mut HashSet<String>,
-    bucket_type: BucketType,
-    bucket_id: String,
+    bucket_id: OpenVMBucketId,
     details: HashMap<String, Value>,
 ) {
-    if !seen.insert(bucket_id.clone()) {
+    let id = bucket_id.as_ref().to_string();
+    if !seen.insert(id.clone()) {
         return;
     }
-    hits.push(BucketHit::new(bucket_id, bucket_type, details));
+    hits.push(BucketHit::new(id, details));
 }
 
 fn details_kv(kvs: &[(&str, Value)]) -> HashMap<String, Value> {
@@ -104,6 +104,147 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
     let mut hits: Vec<BucketHit> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
+    let mut last_exec_ts: Option<u32> = None;
+    let mut last_mem_ts: Option<u32> = None;
+
+    for ia in trace.interactions() {
+        match &ia.payload {
+            OpenVMInteractionPayload::Execution { pc, timestamp } => {
+                push_hit(
+                    &mut hits,
+                    &mut seen,
+                    OpenVMBucketId::InteractionExecutionSeen,
+                    HashMap::new(),
+                );
+                if *pc == 0 {
+                    push_hit(
+                        &mut hits,
+                        &mut seen,
+                        OpenVMBucketId::InteractionExecutionPcZero,
+                        details_kv(&[("timestamp", json!(*timestamp))]),
+                    );
+                }
+                if let Some(prev) = last_exec_ts {
+                    if *timestamp <= prev {
+                        push_hit(
+                            &mut hits,
+                            &mut seen,
+                            OpenVMBucketId::InteractionExecutionTimestampNonMonotonic,
+                            details_kv(&[("prev", json!(prev)), ("cur", json!(*timestamp))]),
+                        );
+                    }
+                }
+                last_exec_ts = Some(*timestamp);
+            }
+            OpenVMInteractionPayload::RangeCheck { value, max_bits } => {
+                push_hit(&mut hits, &mut seen, OpenVMBucketId::InteractionRangeCheckSeen, HashMap::new());
+
+                if *max_bits == 0 {
+                    push_hit(
+                        &mut hits,
+                        &mut seen,
+                        OpenVMBucketId::InteractionRangeCheckMaxBits0,
+                        details_kv(&[("value", json!(*value))]),
+                    );
+                }
+                if *max_bits > 32 {
+                    push_hit(
+                        &mut hits,
+                        &mut seen,
+                        OpenVMBucketId::InteractionRangeCheckMaxBitsGt32,
+                        details_kv(&[
+                            ("value", json!(*value)),
+                            ("max_bits", json!(*max_bits)),
+                        ]),
+                    );
+                }
+                if *max_bits < 32 && *max_bits > 0 {
+                    let limit = 1u64 << (*max_bits as u64);
+                    if (*value as u64) >= limit {
+                        push_hit(
+                            &mut hits,
+                            &mut seen,
+                            OpenVMBucketId::InteractionRangeCheckValueOutOfRange,
+                            details_kv(&[
+                                ("value", json!(*value)),
+                                ("max_bits", json!(*max_bits)),
+                            ]),
+                        );
+                    }
+                }
+            }
+            OpenVMInteractionPayload::Memory {
+                address_space,
+                pointer,
+                data: _,
+                timestamp,
+            } => {
+                push_hit(&mut hits, &mut seen, OpenVMBucketId::InteractionMemorySeen, HashMap::new());
+
+                let as_u32 = *address_space as u32;
+                let as_bucket = if as_u32 == 0 {
+                    OpenVMBucketId::InteractionMemoryAddrSpaceIs0
+                } else if as_u32 == RV32_REGISTER_AS {
+                    OpenVMBucketId::InteractionMemoryAddrSpaceIsReg
+                } else {
+                    OpenVMBucketId::InteractionMemoryAddrSpaceIsOther
+                };
+                push_hit(
+                    &mut hits,
+                    &mut seen,
+                    as_bucket,
+                    details_kv(&[("address_space", json!(as_u32))]),
+                );
+
+                if (*pointer as u32) == 0 {
+                    push_hit(
+                        &mut hits,
+                        &mut seen,
+                        OpenVMBucketId::InteractionMemoryPointerZero,
+                        details_kv(&[("address_space", json!(as_u32)), ("timestamp", json!(*timestamp))]),
+                    );
+                }
+
+                if let Some(prev) = last_mem_ts {
+                    if *timestamp <= prev {
+                        push_hit(
+                            &mut hits,
+                            &mut seen,
+                            OpenVMBucketId::InteractionMemoryTimestampNonMonotonic,
+                            details_kv(&[("prev", json!(prev)), ("cur", json!(*timestamp))]),
+                        );
+                    }
+                }
+                last_mem_ts = Some(*timestamp);
+            }
+            OpenVMInteractionPayload::Bitwise { x, y, z, op } => {
+                push_hit(&mut hits, &mut seen, OpenVMBucketId::InteractionBitwiseSeen, HashMap::new());
+                if *op == 0 {
+                    push_hit(&mut hits, &mut seen, OpenVMBucketId::InteractionBitwiseOpRangeMode, HashMap::new());
+                } else {
+                    push_hit(&mut hits, &mut seen, OpenVMBucketId::InteractionBitwiseOpXor, HashMap::new());
+                }
+                if x == y {
+                    push_hit(
+                        &mut hits,
+                        &mut seen,
+                        OpenVMBucketId::InteractionBitwiseXEqY,
+                        details_kv(&[("x", json!(*x)), ("op", json!(*op))]),
+                    );
+                }
+                if (*z as u32) == 0 {
+                    push_hit(
+                        &mut hits,
+                        &mut seen,
+                        OpenVMBucketId::InteractionBitwiseZEq0,
+                        details_kv(&[("x", json!(*x)), ("y", json!(*y)), ("op", json!(*op))]),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     // -----------------
     // Instruction-level time buckets
     // -----------------
@@ -112,8 +253,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
             push_hit(
                 &mut hits,
                 &mut seen,
-                BucketType::Time,
-                "openvm.time.start_nonzero".to_string(),
+                OpenVMBucketId::TimeStartNonzero,
                 details_kv(&[("timestamp", json!(first.timestamp))]),
             );
         }
@@ -123,8 +263,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
             push_hit(
                 &mut hits,
                 &mut seen,
-                BucketType::Time,
-                "openvm.time.non_monotonic".to_string(),
+                OpenVMBucketId::TimeNonMonotonic,
                 details_kv(&[
                     ("step_idx", json!(insn.step_idx)),
                     ("timestamp", json!(insn.timestamp)),
@@ -137,8 +276,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                 push_hit(
                     &mut hits,
                     &mut seen,
-                    BucketType::Time,
-                    "openvm.time.delta_not_one".to_string(),
+                    OpenVMBucketId::TimeDeltaNotOne,
                     details_kv(&[
                         ("step_idx", json!(insn.step_idx)),
                         ("delta", json!(dt)),
@@ -160,16 +298,15 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
         let kind = kind_snake(row.kind);
         if !base.is_valid {
             saw_invalid_row = true;
-            let kid = format!("openvm.row.invalid_in.{kind}");
             push_hit(
                 &mut hits,
                 &mut seen,
-                BucketType::RowValidity,
-                kid,
+                OpenVMBucketId::RowInvalidInKind,
                 details_kv(&[
                     ("chip_name", json!(base.chip_name)),
                     ("step_idx", json!(base.step_idx)),
                     ("op_idx", json!(base.op_idx)),
+                    ("kind", json!(kind)),
                 ]),
             );
         }
@@ -182,14 +319,13 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
 
         match &row.payload {
             // ---- ALU family (always-write) ----
-            OpenVMChipRowPayload::BaseAlu { op, rd_ptr, rs1_ptr, rs2, .. } => {
+            OpenVMChipRowPayload::BaseAlu { op: _op, rd_ptr, rs1_ptr, rs2, .. } => {
                 // x0 boundary
                 if *rd_ptr == 0 {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.write_x0".to_string(),
+                        OpenVMBucketId::RegWriteX0,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("chip_name", json!(base.chip_name)),
@@ -200,8 +336,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.read_rs1_x0".to_string(),
+                        OpenVMBucketId::RegReadRs1X0,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("chip_name", json!(base.chip_name)),
@@ -213,8 +348,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                         push_hit(
                             &mut hits,
                             &mut seen,
-                            BucketType::Reg,
-                            "openvm.reg.read_rs2_x0".to_string(),
+                            OpenVMBucketId::RegReadRs2X0,
                             details_kv(&[
                                 ("kind", json!(kind)),
                                 ("chip_name", json!(base.chip_name)),
@@ -225,8 +359,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                         push_hit(
                             &mut hits,
                             &mut seen,
-                            BucketType::Reg,
-                            "openvm.reg.alias.rs1_eq_rs2".to_string(),
+                            OpenVMBucketId::RegAliasRs1EqRs2,
                             details_kv(&[
                                 ("kind", json!(kind)),
                                 ("rs1_ptr", json!(*rs1_ptr)),
@@ -238,8 +371,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                         push_hit(
                             &mut hits,
                             &mut seen,
-                            BucketType::Reg,
-                            "openvm.reg.alias.rd_eq_rs2".to_string(),
+                            OpenVMBucketId::RegAliasRdEqRs2,
                             details_kv(&[
                                 ("kind", json!(kind)),
                                 ("rd_ptr", json!(*rd_ptr)),
@@ -252,8 +384,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.alias.rd_eq_rs1".to_string(),
+                        OpenVMBucketId::RegAliasRdEqRs1,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("rd_ptr", json!(*rd_ptr)),
@@ -267,19 +398,24 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Immediate,
-                        "openvm.imm.rs2_is_imm".to_string(),
+                        OpenVMBucketId::ImmRs2IsImm,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("imm", json!(v)),
                         ]),
                     );
                     if let Some(tag) = classify_imm_value(v) {
+                        let id = match tag {
+                            "0" => OpenVMBucketId::ImmValue0,
+                            "minus1" => OpenVMBucketId::ImmValueMinus1,
+                            "min" => OpenVMBucketId::ImmValueMin,
+                            "max" => OpenVMBucketId::ImmValueMax,
+                            _ => continue,
+                        };
                         push_hit(
                             &mut hits,
                             &mut seen,
-                            BucketType::Immediate,
-                            format!("openvm.imm.value.{tag}"),
+                            id,
                             details_kv(&[("imm", json!(v))]),
                         );
                     }
@@ -289,16 +425,8 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                 push_hit(
                     &mut hits,
                     &mut seen,
-                    BucketType::AluBitwise,
-                    "openvm.alu.base_alu_seen".to_string(),
+                    OpenVMBucketId::AluBaseAluSeen,
                     HashMap::new(),
-                );
-                push_hit(
-                    &mut hits,
-                    &mut seen,
-                    BucketType::AluBitwise,
-                    format!("openvm.alu.op.{op}"),
-                    details_kv(&[("op", json!(*op))]),
                 );
             }
 
@@ -309,8 +437,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.write_x0".to_string(),
+                        OpenVMBucketId::RegWriteX0,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("chip_name", json!(base.chip_name)),
@@ -321,8 +448,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.read_rs1_x0".to_string(),
+                        OpenVMBucketId::RegReadRs1X0,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("chip_name", json!(base.chip_name)),
@@ -334,8 +460,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                         push_hit(
                             &mut hits,
                             &mut seen,
-                            BucketType::Reg,
-                            "openvm.reg.read_rs2_x0".to_string(),
+                            OpenVMBucketId::RegReadRs2X0,
                             details_kv(&[
                                 ("kind", json!(kind)),
                                 ("chip_name", json!(base.chip_name)),
@@ -346,8 +471,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                         push_hit(
                             &mut hits,
                             &mut seen,
-                            BucketType::Reg,
-                            "openvm.reg.alias.rs1_eq_rs2".to_string(),
+                            OpenVMBucketId::RegAliasRs1EqRs2,
                             details_kv(&[
                                 ("kind", json!(kind)),
                                 ("rs1_ptr", json!(*rs1_ptr)),
@@ -359,8 +483,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                         push_hit(
                             &mut hits,
                             &mut seen,
-                            BucketType::Reg,
-                            "openvm.reg.alias.rd_eq_rs2".to_string(),
+                            OpenVMBucketId::RegAliasRdEqRs2,
                             details_kv(&[
                                 ("kind", json!(kind)),
                                 ("rd_ptr", json!(*rd_ptr)),
@@ -373,8 +496,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.alias.rd_eq_rs1".to_string(),
+                        OpenVMBucketId::RegAliasRdEqRs1,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("rd_ptr", json!(*rd_ptr)),
@@ -388,19 +510,24 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Immediate,
-                        "openvm.imm.rs2_is_imm".to_string(),
+                        OpenVMBucketId::ImmRs2IsImm,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("imm", json!(v)),
                         ]),
                     );
                     if let Some(tag) = classify_imm_value(v) {
+                        let id = match tag {
+                            "0" => OpenVMBucketId::ImmValue0,
+                            "minus1" => OpenVMBucketId::ImmValueMinus1,
+                            "min" => OpenVMBucketId::ImmValueMin,
+                            "max" => OpenVMBucketId::ImmValueMax,
+                            _ => continue,
+                        };
                         push_hit(
                             &mut hits,
                             &mut seen,
-                            BucketType::Immediate,
-                            format!("openvm.imm.value.{tag}"),
+                            id,
                             details_kv(&[("imm", json!(v))]),
                         );
                     }
@@ -414,8 +541,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.write_x0".to_string(),
+                        OpenVMBucketId::RegWriteX0,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("chip_name", json!(base.chip_name)),
@@ -426,8 +552,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.read_rs1_x0".to_string(),
+                        OpenVMBucketId::RegReadRs1X0,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("chip_name", json!(base.chip_name)),
@@ -438,8 +563,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.read_rs2_x0".to_string(),
+                        OpenVMBucketId::RegReadRs2X0,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("chip_name", json!(base.chip_name)),
@@ -451,8 +575,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.alias.rs1_eq_rs2".to_string(),
+                        OpenVMBucketId::RegAliasRs1EqRs2,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("rs_ptr", json!(*rs1_ptr)),
@@ -463,8 +586,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.alias.rd_eq_rs1".to_string(),
+                        OpenVMBucketId::RegAliasRdEqRs1,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("rd_ptr", json!(*rd_ptr)),
@@ -476,8 +598,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.alias.rd_eq_rs2".to_string(),
+                        OpenVMBucketId::RegAliasRdEqRs2,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("rd_ptr", json!(*rd_ptr)),
@@ -495,8 +616,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                             push_hit(
                                 &mut hits,
                                 &mut seen,
-                                BucketType::DivRem,
-                                "openvm.divrem.div_by_zero".to_string(),
+                                OpenVMBucketId::DivRemDivByZero,
                                 details_kv(&[
                                     ("rs1", json!(rs1)),
                                     ("rs2", json!(rs2)),
@@ -509,8 +629,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                             push_hit(
                                 &mut hits,
                                 &mut seen,
-                                BucketType::DivRem,
-                                "openvm.divrem.overflow_case".to_string(),
+                                OpenVMBucketId::DivRemOverflowCase,
                                 details_kv(&[
                                     ("rs1", json!(rs1)),
                                     ("rs2", json!(rs2)),
@@ -522,8 +641,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                         push_hit(
                             &mut hits,
                             &mut seen,
-                            BucketType::DivRem,
-                            "openvm.divrem.rs1_eq_rs2".to_string(),
+                            OpenVMBucketId::DivRemRs1EqRs2,
                             details_kv(&[("rs_ptr", json!(*rs1_ptr))]),
                         );
                     }
@@ -537,8 +655,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.read_rs1_x0".to_string(),
+                        OpenVMBucketId::RegReadRs1X0,
                         details_kv(&[("kind", json!(kind))]),
                     );
                 }
@@ -546,8 +663,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.read_rs2_x0".to_string(),
+                        OpenVMBucketId::RegReadRs2X0,
                         details_kv(&[("kind", json!(kind))]),
                     );
                 }
@@ -555,8 +671,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.alias.rs1_eq_rs2".to_string(),
+                        OpenVMBucketId::RegAliasRs1EqRs2,
                         details_kv(&[("rs_ptr", json!(*rs1_ptr))]),
                     );
                 }
@@ -566,22 +681,19 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     0 => push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Immediate,
-                        "openvm.branch.imm.0".to_string(),
+                        OpenVMBucketId::BranchImm0,
                         details_kv(&[("is_taken", json!(*is_taken))]),
                     ),
                     2 | -2 => push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Immediate,
-                        "openvm.branch.imm.pm2".to_string(),
+                        OpenVMBucketId::BranchImmPm2,
                         details_kv(&[("imm", json!(*imm)), ("is_taken", json!(*is_taken))]),
                     ),
                     2048 | -2048 => push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Immediate,
-                        "openvm.branch.imm.pm2048".to_string(),
+                        OpenVMBucketId::BranchImmPm2048,
                         details_kv(&[("imm", json!(*imm)), ("is_taken", json!(*is_taken))]),
                     ),
                     _ => {}
@@ -595,8 +707,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                         push_hit(
                             &mut hits,
                             &mut seen,
-                            BucketType::Reg,
-                            "openvm.reg.write_x0".to_string(),
+                            OpenVMBucketId::RegWriteX0,
                             details_kv(&[("is_jal", json!(*is_jal))]),
                         );
                     }
@@ -608,8 +719,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.read_rs1_x0".to_string(),
+                        OpenVMBucketId::RegReadRs1X0,
                         details_kv(&[]),
                     );
                 }
@@ -617,8 +727,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.write_x0".to_string(),
+                        OpenVMBucketId::RegWriteX0,
                         details_kv(&[]),
                     );
                 }
@@ -626,8 +735,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Immediate,
-                        "openvm.imm.sign_true".to_string(),
+                        OpenVMBucketId::ImmSignTrue,
                         details_kv(&[("imm", json!(*imm))]),
                     );
                 }
@@ -638,16 +746,14 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                 push_hit(
                     &mut hits,
                     &mut seen,
-                    BucketType::Immediate,
-                    "openvm.auipc.seen".to_string(),
+                    OpenVMBucketId::AuipcSeen,
                     details_kv(&[]),
                 );
                 if *rd_ptr == 0 {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.write_x0".to_string(),
+                        OpenVMBucketId::RegWriteX0,
                         details_kv(&[]),
                     );
                 }
@@ -655,7 +761,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
 
             // ---- Load/Store ----
             OpenVMChipRowPayload::LoadStore {
-                op,
+                op: _op,
                 rs1_ptr,
                 rd_rs2_ptr,
                 imm_sign,
@@ -669,35 +775,38 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                 push_hit(
                     &mut hits,
                     &mut seen,
-                    BucketType::Memory,
-                    "openvm.mem.access_seen".to_string(),
+                    OpenVMBucketId::MemAccessSeen,
                     details_kv(&[]),
+                );
+
+                let mem_as_bucket = if *mem_as == 0 {
+                    OpenVMBucketId::MemAddrSpaceIs0
+                } else if *mem_as == RV32_REGISTER_AS {
+                    OpenVMBucketId::MemAddrSpaceIsReg
+                } else {
+                    OpenVMBucketId::MemAddrSpaceIsOther
+                };
+                push_hit(
+                    &mut hits,
+                    &mut seen,
+                    mem_as_bucket,
+                    details_kv(&[("mem_as", json!(*mem_as))]),
                 );
 
                 if *imm_sign {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Memory,
-                        "openvm.mem.imm_sign_true".to_string(),
+                        OpenVMBucketId::MemImmSignTrue,
                         details_kv(&[]),
                     );
                 }
-
-                push_hit(
-                    &mut hits,
-                    &mut seen,
-                    BucketType::Memory,
-                    format!("openvm.mem.space.{mem_as}"),
-                    details_kv(&[]),
-                );
 
                 if *effective_ptr == 0 {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Memory,
-                        "openvm.mem.effective_ptr_zero".to_string(),
+                        OpenVMBucketId::MemEffectivePtrZero,
                         details_kv(&[]),
                     );
                 }
@@ -707,8 +816,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.read_rs1_x0".to_string(),
+                        OpenVMBucketId::RegReadRs1X0,
                         details_kv(&[]),
                     );
                 }
@@ -718,8 +826,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.read_rs2_x0".to_string(),
+                        OpenVMBucketId::RegReadRs2X0,
                         details_kv(&[]),
                     );
                 }
@@ -727,19 +834,23 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.write_x0".to_string(),
+                        OpenVMBucketId::RegWriteX0,
                         details_kv(&[]),
                     );
                 }
 
                 if rs1_ptr == rd_rs2_ptr {
-                    let suffix = if *is_store { "store" } else if *is_load { "load" } else { "other" };
+                    let id = if *is_store {
+                        OpenVMBucketId::MemAliasRs1EqRdRs2Store
+                    } else if *is_load {
+                        OpenVMBucketId::MemAliasRs1EqRdRs2Load
+                    } else {
+                        OpenVMBucketId::MemAliasRs1EqRdRs2Other
+                    };
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        format!("openvm.mem.alias.rs1_eq_rd_rs2.{suffix}"),
+                        id,
                         details_kv(&[
                             ("rs1_ptr", json!(*rs1_ptr)),
                             ("rd_rs2_ptr", json!(*rd_rs2_ptr)),
@@ -747,18 +858,10 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     );
                 }
 
-                // Also bucket the local opcode id.
-                push_hit(
-                    &mut hits,
-                    &mut seen,
-                    BucketType::Memory,
-                    format!("openvm.mem.op.{op}"),
-                    details_kv(&[("op", json!(*op))]),
-                );
             }
 
             OpenVMChipRowPayload::LoadSignExtend {
-                op,
+                op: _op,
                 rs1_ptr,
                 rd_ptr,
                 imm_sign,
@@ -770,32 +873,36 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                 push_hit(
                     &mut hits,
                     &mut seen,
-                    BucketType::Memory,
-                    "openvm.mem.access_seen".to_string(),
+                    OpenVMBucketId::MemAccessSeen,
                     details_kv(&[]),
                 );
                 if *imm_sign {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Memory,
-                        "openvm.mem.imm_sign_true".to_string(),
+                        OpenVMBucketId::MemImmSignTrue,
                         details_kv(&[]),
                     );
                 }
+
+                let mem_as_bucket = if *mem_as == 0 {
+                    OpenVMBucketId::MemAddrSpaceIs0
+                } else if *mem_as == RV32_REGISTER_AS {
+                    OpenVMBucketId::MemAddrSpaceIsReg
+                } else {
+                    OpenVMBucketId::MemAddrSpaceIsOther
+                };
                 push_hit(
                     &mut hits,
                     &mut seen,
-                    BucketType::Memory,
-                    format!("openvm.mem.space.{mem_as}"),
-                    details_kv(&[]),
+                    mem_as_bucket,
+                    details_kv(&[("mem_as", json!(*mem_as))]),
                 );
                 if *effective_ptr == 0 {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Memory,
-                        "openvm.mem.effective_ptr_zero".to_string(),
+                        OpenVMBucketId::MemEffectivePtrZero,
                         details_kv(&[]),
                     );
                 }
@@ -805,8 +912,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.read_rs1_x0".to_string(),
+                        OpenVMBucketId::RegReadRs1X0,
                         details_kv(&[]),
                     );
                 }
@@ -814,19 +920,11 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::Reg,
-                        "openvm.reg.write_x0".to_string(),
+                        OpenVMBucketId::RegWriteX0,
                         details_kv(&[]),
                     );
                 }
 
-                push_hit(
-                    &mut hits,
-                    &mut seen,
-                    BucketType::Memory,
-                    format!("openvm.mem.op.{op}"),
-                    details_kv(&[("op", json!(*op))]),
-                );
             }
 
             // ---- System chips ----
@@ -835,8 +933,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        BucketType::System,
-                        "openvm.system.terminate".to_string(),
+                        OpenVMBucketId::SystemTerminate,
                         details_kv(&[("exit_code", json!(exit_code))]),
                     );
                 }
@@ -846,8 +943,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                 push_hit(
                     &mut hits,
                     &mut seen,
-                    BucketType::System,
-                    "openvm.system.program_row".to_string(),
+                    OpenVMBucketId::SystemProgramRow,
                     details_kv(&[]),
                 );
             }
@@ -860,8 +956,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
         push_hit(
             &mut hits,
             &mut seen,
-            BucketType::RowValidity,
-            "openvm.row.invalid_seen".to_string(),
+            OpenVMBucketId::RowInvalidSeen,
             HashMap::new(),
         );
     }
@@ -869,8 +964,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
         push_hit(
             &mut hits,
             &mut seen,
-            BucketType::RowValidity,
-            "openvm.row.padding_kind_seen".to_string(),
+            OpenVMBucketId::RowPaddingKindSeen,
             HashMap::new(),
         );
     }
@@ -878,8 +972,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
         push_hit(
             &mut hits,
             &mut seen,
-            BucketType::Time,
-            "openvm.time.row_timestamp_missing".to_string(),
+            OpenVMBucketId::TimeRowTimestampMissing,
             HashMap::new(),
         );
     }

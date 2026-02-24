@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{LineWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -38,7 +38,8 @@ pub struct BugRecord {
 
 #[derive(Clone)]
 pub struct JsonlWriter {
-    inner: Arc<Mutex<BufWriter<File>>>,
+    // LineWriter flushes on newline, so corpus/bugs entries appear even for long runs.
+    inner: Arc<Mutex<LineWriter<File>>>,
 }
 
 impl JsonlWriter {
@@ -49,7 +50,7 @@ impl JsonlWriter {
             .open(path)
             .map_err(|e| format!("open {} failed: {e}", path.display()))?;
         Ok(Self {
-            inner: Arc::new(Mutex::new(BufWriter::new(f))),
+            inner: Arc::new(Mutex::new(LineWriter::new(f))),
         })
     }
 

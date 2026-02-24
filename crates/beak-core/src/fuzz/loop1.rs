@@ -16,7 +16,8 @@ use crate::rv32im::instruction::RV32IMInstruction;
 use crate::rv32im::oracle::RISCVOracle;
 use crate::trace::{sorted_signatures_from_hits, BucketHit};
 
-use super::mutators::SeedMutator;
+use super::bandit;
+use super::mutators::{SeedMutator, SEED_MUTATOR_NUM_ARMS};
 
 pub const DEFAULT_RNG_SEED: u64 = 2026;
 
@@ -129,9 +130,9 @@ fn mismatch_regs(oracle: &[u32; 32], prover: &[u32; 32]) -> Vec<(u32, u32, u32)>
 /// Canonicalize bucket hit signatures into a single stable signature string.
 ///
 /// Contract:
-/// - Input must already be sorted canonically (by `BucketType` order, then signature string).
+/// - Input must already be sorted canonically (by bucket id string).
 /// - Deduplicates while preserving the input order.
-/// - Joins with '\n'.
+/// - Joins with ';'.
 fn canonical_bucket_sig(sigs: &[String]) -> String {
     let mut seen = HashSet::<&str>::new();
     let mut out: Vec<&str> = Vec::new();
@@ -144,7 +145,7 @@ fn canonical_bucket_sig(sigs: &[String]) -> String {
             out.push(t);
         }
     }
-    out.join("\n")
+    out.join(";")
 }
 
 fn load_initial_seeds(
@@ -178,6 +179,7 @@ fn load_initial_seeds(
 /// Feedback: keep inputs that yield a previously unseen bucket signature.
 struct BucketNoveltyFeedback {
     seen: HashSet<String>,
+    seen_bucket_ids: HashSet<String>,
     corpus_writer: JsonlWriter,
     bug_writer: JsonlWriter,
     cfg: Loop1Config,
@@ -189,6 +191,7 @@ impl BucketNoveltyFeedback {
     fn new(corpus_writer: JsonlWriter, bug_writer: JsonlWriter, cfg: Loop1Config) -> Self {
         Self {
             seen: HashSet::new(),
+            seen_bucket_ids: HashSet::new(),
             corpus_writer,
             bug_writer,
             cfg,
@@ -217,6 +220,15 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
     ) -> Result<bool, Error> {
         let stats = LAST_RUN.lock().unwrap().clone();
 
+        // Per-bucket novelty is computed independently of corpus signature novelty.
+        // This will later serve as a finer-grained reward signal (vs. only new combinations).
+        let mut new_bucket_id_count = 0usize;
+        for hit in &stats.bucket_hits {
+            if self.seen_bucket_ids.insert(hit.bucket_id.clone()) {
+                new_bucket_id_count += 1;
+            }
+        }
+
         // Always record mismatches as "bugs" (independent of corpus novelty).
         if !stats.mismatch_regs.is_empty() {
             let words = decode_words_from_input(input, 2048);
@@ -242,11 +254,18 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
             }
         }
 
-        let sig = stats.bucket_hits_sig;
-        if sig.is_empty() {
-            return Ok(false);
+        let sig = stats.bucket_hits_sig.clone();
+        let is_new_combo = !sig.is_empty() && self.seen.insert(sig.clone());
+
+        // Bandit reward: new combo gets +1, plus weighted per-bucket novelty.
+        const PER_BUCKET_REWARD: f64 = 0.25;
+        let reward = (if is_new_combo { 1.0 } else { 0.0 })
+            + (new_bucket_id_count as f64) * PER_BUCKET_REWARD;
+        if let Some(arm_idx) = bandit::take_last_arm() {
+            bandit::update(arm_idx, reward);
         }
-        if !self.seen.insert(sig.clone()) {
+
+        if !is_new_combo {
             return Ok(false);
         }
 
@@ -259,7 +278,10 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
             mismatch: !stats.mismatch_regs.is_empty(),
             bucket_hits_sig: sig,
             instructions: words,
-            metadata: serde_json::json!({ "kind": "interesting" }),
+            metadata: serde_json::json!({
+                "kind": "interesting",
+                "new_bucket_id_count": new_bucket_id_count,
+            }),
         };
         self.corpus_writer.append_json_line(&rec).map_err(|e| Error::unknown(e))?;
         Ok(true)
@@ -363,6 +385,9 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     if state.corpus().count() == 0 {
         return Err(format!("No usable initial seeds loaded from {}", cfg.seeds_jsonl.display()));
     }
+
+    // Initialize the bandit controller for mutator arm selection.
+    bandit::init(SEED_MUTATOR_NUM_ARMS);
 
     let scheduler = QueueScheduler::new();
     let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);

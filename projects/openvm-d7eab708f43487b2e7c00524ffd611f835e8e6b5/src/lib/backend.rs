@@ -3,6 +3,7 @@ use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::Trace;
 
 use crate::trace::OpenVMTrace;
+use crate::bucket_id::OpenVMBucketId;
 use openvm_instructions::exe::VmExe;
 use openvm_instructions::instruction::Instruction;
 use openvm_instructions::program::Program;
@@ -13,13 +14,16 @@ use openvm_rv32im_transpiler::{Rv32ITranspilerExtension, Rv32MTranspilerExtensio
 use openvm_sdk::config::AppConfig;
 use openvm_sdk::{Sdk, StdIn, F};
 use openvm_transpiler::transpiler::Transpiler;
+use std::collections::HashMap;
 use std::time::Instant;
 
 fn build_sdk() -> Sdk {
     let mut app_config = AppConfig::riscv32();
     app_config.app_vm_config.system.config =
         app_config.app_vm_config.system.config.with_max_segment_len(256).with_continuations();
-    if std::env::var("OPENVM_FAST_TEST").as_deref() == Ok("1") {
+    let fast_test = std::env::var("OPENVM_FAST_TEST").as_deref() == Ok("1")
+        || std::env::var("FAST_TEST").as_deref() == Ok("1");
+    if fast_test {
         // Fast, insecure proving parameters for local fuzzing/debugging.
         // Mirrors `openvm_stark_sdk::config::FriParameters::new_for_testing` when OPENVM_FAST_TEST=1.
         app_config.app_fri_params.fri_params.log_final_poly_len = 0;
@@ -46,10 +50,9 @@ fn build_exe(words: &[u32]) -> Result<std::sync::Arc<VmExe<F>>, String> {
 }
 
 fn is_openvm_supported_rv32_word(word: u32) -> bool {
-    // OpenVM's RV32IM toolchain does not currently support system/CSR or fence in our harness.
-    // Avoid feeding them to the transpiler/prover since it may terminate the process.
+    // We still keep fence filtered in this harness.
     let opcode = word & 0x7f;
-    opcode != 0x73 && opcode != 0x0f
+    opcode != 0x0f
 }
 
 pub struct OpenVmBackend {
@@ -58,6 +61,7 @@ pub struct OpenVmBackend {
     eval: BackendEval,
     /// Trace built from fuzzer_utils logs after a successful prove.
     trace: Option<OpenVMTrace>,
+    last_words: Vec<u32>,
 }
 
 impl OpenVmBackend {
@@ -67,6 +71,7 @@ impl OpenVmBackend {
             max_instructions,
             eval: BackendEval::default(),
             trace: None,
+            last_words: Vec::new(),
         }
     }
 }
@@ -84,7 +89,7 @@ impl LoopBackend for OpenVmBackend {
             .all(|w| is_openvm_supported_rv32_word(*w) && RV32IMInstruction::from_word(*w).is_ok())
     }
 
-    fn prepare_for_run(&mut self, rng_seed: u64) {
+    fn prepare_for_run(&mut self, _rng_seed: u64) {
         // Nothing to do here.
     }
 
@@ -92,6 +97,7 @@ impl LoopBackend for OpenVmBackend {
         let t_total = Instant::now();
         self.eval.backend_error = None;
         self.trace = None;
+        self.last_words = words.to_vec();
 
         let t0 = Instant::now();
         let exe = build_exe(words).map_err(|e| {
@@ -163,6 +169,50 @@ impl LoopBackend for OpenVmBackend {
             self.eval.micro_op_count = trace.instruction_count();
             self.eval.bucket_hits = trace.bucket_hits().to_vec();
         }
+
+        // Input-level buckets help guide seed evolution, even when the backend rejects or
+        // does not fully model certain instruction classes.
+        let details = HashMap::new();
+        let mut saw_ecall = false;
+        let mut saw_csr = false;
+        let mut saw_fence = false;
+        for &w in &self.last_words {
+            let opcode = w & 0x7f;
+            if opcode == 0x0f {
+                saw_fence = true;
+                continue;
+            }
+            if opcode != 0x73 {
+                continue;
+            }
+            if let Ok(insn) = RV32IMInstruction::from_word(w) {
+                match insn.mnemonic.as_str() {
+                    "ecall" | "ebreak" => saw_ecall = true,
+                    // Any CSR family op.
+                    "csrrw" | "csrrs" | "csrrc" | "csrrwi" | "csrrsi" | "csrrci" => saw_csr = true,
+                    _ => {}
+                }
+            }
+        }
+        if saw_ecall {
+            self.eval.bucket_hits.push(beak_core::trace::BucketHit::new(
+                OpenVMBucketId::InputHasEcall.as_ref().to_string(),
+                details.clone(),
+            ));
+        }
+        if saw_csr {
+            self.eval.bucket_hits.push(beak_core::trace::BucketHit::new(
+                OpenVMBucketId::InputHasCsr.as_ref().to_string(),
+                details.clone(),
+            ));
+        }
+        if saw_fence {
+            self.eval.bucket_hits.push(beak_core::trace::BucketHit::new(
+                OpenVMBucketId::InputHasFence.as_ref().to_string(),
+                details.clone(),
+            ));
+        }
+
         self.eval.clone()
     }
 }
