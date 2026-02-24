@@ -146,10 +146,11 @@ def _patch_regzero_interpreter_preflight_emit_instruction(openvm_install_path: P
     contents = _insert_after(
         contents,
         anchor='tracing::trace!("pc: {pc:#x} | {:?}", pc_entry.insn);',
-        guard="let beak_from_pc = pc;",
+        guard="// BEAK-INSERT: guard.interpreter_preflight.preassign",
         insert=r"""
 
-        // BEAK-INSERT: Emit instruction-level micro-op (pc/opcode/operands/timestamps).
+        // BEAK-INSERT: guard.interpreter_preflight.preassign
+        // BEAK-INSERT: Emit instruction-level micro-op (pc/opcode/operands/timestamps) pre-assignment.
         let beak_from_pc = pc;
         let beak_from_timestamp = state.memory.timestamp();
         let beak_operands = [
@@ -169,9 +170,10 @@ def _patch_regzero_interpreter_preflight_emit_instruction(openvm_install_path: P
     contents = _insert_after(
         contents,
         anchor="state.exit_code = Ok(Some(c.as_canonical_u32()));",
-        guard='emit_program_interaction(\n                "receive",',
+        guard="// BEAK-INSERT: guard.interpreter_preflight.terminate_branch",
         insert=r"""
-            // BEAK-INSERT: Emit instruction-level micro-op (pc/opcode/operands/timestamps).
+            // BEAK-INSERT: guard.interpreter_preflight.terminate_branch
+            // BEAK-INSERT: Emit instruction-level micro-op (pc/opcode/operands/timestamps) termination branch.
             let beak_to_pc = state.pc();
             let beak_to_timestamp = state.memory.timestamp();
             fuzzer_utils::emit_instruction(
@@ -204,10 +206,10 @@ def _patch_regzero_interpreter_preflight_emit_instruction(openvm_install_path: P
     contents = _insert_after(
         contents,
         anchor="executor.execute(vm_state_mut, &pc_entry.insn)?;",
-        guard="fuzzer_utils::emit_execution_interaction(",
+        guard="// BEAK-INSERT: guard.interpreter_preflight.normal_branch",
         insert=r"""
-
-        // BEAK-INSERT: Emit instruction-level micro-op (pc/opcode/operands/timestamps).
+        // BEAK-INSERT: guard.interpreter_preflight.normal_branch
+        // BEAK-INSERT: Emit instruction-level micro-op (pc/opcode/operands/timestamps) normal branch.
         let beak_to_pc = state.pc();
         let beak_to_timestamp = state.memory.timestamp();
 
@@ -250,9 +252,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "base_alu" / "core.rs",
             "use crate::adapters::Rv32BaseAluAdapterCols;",
-            "emit_base_alu_chip_row(",
+            "// BEAK-INSERT: guard.rv32im.base_alu",
             r"""
 
+        // BEAK-INSERT: guard.rv32im.base_alu
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_slice.borrow();
@@ -271,9 +274,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "shift" / "core.rs",
             "use crate::adapters::Rv32BaseAluAdapterCols;",
-            "emit_shift_chip_row(",
+            "// BEAK-INSERT: guard.rv32im.shift",
             r"""
 
+        // BEAK-INSERT: guard.rv32im.shift
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_slice.borrow();
@@ -292,9 +296,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "less_than" / "core.rs",
             "use crate::adapters::Rv32BaseAluAdapterCols;",
-            "emit_less_than_chip_row(",
+            "// BEAK-INSERT: guard.rv32im.less_than",
             r"""
 
+        // BEAK-INSERT: guard.rv32im.less_than
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_slice.borrow();
@@ -317,9 +322,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "mul" / "core.rs",
             "use crate::adapters::Rv32MultAdapterCols;",
-            "emit_mul_chip_row(",
+            "// BEAK-INSERT: guard.rv32im.mul",
             r"""
 
+        // BEAK-INSERT: guard.rv32im.mul
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32MultAdapterCols<F> = adapter_slice.borrow();
@@ -334,9 +340,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "mulh" / "core.rs",
             "use crate::adapters::Rv32MultAdapterCols;",
-            "emit_mulh_chip_row(",
+            "// BEAK-INSERT: guard.rv32im.mulh",
             r"""
 
+        // BEAK-INSERT: guard.rv32im.mulh
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32MultAdapterCols<F> = adapter_slice.borrow();
@@ -352,9 +359,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "divrem" / "core.rs",
             "use crate::adapters::Rv32BaseAluAdapterCols;",
-            "emit_divrem_chip_row(",
+            "// BEAK-INSERT: guard.rv32im.divrem",
             r"""
 
+        // BEAK-INSERT: guard.rv32im.divrem
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_slice.borrow();
@@ -372,9 +380,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "branch_eq" / "core.rs",
             "use crate::adapters::Rv32BranchAdapterCols;",
-            "emit_branch_equal_chip_row(",
+            "// BEAK-INSERT: guard.rv32im.branch_eq",
             r"""
 
+        // BEAK-INSERT: guard.rv32im.branch_eq
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32BranchAdapterCols<F> = adapter_slice.borrow();
@@ -410,9 +419,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "branch_lt" / "core.rs",
             "use crate::adapters::Rv32BranchAdapterCols;",
-            "emit_branch_less_than_chip_row(",
+            "// BEAK-INSERT: guard.rv32im.branch_lt",
             r"""
 
+        // BEAK-INSERT: guard.rv32im.branch_lt
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32BranchAdapterCols<F> = adapter_slice.borrow();
@@ -447,9 +457,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "jal_lui" / "core.rs",
             "use crate::adapters::Rv32CondRdWriteAdapterCols;",
-            "emit_jal_lui_chip_row(",
+            "// BEAK-INSERT: guard.rv32im.jal_lui",
             r"""
 
+        // BEAK-INSERT: guard.rv32im.jal_lui
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32CondRdWriteAdapterCols<F> = adapter_slice.borrow();
@@ -485,9 +496,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "jalr" / "core.rs",
             "use crate::adapters::Rv32JalrAdapterCols;",
-            "emit_jalr_chip_row(",
+            "// BEAK-INSERT: guard.rv32im.jalr",
             r"""
 
+        // BEAK-INSERT: guard.rv32im.jalr
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32JalrAdapterCols<F> = adapter_slice.borrow();
@@ -522,9 +534,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "auipc" / "core.rs",
             "use crate::adapters::Rv32RdWriteAdapterCols;",
-            "emit_auipc_chip_row(",
+            "// BEAK-INSERT: guard.rv32im.auipc",
             r"""
 
+        // BEAK-INSERT: guard.rv32im.auipc
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32RdWriteAdapterCols<F> = adapter_slice.borrow();
@@ -536,9 +549,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "loadstore" / "core.rs",
             "use crate::adapters::Rv32LoadStoreAdapterCols;",
-            "emit_load_store_chip_row(",
+            "// BEAK-INSERT: guard.rv32im.loadstore",
             r"""
 
+        // BEAK-INSERT: guard.rv32im.loadstore
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32LoadStoreAdapterCols<F> = adapter_slice.borrow();
@@ -582,9 +596,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "load_sign_extend" / "core.rs",
             "use crate::adapters::Rv32LoadStoreAdapterCols;",
-            "emit_load_sign_extend_chip_row(",
+            "// BEAK-INSERT: guard.rv32im.load_sign_extend",
             r"""
 
+        // BEAK-INSERT: guard.rv32im.load_sign_extend
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32LoadStoreAdapterCols<F> = adapter_slice.borrow();
@@ -650,8 +665,9 @@ def _patch_regzero_system_connector_emit_chip_row(openvm_install_path: Path) -> 
         c = _insert_before(
             c,
             anchor="let [initial_state, final_state] =",
-            guard="emit_connector_chip_row(",
+            guard="// BEAK-INSERT: guard.system.connector_chip_row",
             insert=r"""
+        // BEAK-INSERT: guard.system.connector_chip_row
         // BEAK-INSERT: Emit chip-row micro-op.
         let [begin_u32, end_u32] = self.boundary_states.map(|state| state.unwrap());
         let is_terminate = end_u32.is_terminate == 1;
@@ -677,8 +693,9 @@ def _patch_regzero_system_connector_emit_chip_row(openvm_install_path: Path) -> 
         c = _insert_after(
             c,
             anchor="row.pc = F::from_canonical_u32(record.pc)",
-            guard="emit_phantom_chip_row(",
+            guard="// BEAK-INSERT: guard.system.phantom_chip_row",
             insert=r""";
+        // BEAK-INSERT: guard.system.phantom_chip_row
         // BEAK-INSERT: Emit chip-row micro-op.
         fuzzer_utils::emit_phantom_chip_row();
         // BEAK-INSERT-END
@@ -694,8 +711,9 @@ def _patch_regzero_system_connector_emit_chip_row(openvm_install_path: Path) -> 
         c = _insert_after(
             c,
             anchor="assert!(self.filtered_exec_frequencies.len() <= cached.trace.height());",
-            guard="emit_program_chip_row(",
+            guard="// BEAK-INSERT: guard.system.program_chip_row",
             insert=r"""
+        // BEAK-INSERT: guard.system.program_chip_row
         // BEAK-INSERT: Emit chip-row micro-op. Trace is BabyBear; reinterpret as &BabyBear and use as_canonical_u32().
         use p3_baby_bear::BabyBear;
         for (i, freq) in self.filtered_exec_frequencies.iter().copied().enumerate() {

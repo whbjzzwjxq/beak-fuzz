@@ -11,20 +11,21 @@
 #
 # COMMIT can be a full SHA or an alias defined in:
 #   beak-py/projects/openvm-fuzzer/openvm_fuzzer/settings.py
-COMMIT ?=
+COMMIT ?= bmk-regzero
 BIN ?= beak-trace
 ARGS ?=
 
 OPENVM_PYTHONPATH := beak-py/projects/openvm-fuzzer
 PYTHON ?= python3
 
-# Loop1 (beak-fuzz) parameters
+# Loop1 (beak-fuzz) default parameters
 SEEDS_JSONL ?= storage/fuzzing_seeds/initial.jsonl
 TIMEOUT_MS ?= 2000
-INITIAL_LIMIT ?= 0
-MAX_INSTRUCTIONS ?= 256
-ITERS ?= 100
-RUN_SECS ?= 300
+INITIAL_LIMIT ?= 1
+MAX_INSTRUCTIONS ?= 32
+ITERS ?= 500
+FAST_TEST ?= 1
+NO_INITIAL_EVAL ?= 1
 
 define _require_commit
 	@if [ -z "$(COMMIT)" ]; then \
@@ -67,62 +68,21 @@ openvm-fuzz-build:
 	$(_require_commit)
 	@resolved="$$( $(_openvm_resolve) )" && \
 	proj="projects/openvm-$${resolved}" && \
-	echo "Building $${proj} (BIN=beak-fuzz)" && \
-	cd "$${proj}" && CARGO_TARGET_DIR="$$PWD/target" cargo build --bin beak-fuzz
+	echo "Building $${proj} (BIN=beak-fuzz, profile=release)" && \
+	cd "$${proj}" && CARGO_TARGET_DIR="$$PWD/target" cargo build --release --bin beak-fuzz
 
 openvm-fuzz: openvm-fuzz-build
 	$(_require_commit)
 	@resolved="$$( $(_openvm_resolve) )" && \
 	proj="projects/openvm-$${resolved}" && \
-	echo "Running loop1 in $${proj} (iters=$(ITERS), initial_limit=$(INITIAL_LIMIT))" && \
-	cd "$${proj}" && ./target/debug/beak-fuzz \
+	echo "Running loop1 in $${proj} (iters=$(ITERS), initial_limit=$(INITIAL_LIMIT), no_initial_eval=$(NO_INITIAL_EVAL))" && \
+	cd "$${proj}" && FAST_TEST="$(FAST_TEST)" cargo run --release -q --bin beak-fuzz -- \
 		--seeds-jsonl "$(SEEDS_JSONL)" \
 		--timeout-ms "$(TIMEOUT_MS)" \
 		--initial-limit "$(INITIAL_LIMIT)" \
 		--max-instructions "$(MAX_INSTRUCTIONS)" \
+		$(if $(filter 1 true yes,$(NO_INITIAL_EVAL)),--no-initial-eval,) \
 		--iters "$(ITERS)"
-
-# Run loop1 for ~RUN_SECS seconds, then SIGTERM.
-openvm-fuzz-5min: openvm-fuzz-build
-	$(_require_commit)
-	@resolved="$$( $(_openvm_resolve) )" && \
-	proj="projects/openvm-$${resolved}" && \
-	echo "Running loop1 for ~$(RUN_SECS)s in $${proj}" && \
-	cd "$${proj}" && sh -c '\
-		./target/debug/beak-fuzz \
-			--seeds-jsonl $(SEEDS_JSONL) \
-			--timeout-ms $(TIMEOUT_MS) \
-			--initial-limit $(INITIAL_LIMIT) \
-			--max-instructions $(MAX_INSTRUCTIONS) \
-			--iters $(ITERS) \
-			& pid=$$!; \
-		sleep $(RUN_SECS); \
-		kill -TERM $$pid 2>/dev/null || true; \
-		sleep 5; \
-		kill -KILL $$pid 2>/dev/null || true; \
-		wait $$pid || true \
-	'
-
-# Quick smoke: one AUIPC seed that writes x0.
-openvm-fuzz-quick: openvm-fuzz-build
-	$(_require_commit)
-	@resolved="$$( $(_openvm_resolve) )" && \
-	proj="projects/openvm-$${resolved}" && \
-	echo "Running quick loop1 smoke in $${proj}" && \
-	cd "$${proj}" && ./target/debug/beak-fuzz \
-		--seeds-jsonl storage/fuzzing_seeds/quick-auipc-x0.jsonl \
-		--timeout-ms 2000 \
-		--initial-limit 1 \
-		--no-initial-eval \
-		--max-instructions 16 \
-		--iters 0
-
-# Convenience: trace CLI (beak-trace)
-openvm-trace:
-	@$(MAKE) openvm-run BIN=beak-trace ARGS='--bin "$(WORDS)"'
-
-openvm-trace-buckets:
-	@$(MAKE) openvm-run BIN=beak-trace ARGS='--print-buckets --bin "$(WORDS)"'
 
 # Example: run a seed that writes x0 (should detect mismatch).
 # Prereq: install the OpenVM snapshot first:
