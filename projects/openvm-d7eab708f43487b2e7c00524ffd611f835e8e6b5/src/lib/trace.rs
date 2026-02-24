@@ -62,18 +62,18 @@ impl OpenVMTrace {
 
             match ty {
                 "instruction" => {
-                    let insn: OpenVMInsn =
-                        serde_json::from_value(data).map_err(|e| format!("log[{}] instruction: {}", idx, e))?;
+                    let insn: OpenVMInsn = serde_json::from_value(data)
+                        .map_err(|e| format!("log[{}] instruction: {}", idx, e))?;
                     instructions.push(insn);
                 }
                 "chip_row" => {
-                    let row: OpenVMChipRow =
-                        serde_json::from_value(data).map_err(|e| format!("log[{}] chip_row: {}", idx, e))?;
+                    let row: OpenVMChipRow = serde_json::from_value(data)
+                        .map_err(|e| format!("log[{}] chip_row: {}", idx, e))?;
                     chip_rows.push(row);
                 }
                 "interaction" => {
-                    let ia: OpenVMInteraction =
-                        serde_json::from_value(data).map_err(|e| format!("log[{}] interaction: {}", idx, e))?;
+                    let ia: OpenVMInteraction = serde_json::from_value(data)
+                        .map_err(|e| format!("log[{}] interaction: {}", idx, e))?;
                     interactions.push(ia);
                 }
                 _ => return Err(format!("log[{}]: unknown type \"{}\"", idx, ty)),
@@ -100,8 +100,10 @@ impl OpenVMTrace {
         let mut interactions_by_step: Vec<Vec<usize>> = Vec::new();
 
         let mut interactions_by_row_id: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut interactions_by_bus: HashMap<crate::interaction::OpenVMInteractionKind, Vec<usize>> =
-            HashMap::new();
+        let mut interactions_by_bus: HashMap<
+            crate::interaction::OpenVMInteractionKind,
+            Vec<usize>,
+        > = HashMap::new();
 
         for (i, insn) in instructions.iter().enumerate() {
             let seq = insn.seq as usize;
@@ -128,14 +130,8 @@ impl OpenVMTrace {
             Self::ensure_len(&mut chip_rows_by_step, step);
             // Enforce uniqueness of op_idx within a step.
             let op_idx = b.op_idx;
-            if chip_rows_by_step[step]
-                .iter()
-                .any(|&j| chip_rows[j].base().op_idx == op_idx)
-            {
-                panic!(
-                    "duplicate chip_row op_idx={} for step_idx={}",
-                    op_idx, step
-                );
+            if chip_rows_by_step[step].iter().any(|&j| chip_rows[j].base().op_idx == op_idx) {
+                panic!("duplicate chip_row op_idx={} for step_idx={}", op_idx, step);
             }
             chip_rows_by_step[step].push(i);
         }
@@ -219,9 +215,7 @@ impl OpenVMTrace {
             .iter()
             .find(|&&idx| self.chip_rows[idx].base().op_idx == op_idx as u64)
             .copied()
-            .unwrap_or_else(|| {
-                panic!("missing chip_row for step={}, op_idx={}", step_idx, op_idx)
-            });
+            .unwrap_or_else(|| panic!("missing chip_row for step={}, op_idx={}", step_idx, op_idx));
         &self.chip_rows[i]
     }
 
@@ -288,9 +282,7 @@ impl OpenVMTrace {
 
     /// Iterate over all chip rows for a step, yielding references.
     pub fn chip_rows_for_step(&self, step_idx: usize) -> impl Iterator<Item = &OpenVMChipRow> {
-        self.chip_row_indices_for_step(step_idx)
-            .iter()
-            .map(|&i| &self.chip_rows[i])
+        self.chip_row_indices_for_step(step_idx).iter().map(|&i| &self.chip_rows[i])
     }
 
     /// Number of instructions in this trace (for micro_op_count / feedback).

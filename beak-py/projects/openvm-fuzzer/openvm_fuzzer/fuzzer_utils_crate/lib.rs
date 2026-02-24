@@ -51,7 +51,17 @@ pub struct GlobalState {
     pub seq: u64,
 
     /// The number of times the zkvm has executed an insn.
+    ///
+    /// The current instruction step id.
+    ///
+    /// This value is advanced **only** by `emit_instruction`. All chip rows and interactions
+    /// emitted after `emit_instruction` (and before the next `emit_instruction`) will use the
+    /// same `step_idx`.
     pub step_idx: u64,
+
+    /// Whether we've emitted at least one instruction. Used to advance `step_idx` at the start
+    /// of each subsequent `emit_instruction` while keeping the first instruction at step 0.
+    pub did_emit_instruction: bool,
 
     /// Interaction index within the current step (0..N-1).
     pub op_idx_in_step: u64,
@@ -88,6 +98,7 @@ impl GlobalState {
         Self {
             seq: 0,
             step_idx: 0,
+            did_emit_instruction: false,
             op_idx_in_step: 0,
             chip_row_op_idx_in_step: 0,
             row_count: 0,
@@ -105,6 +116,19 @@ impl GlobalState {
     fn emit_micro_op(&mut self, micro_op: serde_json::Value) {
         self.emitted_micro_ops.push(micro_op);
         self.seq += 1;
+    }
+
+    pub fn take_json_logs(&mut self) -> Vec<serde_json::Value> {
+        let out = std::mem::take(&mut self.emitted_micro_ops);
+        // Reset per-run counters so each prove starts at step/seq 0.
+        self.seq = 0;
+        self.step_idx = 0;
+        self.did_emit_instruction = false;
+        self.op_idx_in_step = 0;
+        self.chip_row_op_idx_in_step = 0;
+        self.row_count = 0;
+        self.last_row_id = None;
+        out
     }
 
     fn rs2_source_json(rs2: i32, is_rs2_imm: bool) -> Value {
@@ -125,10 +149,8 @@ impl GlobalState {
         opcode: u32,
         operands: [u32; 7],
     ) {
-        // Start a new step: reset per-step interaction counter and anchor.
-        self.op_idx_in_step = 0;
-        self.chip_row_op_idx_in_step = 0;
-        self.last_row_id = None;
+        // Start a new instruction step (advance + reset per-step counters).
+        self.inc_step();
 
         let micro_op = json!(
         {"type": "instruction",
@@ -146,7 +168,17 @@ impl GlobalState {
     }
 
     pub fn inc_step(&mut self) {
-        self.step_idx += 1;
+        // Enter a new step:
+        // - keep step 0 for the first instruction
+        // - then advance on each subsequent instruction
+        if self.did_emit_instruction {
+            self.step_idx += 1;
+        } else {
+            self.did_emit_instruction = true;
+        }
+        self.op_idx_in_step = 0;
+        self.chip_row_op_idx_in_step = 0;
+        self.last_row_id = None;
     }
 
     fn emit_chip_row_envelope(
@@ -780,6 +812,11 @@ pub fn emit_instruction(
 ) {
     let mut state = GLOBAL_STATE.lock().unwrap();
     state.emit_instruction(pc, timestamp, next_pc, next_timestamp, opcode, operands);
+}
+
+pub fn take_json_logs() -> Vec<serde_json::Value> {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.take_json_logs()
 }
 
 pub fn emit_base_alu_chip_row<const N: usize>(

@@ -13,11 +13,19 @@ use openvm_rv32im_transpiler::{Rv32ITranspilerExtension, Rv32MTranspilerExtensio
 use openvm_sdk::config::AppConfig;
 use openvm_sdk::{Sdk, StdIn, F};
 use openvm_transpiler::transpiler::Transpiler;
+use std::time::Instant;
 
 fn build_sdk() -> Sdk {
     let mut app_config = AppConfig::riscv32();
     app_config.app_vm_config.system.config =
         app_config.app_vm_config.system.config.with_max_segment_len(256).with_continuations();
+    if std::env::var("OPENVM_FAST_TEST").as_deref() == Ok("1") {
+        // Fast, insecure proving parameters for local fuzzing/debugging.
+        // Mirrors `openvm_stark_sdk::config::FriParameters::new_for_testing` when OPENVM_FAST_TEST=1.
+        app_config.app_fri_params.fri_params.log_final_poly_len = 0;
+        app_config.app_fri_params.fri_params.num_queries = 2;
+        app_config.app_fri_params.fri_params.proof_of_work_bits = 0;
+    }
     Sdk::new(app_config).expect("sdk init")
 }
 
@@ -81,24 +89,34 @@ impl LoopBackend for OpenVmBackend {
     }
 
     fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
+        let t_total = Instant::now();
         self.eval.backend_error = None;
         self.trace = None;
 
+        let t0 = Instant::now();
         let exe = build_exe(words).map_err(|e| {
             self.eval.backend_error = Some(e.clone());
             e
         })?;
+        let ms_build_exe = t0.elapsed().as_millis();
+
+        let t1 = Instant::now();
         let mut app_prover = self.sdk.app_prover(exe).map_err(|e| {
             let msg = format!("app_prover failed: {e:?}");
             self.eval.backend_error = Some(msg.clone());
             msg
         })?;
+        let ms_app_prover = t1.elapsed().as_millis();
+
+        let t2 = Instant::now();
         let _proof = app_prover.prove(StdIn::default()).map_err(|e| {
             let msg = format!("prove failed: {e:?}");
             self.eval.backend_error = Some(msg.clone());
             msg
         })?;
+        let ms_prove = t2.elapsed().as_millis();
 
+        let t3 = Instant::now();
         let state =
             app_prover.instance().state().as_ref().ok_or_else(|| "no final state".to_string())?;
         let mut regs = [0u32; 32];
@@ -107,15 +125,34 @@ impl LoopBackend for OpenVmBackend {
             regs[i as usize] = u32::from_le_bytes(bytes);
         }
         self.eval.final_regs = Some(regs);
+        let ms_read_regs = t3.elapsed().as_millis();
 
+        let t4 = Instant::now();
         let logs = fuzzer_utils::take_json_logs();
+        let ms_take_logs = t4.elapsed().as_millis();
+        let logs_len = logs.len();
+
+        let t5 = Instant::now();
         match OpenVMTrace::from_logs(logs) {
             Ok(trace) => {
+                let insn_count = trace.instructions().len();
+                let row_count = trace.chip_rows().len();
+                let hit_count = trace.bucket_hits().len();
                 self.trace = Some(trace);
+                let ms_parse = t5.elapsed().as_millis();
+                eprintln!(
+                    "[openvm-backend] logs_len={logs_len} insn_count={insn_count} chip_rows={row_count} bucket_hits={hit_count} build_exe_ms={ms_build_exe} app_prover_ms={ms_app_prover} prove_ms={ms_prove} read_regs_ms={ms_read_regs} take_logs_ms={ms_take_logs} parse_ms={ms_parse} total_ms={}",
+                    t_total.elapsed().as_millis()
+                );
                 Ok(regs)
             }
             Err(e) => {
                 self.eval.backend_error = Some(e.clone());
+                let ms_parse = t5.elapsed().as_millis();
+                eprintln!(
+                    "[openvm-backend] ERROR parse_logs ({e}); logs_len={logs_len} build_exe_ms={ms_build_exe} app_prover_ms={ms_app_prover} prove_ms={ms_prove} read_regs_ms={ms_read_regs} take_logs_ms={ms_take_logs} parse_ms={ms_parse} total_ms={}",
+                    t_total.elapsed().as_millis()
+                );
                 Err(e)
             }
         }
