@@ -113,7 +113,10 @@ def _patch_regzero_record_arena_emit_chip_row(openvm_install_path: Path) -> None
             let max_samples: usize = std::cmp::min(height - rows_used, 3);
             let mut emitted: usize = 0;
             while emitted < max_samples {
-                let data = self.trace_buffer[rows_used + emitted].to_string();
+                // trace_buffer is row-major flat storage; sample by row start.
+                let row_start = (rows_used + emitted) * width;
+                let row_end = row_start + width;
+                let data = format!("{:?}", &self.trace_buffer[row_start..row_end]);
                 fuzzer_utils::emit_padding_chip_row(&data);
                 emitted += 1;
             }
@@ -358,17 +361,17 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         ),
         (
             base / "divrem" / "core.rs",
-            "use crate::adapters::Rv32BaseAluAdapterCols;",
+            "use crate::adapters::Rv32MultAdapterCols;",
             "// BEAK-INSERT: guard.rv32im.divrem",
             r"""
 
         // BEAK-INSERT: guard.rv32im.divrem
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
-        let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_slice.borrow();
+        let beak_cols: &Rv32MultAdapterCols<F> = adapter_slice.borrow();
         let rd_ptr = beak_cols.rd_ptr.as_canonical_u32();
         let rs1_ptr = beak_cols.rs1_ptr.as_canonical_u32();
-        let rs2_ptr = beak_cols.rs2.as_canonical_u32();
+        let rs2_ptr = beak_cols.rs2_ptr.as_canonical_u32();
 
         let is_div = matches!(opcode, DivRemOpcode::DIV | DivRemOpcode::DIVU);
         let a_u8 = if is_div { q.map(|x| x as u8) } else { r.map(|x| x as u8) };
@@ -722,6 +725,8 @@ def _patch_regzero_system_connector_emit_chip_row(openvm_install_path: Path) -> 
             }
             // ProgramExecutionCols: [pc, opcode, a, b, c, d, e, f, g]
             let row = cached.trace.row_slice(i);
+            fuzzer_utils::fuzzer_assert_eq!(std::mem::size_of_val(&row[0]), std::mem::size_of::<BabyBear>());
+            fuzzer_utils::fuzzer_assert_eq!(std::mem::align_of_val(&row[0]), std::mem::align_of::<BabyBear>());
             let as_babybear = |j: usize| -> &BabyBear { unsafe { &*(&row[j] as *const _ as *const BabyBear) } };
             let opcode_u32 = as_babybear(1).as_canonical_u32();
             let operands: [u32; 7] = [
