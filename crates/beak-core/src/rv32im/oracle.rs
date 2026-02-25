@@ -65,9 +65,18 @@ impl RISCVOracle {
         let mut hart = HartState::new();
         match cfg.memory_model {
             OracleMemoryModel::SharedCodeData => {
+                // Unified low-memory model aligned with OpenVM's pc=0 execution:
+                // one address space where code is placed at address 0, and the rest
+                // of RAM is zero-initialized. This avoids false mismatches for
+                // AUIPC + load/store sequences that legally touch low data addresses.
+                let unified_bytes = cfg.data_size_bytes.max(code_len_bytes).max(4);
+                let unified_words = ((unified_bytes as usize) + 3) / 4;
+                let mut unified = vec![0u32; unified_words];
+                let copy_len = words.len().min(unified.len());
+                unified[..copy_len].copy_from_slice(&words[..copy_len]);
                 mem_space
-                    .add_memory(0, code_len_bytes, Box::new(VecMemory::new(words.to_vec())))
-                    .expect("add code region");
+                    .add_memory(0, (unified_words * 4) as u32, Box::new(VecMemory::new(unified)))
+                    .expect("add unified code+data region");
                 hart.pc = 0;
             }
             OracleMemoryModel::SplitCodeData => {

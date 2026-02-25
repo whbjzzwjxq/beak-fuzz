@@ -40,13 +40,13 @@ fn main() {
         .arg(
             Arg::new("oracle_memory_model")
                 .long("oracle-memory-model")
-                .default_value("split-code-data")
+                .default_value("shared-code-data")
                 .help("Oracle memory model: shared-code-data | split-code-data."),
         )
         .arg(
             Arg::new("oracle_code_base")
                 .long("oracle-code-base")
-                .default_value("0x10000")
+                .default_value("0x0")
                 .help("Oracle code base address for split-code-data mode (u32, hex or decimal)."),
         )
         .arg(
