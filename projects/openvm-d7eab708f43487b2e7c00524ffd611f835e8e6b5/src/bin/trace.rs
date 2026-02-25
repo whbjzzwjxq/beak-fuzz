@@ -10,7 +10,7 @@ use openvm_rv32im_transpiler::{Rv32ITranspilerExtension, Rv32MTranspilerExtensio
 use openvm_sdk::{config::AppConfig, prover::verify_app_proof, Sdk, StdIn, F};
 use openvm_transpiler::transpiler::Transpiler;
 
-use beak_core::rv32im::oracle::RISCVOracle;
+use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel, RISCVOracle};
 use beak_core::trace::{sorted_signatures_from_hits, Trace};
 use beak_openvm_d7eab708::trace::OpenVMTrace;
 use serde_json::Value;
@@ -36,6 +36,24 @@ fn main() {
                 .long("print-buckets")
                 .help("Parse captured logs and print derived bucket hits (signatures).")
                 .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("oracle_memory_model")
+                .long("oracle-memory-model")
+                .default_value("split-code-data")
+                .help("Oracle memory model: shared-code-data | split-code-data."),
+        )
+        .arg(
+            Arg::new("oracle_code_base")
+                .long("oracle-code-base")
+                .default_value("0x10000")
+                .help("Oracle code base address for split-code-data mode (u32, hex or decimal)."),
+        )
+        .arg(
+            Arg::new("oracle_data_size_bytes")
+                .long("oracle-data-size-bytes")
+                .default_value("65536")
+                .help("Oracle zeroed data RAM bytes for split-code-data mode."),
         )
         .after_help(
             "Example:\n  beak-trace --bin 12345017 --bin 00000533\n  beak-trace --bin \"12345017 00000533\"",
@@ -66,6 +84,21 @@ fn main() {
     let args = input_words;
     let print_micro_ops = matches.get_flag("print_micro_ops");
     let print_buckets = matches.get_flag("print_buckets");
+    let oracle_memory_model = OracleMemoryModel::parse(
+        matches.get_one::<String>("oracle_memory_model").unwrap(),
+    )
+    .expect("oracle-memory-model");
+    let oracle_code_base =
+        parse_u32_arg(matches.get_one::<String>("oracle_code_base").unwrap(), "oracle-code-base");
+    let oracle_data_size_bytes = parse_u32_arg(
+        matches.get_one::<String>("oracle_data_size_bytes").unwrap(),
+        "oracle-data-size-bytes",
+    );
+    let oracle_cfg = OracleConfig {
+        memory_model: oracle_memory_model,
+        code_base: oracle_code_base,
+        data_size_bytes: oracle_data_size_bytes,
+    };
 
     let words: Vec<u32> = args
         .iter()
@@ -81,7 +114,7 @@ fn main() {
     let result = std::thread::Builder::new()
         .name("trace-main".into())
         .stack_size(256 * 1024 * 1024)
-        .spawn(move || run_trace(&words, print_micro_ops, print_buckets))
+        .spawn(move || run_trace(&words, print_micro_ops, print_buckets, oracle_cfg))
         .expect("spawn thread")
         .join()
         .expect("thread panicked");
@@ -91,10 +124,10 @@ fn main() {
     }
 }
 
-fn run_trace(words: &[u32], print_micro_ops: bool, print_buckets: bool) -> bool {
+fn run_trace(words: &[u32], print_micro_ops: bool, print_buckets: bool, oracle_cfg: OracleConfig) -> bool {
     // --- 1. Oracle ---
     println!("\n=== Oracle (rrs-lib) ===");
-    let oracle_regs = RISCVOracle::execute(words);
+    let oracle_regs = RISCVOracle::execute_with_config(words, oracle_cfg);
     for i in 0..32 {
         if oracle_regs[i] != 0 {
             println!("  x{i} = 0x{:08x}", oracle_regs[i]);
@@ -208,6 +241,15 @@ fn run_trace(words: &[u32], print_micro_ops: bool, print_buckets: bool) -> bool 
     }
 
     !mismatch
+}
+
+fn parse_u32_arg(value: &str, name: &str) -> u32 {
+    let s = value.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).unwrap_or_else(|_| panic!("invalid {name}: {value}"))
+    } else {
+        s.parse::<u32>().unwrap_or_else(|_| panic!("invalid {name}: {value}"))
+    }
 }
 
 fn print_json_log_line(idx: usize, v: &Value) {

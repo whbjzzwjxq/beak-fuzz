@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use clap::{Arg, Command};
 
 use beak_core::fuzz::loop1::{run_loop1_threaded, Loop1Config, DEFAULT_RNG_SEED};
+use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
 use beak_openvm_d7eab708::backend::{
     run_backend_once, OpenVmBackend, WorkerRequest, WorkerResponse,
@@ -25,6 +26,15 @@ fn resolve_path(root: &Path, arg: &str) -> PathBuf {
         p
     } else {
         root.join(p)
+    }
+}
+
+fn parse_u32_arg(value: &str, name: &str) -> u32 {
+    let s = value.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).unwrap_or_else(|_| panic!("invalid {name}: {value}"))
+    } else {
+        s.parse::<u32>().unwrap_or_else(|_| panic!("invalid {name}: {value}"))
     }
 }
 
@@ -70,6 +80,24 @@ fn main() {
                 .help("Number of fuzz iterations (in addition to initial corpus evaluation)."),
         )
         .arg(
+            Arg::new("oracle_memory_model")
+                .long("oracle-memory-model")
+                .default_value("split-code-data")
+                .help("Oracle memory model: shared-code-data | split-code-data."),
+        )
+        .arg(
+            Arg::new("oracle_code_base")
+                .long("oracle-code-base")
+                .default_value("0x10000")
+                .help("Oracle code base address for split-code-data mode (u32, hex or decimal)."),
+        )
+        .arg(
+            Arg::new("oracle_data_size_bytes")
+                .long("oracle-data-size-bytes")
+                .default_value("65536")
+                .help("Oracle zeroed data RAM bytes for split-code-data mode."),
+        )
+        .arg(
             Arg::new("worker_loop")
                 .long("worker-loop")
                 .hide(true)
@@ -95,12 +123,27 @@ fn main() {
     let max_instructions: usize =
         matches.get_one::<String>("max_instructions").unwrap().parse().expect("max-instructions");
     let iters: usize = matches.get_one::<String>("iters").unwrap().parse().expect("iters");
+    let oracle_memory_model = OracleMemoryModel::parse(
+        matches.get_one::<String>("oracle_memory_model").unwrap(),
+    )
+    .expect("oracle-memory-model");
+    let oracle_code_base =
+        parse_u32_arg(matches.get_one::<String>("oracle_code_base").unwrap(), "oracle-code-base");
+    let oracle_data_size_bytes = parse_u32_arg(
+        matches.get_one::<String>("oracle_data_size_bytes").unwrap(),
+        "oracle-data-size-bytes",
+    );
 
     let cfg = Loop1Config {
         zkvm_tag: "openvm".to_string(),
         zkvm_commit: ZKVM_COMMIT.to_string(),
         rng_seed: DEFAULT_RNG_SEED,
         timeout_ms,
+        oracle: OracleConfig {
+            memory_model: oracle_memory_model,
+            code_base: oracle_code_base,
+            data_size_bytes: oracle_data_size_bytes,
+        },
         seeds_jsonl: seeds_path,
         out_dir: root.join("storage/fuzzing_seeds"),
         output_prefix: None,

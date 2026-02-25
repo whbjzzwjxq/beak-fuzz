@@ -13,7 +13,7 @@ use libafl_bolts::Named;
 use crate::fuzz::jsonl::{BugRecord, CorpusRecord, JsonlWriter};
 use crate::fuzz::seed::FuzzingSeed;
 use crate::rv32im::instruction::RV32IMInstruction;
-use crate::rv32im::oracle::RISCVOracle;
+use crate::rv32im::oracle::{OracleConfig, RISCVOracle};
 use crate::trace::{sorted_signatures_from_hits, BucketHit};
 
 use super::bandit;
@@ -30,6 +30,7 @@ pub struct Loop1Config {
     pub zkvm_commit: String,
     pub rng_seed: u64,
     pub timeout_ms: u64,
+    pub oracle: OracleConfig,
 
     pub seeds_jsonl: PathBuf,
     pub out_dir: PathBuf,
@@ -453,7 +454,7 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
 
         backend.prepare_for_run(cfg.rng_seed);
 
-        let oracle_regs = RISCVOracle::execute(&words);
+        let oracle_regs = RISCVOracle::execute_with_config(&words, cfg.oracle);
         let backend_regs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             backend.prove_and_read_final_regs(&words)
         }));

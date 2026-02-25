@@ -128,7 +128,19 @@ impl GlobalState {
         self.chip_row_op_idx_in_step = 0;
         self.row_count = 0;
         self.last_row_id = None;
-        out
+        // Canonicalize Value trees before handing them out.
+        //
+        // We observed a serde edge case where a small subset of in-memory `Value`s may fail
+        // typed `from_value` despite serializing correctly; round-trip normalization makes
+        // downstream parsing deterministic.
+        out.into_iter()
+            .map(|v| {
+                serde_json::to_string(&v)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                    .unwrap_or(v)
+            })
+            .collect()
     }
 
     fn rs2_source_json(rs2: i32, is_rs2_imm: bool) -> Value {
