@@ -1,19 +1,8 @@
-use std::sync::Arc;
-
 use clap::{Arg, Command};
 
-use openvm_instructions::LocalOpcode;
-use openvm_instructions::{
-    exe::VmExe, instruction::Instruction, program::Program, riscv::RV32_REGISTER_AS, SystemOpcode,
-};
-use openvm_rv32im_transpiler::{Rv32ITranspilerExtension, Rv32MTranspilerExtension};
-use openvm_sdk::{config::AppConfig, prover::verify_app_proof, Sdk, StdIn, F};
-use openvm_transpiler::transpiler::Transpiler;
-
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel, RISCVOracle};
-use beak_core::trace::{sorted_signatures_from_hits, Trace};
-use beak_openvm_d7eab708::trace::OpenVMTrace;
-use serde_json::Value;
+use beak_core::trace::sorted_signatures_from_hits;
+use beak_openvm_d7eab708::backend::run_backend_once;
 
 fn main() {
     let matches = Command::new("beak-trace")
@@ -28,7 +17,7 @@ fn main() {
         .arg(
             Arg::new("print_micro_ops")
                 .long("print-micro-ops")
-                .help("Print captured JSON trace records (raw).")
+                .help("Reserved for compatibility (raw micro-op logs are not exposed by run_backend_once).")
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
@@ -134,95 +123,46 @@ fn run_trace(words: &[u32], print_micro_ops: bool, print_buckets: bool, oracle_c
         }
     }
 
-    // --- 2. Transpile ---
-    println!("\n=== Transpile ===");
-    let transpiler = Transpiler::<F>::default()
-        .with_extension(Rv32ITranspilerExtension)
-        .with_extension(Rv32MTranspilerExtension);
-
-    let transpiled = transpiler.transpile(words).expect("transpile failed");
-
-    let mut instructions: Vec<Instruction<F>> = Vec::new();
-    for (i, opt) in transpiled.into_iter().enumerate() {
-        match opt {
-            Some(inst) => instructions.push(inst),
-            None => eprintln!("  WARNING: word [{i}] 0x{:08x} not transpiled", words[i]),
+    // --- 2. Backend (same single-run implementation used by fuzz worker path) ---
+    println!("\n=== OpenVM backend (run_backend_once) ===");
+    let backend_resp = match run_backend_once(1, words, 0) {
+        Ok(resp) => resp,
+        Err(e) => {
+            eprintln!("  backend error: {e}");
+            return false;
         }
+    };
+    println!("  micro_op_count = {}", backend_resp.micro_op_count);
+
+    if let Some(err) = &backend_resp.backend_error {
+        println!("  backend_error = {err}");
     }
-    instructions.push(Instruction::from_usize(
-        SystemOpcode::TERMINATE.global_opcode(),
-        [0, 0, 0],
-    ));
-    println!("  {} OpenVM instructions (incl. TERMINATE)", instructions.len());
 
-    let program = Program::from_instructions(&instructions);
-    let exe = Arc::new(VmExe::new(program));
-
-    // --- 3. SDK setup ---
-    println!("\n=== OpenVM SDK ===");
-    let mut app_config = AppConfig::riscv32();
-    app_config.app_vm_config.system.config =
-        app_config.app_vm_config.system.config.with_max_segment_len(256).with_continuations();
-
-    let sdk = Sdk::new(app_config).expect("sdk init");
-    let app_vk = sdk.app_pk().get_app_vk();
-
-    // --- 4. Prove ---
-    println!("\n=== Prove ===");
-    let mut app_prover = sdk.app_prover(exe).expect("app prover");
-    let proof = app_prover.prove(StdIn::default()).expect("prove");
-    println!("  Proof generated.");
-
-    // --- 5. Verify ---
-    println!("\n=== Verify ===");
-    let _verified = verify_app_proof(&app_vk, &proof).expect("verify");
-    println!("  Proof verified.");
-
-    let json_logs = fuzzer_utils::take_json_logs();
-    println!("\n=== Captured JSON logs ===");
-    println!("  {} entr(y/ies)", json_logs.len());
-
-    // --- 6. Print captured JSON records (raw) ---
-    //
-    // Note: `beak-trace` prints raw JSON records captured from the instrumented OpenVM snapshot.
-    // Typed parsing lives in the backend project (e.g. `OpenVMTrace::from_logs`).
     if print_micro_ops {
-        for (i, v) in json_logs.iter().enumerate() {
-            print_json_log_line(i, v);
-        }
+        println!("  NOTE: raw micro-op JSON logs are not returned by run_backend_once.");
     }
 
     if print_buckets {
         println!("\n=== Derived bucket hits ===");
-        match OpenVMTrace::from_logs(json_logs) {
-            Ok(trace) => {
-                let hits = trace.bucket_hits();
-                println!("  {} hit(s)", hits.len());
-                for sig in sorted_signatures_from_hits(hits) {
-                    println!("  {sig}");
-                }
-            }
-            Err(e) => {
-                println!("  ERROR: failed to parse logs into OpenVMTrace: {e}");
-            }
+        println!("  {} hit(s)", backend_resp.bucket_hits.len());
+        for sig in sorted_signatures_from_hits(&backend_resp.bucket_hits) {
+            println!("  {sig}");
         }
     }
 
-    // --- 6. Read zkVM registers ---
+    // --- 3. Read backend final registers ---
     println!("\n=== OpenVM registers ===");
-    let state = app_prover.instance().state().as_ref().expect("no final state");
-    let mut openvm_regs = [0u32; 32];
-    for i in 0..32u32 {
-        let bytes: [u8; 4] = unsafe { state.memory.read::<u8, 4>(RV32_REGISTER_AS, i * 4) };
-        openvm_regs[i as usize] = u32::from_le_bytes(bytes);
-    }
+    let Some(openvm_regs) = backend_resp.final_regs else {
+        println!("  no final_regs returned.");
+        return false;
+    };
     for i in 0..32 {
         if openvm_regs[i] != 0 {
             println!("  x{i} = 0x{:08x}", openvm_regs[i]);
         }
     }
 
-    // --- 7. Compare ---
+    // --- 4. Compare ---
     println!("\n=== Comparison ===");
     let mut mismatch = false;
     for i in 0..32 {
@@ -240,7 +180,7 @@ fn run_trace(words: &[u32], print_micro_ops: bool, print_buckets: bool, oracle_c
         println!("  All 32 registers match.");
     }
 
-    !mismatch
+    !mismatch && backend_resp.backend_error.is_none()
 }
 
 fn parse_u32_arg(value: &str, name: &str) -> u32 {
@@ -250,9 +190,5 @@ fn parse_u32_arg(value: &str, name: &str) -> u32 {
     } else {
         s.parse::<u32>().unwrap_or_else(|_| panic!("invalid {name}: {value}"))
     }
-}
-
-fn print_json_log_line(idx: usize, v: &Value) {
-    println!("  [{idx}] {v}");
 }
 

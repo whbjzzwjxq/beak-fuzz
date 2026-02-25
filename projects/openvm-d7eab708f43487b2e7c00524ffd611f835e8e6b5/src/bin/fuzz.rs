@@ -52,7 +52,7 @@ fn main() {
         .arg(
             Arg::new("timeout_ms")
                 .long("timeout-ms")
-                .default_value("10000")
+                .default_value("60000")
                 .help("Best-effort per-seed wall-time timeout in milliseconds."),
         )
         .arg(
