@@ -344,7 +344,7 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     std::fs::create_dir_all(&cfg.out_dir)
         .map_err(|e| format!("create out_dir {} failed: {e}", cfg.out_dir.display()))?;
 
-    let prefix = cfg.output_prefix.clone().unwrap_or_else(|| {
+    let base_prefix = cfg.output_prefix.clone().unwrap_or_else(|| {
         format!(
             "loop1-{}-{}-seed{}-{}",
             cfg.zkvm_tag,
@@ -353,6 +353,7 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
             now_ts_secs()
         )
     });
+    let prefix = format!("{base_prefix}-iter{}", cfg.iters);
     let corpus_path = cfg.out_dir.join(format!("{prefix}-corpus.jsonl"));
     let bugs_path = cfg.out_dir.join(format!("{prefix}-bugs.jsonl"));
 

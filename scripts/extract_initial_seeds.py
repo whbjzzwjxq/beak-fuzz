@@ -82,11 +82,13 @@ def _rewrite_word_regs(word: int) -> int:
     if opcode in (0x33, 0x3B):
         rd, rs1, rs2 = _rd(word), _rs1(word), _rs2(word)
         rd, rs1, rs2 = _remap_reg(rd), _remap_reg(rs1), _remap_reg(rs2)
-        return (word & 0xFE00007F) | (rd << 7) | (rs1 << 15) | (rs2 << 20)
+        # Keep funct7/funct3/opcode unchanged; only rewrite rd/rs1/rs2.
+        return (word & 0xFE00707F) | (rd << 7) | (rs1 << 15) | (rs2 << 20)
     if opcode in (0x13, 0x03, 0x67, 0x73):
         rd, rs1 = _rd(word), _rs1(word)
         rd, rs1 = _remap_reg(rd), _remap_reg(rs1)
-        return (word & 0xFFFFE07F) | (rd << 7) | (rs1 << 15)
+        # Keep imm/funct3/opcode unchanged; only rewrite rd/rs1.
+        return (word & 0xFFF0707F) | (rd << 7) | (rs1 << 15)
     if opcode == 0x23:
         rs1, rs2 = _rs1(word), _rs2(word)
         rs1, rs2 = _remap_reg(rs1), _remap_reg(rs2)
