@@ -86,6 +86,7 @@ struct RunStats {
     micro_op_count: usize,
     bucket_hits: Vec<BucketHit>,
     mismatch_regs: Vec<(u32, u32, u32)>,
+    backend_error: Option<String>,
     timed_out: bool,
 }
 
@@ -125,6 +126,16 @@ fn mismatch_regs(oracle: &[u32; 32], prover: &[u32; 32]) -> Vec<(u32, u32, u32)>
         }
     }
     out
+}
+
+fn panic_payload_to_string(p: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = p.downcast_ref::<&str>() {
+        return format!("panic: {s}");
+    }
+    if let Some(s) = p.downcast_ref::<String>() {
+        return format!("panic: {s}");
+    }
+    "panic: non-string payload".to_string()
 }
 
 /// Canonicalize bucket hit signatures into a single stable signature string.
@@ -245,10 +256,42 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
                     timed_out: stats.timed_out,
                     bucket_hits_sig: stats.bucket_hits_sig.clone(),
                     micro_op_count: stats.micro_op_count,
+                    backend_error: stats.backend_error.clone(),
                     bucket_hits: stats.bucket_hits.clone(),
                     mismatch_regs: stats.mismatch_regs.clone(),
                     instructions: words,
                     metadata: serde_json::json!({ "kind": "mismatch" }),
+                };
+                self.bug_writer.append_json_line(&rec).map_err(|e| Error::unknown(e))?;
+            }
+        }
+
+        // Record backend exceptions (timeout/panic/backend_error), even without register mismatch.
+        if stats.timed_out || stats.backend_error.is_some() {
+            let words = decode_words_from_input(input, 2048);
+            let err = stats.backend_error.clone().unwrap_or_else(|| "timed_out".to_string());
+            let bug_key = format!(
+                "exception|{}|{}|{}",
+                stats.bucket_hits_sig,
+                err,
+                words.iter().map(|w| format!("{w:08x}")).collect::<Vec<_>>().join(",")
+            );
+            if self.written_bug_keys.insert(bug_key) {
+                let rec = BugRecord {
+                    zkvm_commit: self.cfg.zkvm_commit.clone(),
+                    rng_seed: self.cfg.rng_seed,
+                    timeout_ms: self.cfg.timeout_ms,
+                    timed_out: stats.timed_out,
+                    bucket_hits_sig: stats.bucket_hits_sig.clone(),
+                    micro_op_count: stats.micro_op_count,
+                    backend_error: stats.backend_error.clone(),
+                    bucket_hits: stats.bucket_hits.clone(),
+                    mismatch_regs: Vec::new(),
+                    instructions: words,
+                    metadata: serde_json::json!({
+                        "kind": "exception",
+                        "timed_out": stats.timed_out,
+                    }),
                 };
                 self.bug_writer.append_json_line(&rec).map_err(|e| Error::unknown(e))?;
             }
@@ -414,6 +457,10 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
         let backend_regs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             backend.prove_and_read_final_regs(&words)
         }));
+        let panic_backend_error = match backend_regs.as_ref() {
+            Err(p) => Some(panic_payload_to_string(p.as_ref())),
+            _ => None,
+        };
         let final_regs = match backend_regs {
             Ok(Ok(r)) => Some(r),
             Ok(Err(_)) => None,
@@ -423,11 +470,16 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
             final_regs.as_ref().map(|r| mismatch_regs(&oracle_regs, r)).unwrap_or_default();
 
         let eval = backend.collect_eval();
+        let backend_error = eval.backend_error.clone().or(panic_backend_error);
         let bucket_sigs = sorted_signatures_from_hits(&eval.bucket_hits);
         let sig = canonical_bucket_sig(&bucket_sigs);
         let bucket_hit_count = eval.bucket_hits.len();
 
-        let timed_out = start.elapsed() > timeout;
+        let backend_timed_out = backend_error
+            .as_deref()
+            .map(|e| e.contains("timed out"))
+            .unwrap_or(false);
+        let timed_out = start.elapsed() > timeout || backend_timed_out;
 
         let mut last = LAST_RUN.lock().unwrap();
         *last = RunStats {
@@ -436,6 +488,7 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
             micro_op_count: eval.micro_op_count,
             bucket_hits: eval.bucket_hits.clone(),
             mismatch_regs: mismatches.clone(),
+            backend_error,
             timed_out,
         };
 
@@ -445,10 +498,9 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
         ExitKind::Ok
     };
 
-    // libAFL's in-process executor has a *hard* timeout enforced by SIGALRM (default 5s) that
-    // calls `libc::_exit(55)` on macOS. OpenVM proving regularly exceeds seconds, so we must
-    // raise this hard timeout to keep the fuzzer alive. The loop's `timeout_ms` remains a
-    // *soft* metric (recorded as `timed_out`) and does not abort execution.
+    // IMPORTANT: libAFL hard timeout on macOS may terminate the whole process (Error 55).
+    // Keep hard timeout large as a safety net only; use cfg.timeout_ms as the soft timeout
+    // signal recorded in corpus/bug metadata so fuzzing can continue across slow inputs.
     let inproc_hard_timeout = Duration::from_secs(10 * 60);
 
     let observers = tuple_list!();

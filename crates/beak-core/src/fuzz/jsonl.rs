@@ -30,6 +30,7 @@ pub struct BugRecord {
     pub bucket_hits_sig: String,
     /// Backend-defined trace size metric (see `BackendEval::micro_op_count`).
     pub micro_op_count: usize,
+    pub backend_error: Option<String>,
     pub bucket_hits: Vec<BucketHit>,
     pub mismatch_regs: Vec<(u32, u32, u32)>, // (idx, oracle, backend)
     pub instructions: Vec<u32>,

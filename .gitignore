@@ -23,3 +23,6 @@ target
 # IDEs
 .vscode/
 .cursor/
+
+# Fuzzing seed
+storage/fuzzing_seeds/loop1-*.jsonl

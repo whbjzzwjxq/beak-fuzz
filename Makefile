@@ -20,8 +20,8 @@ PYTHON ?= python3
 
 # Loop1 (beak-fuzz) default parameters
 SEEDS_JSONL ?= storage/fuzzing_seeds/initial.jsonl
-TIMEOUT_MS ?= 2000
-INITIAL_LIMIT ?= 1
+TIMEOUT_MS ?= 10000
+INITIAL_LIMIT ?= 0
 MAX_INSTRUCTIONS ?= 32
 ITERS ?= 500
 FAST_TEST ?= 1
