@@ -140,6 +140,21 @@ fn panic_payload_to_string(p: &(dyn std::any::Any + Send)) -> String {
     "panic: non-string payload".to_string()
 }
 
+/// Run a closure with a temporary non-fatal panic hook and catch unwind.
+///
+/// This prevents libAFL's in-process panic hook from aborting the whole process
+/// for panics that we intentionally treat as per-input "exception" outcomes.
+fn catch_unwind_nonfatal<T, F>(f: F) -> std::thread::Result<T>
+where
+    F: FnOnce() -> T + std::panic::UnwindSafe,
+{
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_panic_info| {}));
+    let res = std::panic::catch_unwind(f);
+    std::panic::set_hook(prev_hook);
+    res
+}
+
 /// Canonicalize bucket hit signatures into a single stable signature string.
 ///
 /// Contract:
@@ -461,7 +476,7 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
 
         backend.prepare_for_run(cfg.rng_seed);
 
-        let oracle_regs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let oracle_regs = catch_unwind_nonfatal(std::panic::AssertUnwindSafe(|| {
             RISCVOracle::execute_with_config(&words, cfg.oracle)
         }));
         let panic_oracle_error = match oracle_regs.as_ref() {
