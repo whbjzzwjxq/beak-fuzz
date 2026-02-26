@@ -84,6 +84,7 @@ pub struct GlobalState {
     pub injection_enabled: bool,
     pub injection_kind: String,
     pub injection_step: u64,
+    pub witness_step_idx: u64,
     pub assertions_enabled: bool,
 
     pub rng: StdRng,
@@ -93,6 +94,12 @@ pub struct GlobalState {
 
 impl GlobalState {
     fn new() -> Self {
+        let injection_kind = std::env::var("BEAK_OPENVM_WITNESS_INJECT_KIND").unwrap_or_default();
+        let injection_step = std::env::var("BEAK_OPENVM_WITNESS_INJECT_STEP")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
         // Default state so that proc-macro (e.g. derive) can call fuzzer_assert! without
         // panicking when GLOBAL_STATE is first accessed.
         Self {
@@ -104,9 +111,10 @@ impl GlobalState {
             row_count: 0,
             last_row_id: None,
             emitted_micro_ops: Vec::new(),
-            injection_enabled: false,
-            injection_kind: String::new(),
-            injection_step: 0,
+            injection_enabled: !injection_kind.is_empty(),
+            injection_kind,
+            injection_step,
+            witness_step_idx: 0,
             assertions_enabled: false,
             rng: StdRng::seed_from_u64(0),
             seed: 0,
@@ -128,6 +136,7 @@ impl GlobalState {
         self.chip_row_op_idx_in_step = 0;
         self.row_count = 0;
         self.last_row_id = None;
+        self.witness_step_idx = 0;
         // Canonicalize Value trees before handing them out.
         //
         // We observed a serde edge case where a small subset of in-memory `Value`s may fail
@@ -141,6 +150,33 @@ impl GlobalState {
                     .unwrap_or(v)
             })
             .collect()
+    }
+
+    pub fn next_witness_step(&mut self) -> u64 {
+        let cur = self.witness_step_idx;
+        self.witness_step_idx = self.witness_step_idx.saturating_add(1);
+        cur
+    }
+
+    pub fn should_inject_witness(&self, kind: &str, step: u64) -> bool {
+        self.injection_enabled && self.injection_kind == kind && self.injection_step == step
+    }
+
+    pub fn configure_witness_injection(&mut self, kind: Option<&str>, step: u64) {
+        match kind {
+            Some(k) if !k.is_empty() => {
+                self.injection_enabled = true;
+                self.injection_kind = k.to_string();
+                self.injection_step = step;
+            }
+            _ => {
+                self.injection_enabled = false;
+                self.injection_kind.clear();
+                self.injection_step = 0;
+            }
+        }
+        // Reset witness-local step so each run uses deterministic step numbering.
+        self.witness_step_idx = 0;
     }
 
     fn rs2_source_json(rs2: i32, is_rs2_imm: bool) -> Value {
@@ -824,6 +860,21 @@ pub fn emit_instruction(
 ) {
     let mut state = GLOBAL_STATE.lock().unwrap();
     state.emit_instruction(pc, timestamp, next_pc, next_timestamp, opcode, operands);
+}
+
+pub fn next_witness_step() -> u64 {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.next_witness_step()
+}
+
+pub fn should_inject_witness(kind: &str, step: u64) -> bool {
+    let state = GLOBAL_STATE.lock().unwrap();
+    state.should_inject_witness(kind, step)
+}
+
+pub fn configure_witness_injection(kind: Option<&str>, step: u64) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.configure_witness_injection(kind, step);
 }
 
 pub fn take_json_logs() -> Vec<serde_json::Value> {

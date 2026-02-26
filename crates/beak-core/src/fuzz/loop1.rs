@@ -9,7 +9,6 @@ use libafl::prelude::*;
 use libafl_bolts::rands::StdRand;
 use libafl_bolts::tuples::tuple_list;
 use libafl_bolts::Named;
-
 use crate::fuzz::jsonl::{BugRecord, CorpusRecord, JsonlWriter};
 use crate::fuzz::seed::FuzzingSeed;
 use crate::rv32im::instruction::RV32IMInstruction;
@@ -77,6 +76,12 @@ pub trait LoopBackend {
     /// Collect trace-derived feedback (bucket ids, hit count, trace stats). This is allowed to be
     /// best-effort; failures should be reflected in `backend_error`.
     fn collect_eval(&mut self) -> BackendEval;
+
+    /// Whether this backend has a direct witness-injection mapping for a bucket id.
+    /// Used by direct bucket->injection mode.
+    fn bucket_has_direct_injection(&self, _bucket_id: &str) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Default)]
