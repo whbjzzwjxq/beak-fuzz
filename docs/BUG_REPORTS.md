@@ -1,150 +1,52 @@
-# Bug Reports
+# OpenVM Follow-up TODOs
 
-## [OpenVM d7eab708] Code-as-data read mismatch (L582)
+## OpenVM 336 - o3 (Invalid-Row Interaction) Assessment
 
-- Source: `storage/fuzzing_seeds/loop1-openvm-d7eab708-seed2026-1772006932-iter10000-bugs.jsonl` line `L582`
-- `rng_seed`: `2026`
-- `metadata.kind`: `mismatch`
+Current conclusion: this case should be treated as **pending semantic validation**, not as an automatically confirmed bug from injection alone.
 
-### Repro instructions (u32 words)
+Reasoning:
+- The injected behavior can create an interaction on a row where `is_valid = 0` (an "invalid" or padding-style row).
+- However, this signal by itself is not sufficient to prove a concrete vulnerability.
+- To classify it as a real bug, we need a dedicated checker that explicitly enforces and verifies an invariant such as:
+  - **No memory/execution interaction is allowed when `is_valid = 0`.**
 
-```text
-[7573603,8855,792887955,7577635,8561539,1282083,7573603,4429571,7816499]
-```
+Implication:
+- Without this dedicated detection logic, injection outcomes here are better interpreted as a **suspicious weak signal** rather than a finalized vulnerability report.
 
-Hex:
+## OpenVM 336 - o2 (Timestamp Wraparound) Assessment
 
-```text
-00739063 00002297 2f428293 0073a023 0082a383 00139023 00739063 00439703 00774533
-```
+Current conclusion: this case is **not directly reproducible under the current local injection model**.
 
-Decoded:
+Issues encountered during evaluation:
+- Timestamp values are tightly coupled across runtime memory state, adapter/runtime execution state, and boundary chips.
+- Initial/boundary timestamp behavior is anchored by memory-side logic (not a single free witness field in one place).
+- Per-step timestamp progression is constrained by execution/memory consistency (delta is effectively structured, not freely chosen at one row).
+- As a result, single-point witness injection (e.g., only changing a start timestamp) usually breaks consistency before it can demonstrate the intended wraparound vulnerability signal.
 
-```text
-bne x7, x7, 0
-auipc x5, 0x2
-addi x5, x5, 756
-sw x7, 0(x7)
-lw x7, 8(x5)
-sh x1, 0(x7)
-bne x7, x7, 0
-lh x14, 4(x7)
-xor x10, x14, x7
-```
+Implication:
+- In the current framework, o2 should be tracked as a **latent corner-case risk** rather than a reliably reproducible injected bug.
+- A stronger, chain-consistent multi-location instrumentation strategy would be required for meaningful confirmation.
 
-### Observed mismatch
+## OpenVM 336 - o19 (Opcode Offset / ISA Routing) Assessment
 
-From `mismatch_regs`:
+Current conclusion: this case is **not well-suited to witness-only injection-based confirmation**.
 
-- `x10`: oracle=`8855` (`0x00002297`), openvm=`0`
-- `x14`: oracle=`8855` (`0x00002297`), openvm=`0`
+Issues encountered during evaluation:
+- The failure mode is primarily an opcode-domain/routing correctness issue (chip/offset semantics), not a local arithmetic witness inconsistency.
+- The bug sits at instruction decoding/dispatch semantics, where proving behavior is controlled by structural opcode mapping.
+- Local witness mutation can produce noisy exceptions or mismatches, but those outcomes do not cleanly demonstrate the specific offset/routing root cause.
 
-### Why this looks important
+Implication:
+- o19 is better validated through directed instruction-level differential tests and opcode-routing assertions, rather than Loop2-style witness mutation alone.
 
-`0x00002297` is the instruction word from `auipc x5, 0x2`. In this sample, oracle appears to allow reading code bytes as data (code/data aliasing visibility), while OpenVM returns zero for that read path. This suggests a semantic mismatch in memory model behavior (code-as-data read visibility), not a pure ALU arithmetic error.
+## OpenVM f038 - o25 (Volatile Boundary Address Range) Activation Note
 
-### Related trace/bucket hints
+Current conclusion: this case is **reproducible in Loop2 injection mode only when volatile memory path is active**.
 
-Relevant hits on this sample include:
+Key prerequisite:
+- If VM runs with continuations enabled, memory goes through persistent/merkle path, and `VolatileBoundaryChip` injection site is not executed.
+- To trigger `openvm.audit_o25.volatile_addr_range`, run with volatile memory mode (for current harness this can be forced via `BEAK_OPENVM_FORCE_VOLATILE=1`).
 
-- `openvm.auipc.seen`
-- `openvm.mem.access_seen`
-- `openvm.mem.addr_space.is_other`
-- `openvm.mem.effective_ptr_zero`
-- `openvm.mem.alias.rs1_eq_rd_rs2.store`
-- `openvm.branch.imm.0` (`is_taken=false`)
-
-These are consistent with the above execution path and memory-access-driven divergence.
-
-## [OpenVM d7eab708] Opcode conversion failure: LessThanOpcode(225)
-
-- Error string: `Failed to convert usize 225 to opcode LessThanOpcode`
-- Status: observed, repro program not yet pinned
-
-### Initial interpretation
-
-The VM/transpiler/backend attempted to decode an opcode value (`225`) as `LessThanOpcode`, but that value is outside the valid enum range for that opcode set. This indicates an opcode-domain mismatch or decode-table inconsistency (e.g., wrong chip/domain dispatch, stale opcode mapping, or malformed instruction stream reaching the less-than decoder).
-
-### Follow-up needed
-
-- Capture one minimal instruction sequence that deterministically triggers this exact error.
-- Record whether the failure happens during transpile, trace build, or backend execution.
-- Cross-check `LessThanOpcode` valid discriminants against the produced opcode value `225`.
-
-## [OpenVM d7eab708] Invalid LoadStoreOp at pc=44 (to be confirmed)
-
-- Source: `storage/fuzzing_seeds/loop1-openvm-d7eab708-seed2026-1772006932-iter10000-bugs.jsonl` line `L642`
-- `rng_seed`: `2026`
-- `metadata.kind`: `exception`
-- Error string: `execute_metered failed: Fail { pc: 44, msg: "Invalid LoadStoreOp" }`
-- Status: observed, root cause not yet confirmed
-
-### Repro instructions (u32 words)
-
-```text
-[8389395,1427,34359,4294313491,12945203,33719,4294149011,8855,1090683539,4294959287,2863693971,1282083,10655491,14913571,10654339,4294960055,2863891347,7573603,8855,1044546195,7577635,8561539,1282083,7573603,10721027,7816499]
-```
-
-### Snapshot around failing PC
-
-At `pc=44`, the decoded instruction is:
-
-```text
-sh x1, 0(x7)
-```
-
-### Current hypothesis (needs confirmation)
-
-- This may be an invalid memory operation due to address legality constraints in OpenVM's load/store path.
-- Two likely triggers are:
-  - halfword store to an unaligned address, or
-  - store crossing an internal memory/region boundary.
-- Need to minimize this sample to isolate which condition causes `Invalid LoadStoreOp`.
-
-## [OpenVM d7eab708] DivRem trace fill panic via ALU adapter width mismatch (to be confirmed)
-
-- Source: `storage/fuzzing_seeds/loop1-openvm-d7eab708-seed2026-1772006932-iter10000-bugs.jsonl` line `L707`
-- `rng_seed`: `2026`
-- `metadata.kind`: `exception`
-- Prior worker error string: `worker panic in run_backend_once: index out of bounds: the len is 0 but the index is 0`
-- Status: observed with stronger repro detail from `beak-trace` (single-run backend path)
-
-### Repro instructions (u32 words)
-
-```text
-[13632275,1427,4293920275,12945203,4293919635,46516019,4293919635,7816499]
-```
-
-Hex:
-
-```text
-00d00313 00000593 fff00613 00c58733 fff00393 02c5c733 fff00393 00774533
-```
-
-### Observed panic (single-run trace path)
-
-When executed via `beak-trace` (which now calls `run_backend_once` directly), this sample panics with:
-
-```text
-.../openvm-src/extensions/rv32im/circuit/src/adapters/alu.rs:43:10
-assertion `left == right` failed
-  left: 18
- right: 19
-```
-
-### Stack location of failure
-
-Top relevant frames:
-
-- `openvm_rv32im_circuit::adapters::alu` (`alu.rs:43`)
-- `DivRemFiller::fill_trace_row` (`divrem/core.rs`)
-- `TraceFiller::fill_trace`
-- `run_backend_once` (`src/lib/backend.rs`)
-
-### Current hypothesis (needs confirmation)
-
-- The assertion is likely generated by `#[derive(AlignedBorrow)]` for `Rv32BaseAluAdapterCols`, i.e. a row-slice width check equivalent to `slice_len == Rv32BaseAluAdapterCols::width()`.
-- This run indicates a width mismatch (`18` vs `19`) while filling DivRem trace rows through the ALU adapter path.
-- Need a minimized repro to determine whether the mismatch comes from:
-  - incorrect row layout for the selected chip/filler, or
-  - malformed adapter dispatch/state for this instruction pattern.
+Practical implication:
+- Treat this as a workflow TODO/precondition item, not a standalone bug report.
+- Future harness cleanup should expose this as an explicit CLI option instead of environment-variable-only control.

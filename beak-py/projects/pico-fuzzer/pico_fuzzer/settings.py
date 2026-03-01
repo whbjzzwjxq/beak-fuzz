@@ -1,0 +1,23 @@
+PICO_BENCHMARK_45E74_ALIAS = "bmk-45e74"
+PICO_BASELINE_ARGUZZ_ALIAS = "bsl-arguzz"
+
+PICO_BENCHMARK_45E74_COMMIT = "45e74ccd62758c6d67239913956e749adaba261c"
+PICO_BASELINE_ARGUZZ_COMMIT = "dd5b7d1f4e164d289d110f1688509a22af6b241c"
+
+PICO_AVAILABLE_COMMITS_OR_BRANCHES = [
+    PICO_BENCHMARK_45E74_ALIAS,
+    PICO_BASELINE_ARGUZZ_ALIAS,
+    PICO_BENCHMARK_45E74_COMMIT,
+    PICO_BASELINE_ARGUZZ_COMMIT,
+    "main",
+]
+
+PICO_ZKVM_GIT_REPOSITORY = "https://github.com/brevis-network/pico.git"
+
+
+def resolve_pico_commit(commit_or_branch: str) -> str:
+    if commit_or_branch == PICO_BENCHMARK_45E74_ALIAS:
+        return PICO_BENCHMARK_45E74_COMMIT
+    if commit_or_branch == PICO_BASELINE_ARGUZZ_ALIAS:
+        return PICO_BASELINE_ARGUZZ_COMMIT
+    return commit_or_branch

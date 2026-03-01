@@ -101,3 +101,47 @@ Notes:
   - `loop1-...-corpus.jsonl`
   - `loop1-...-bugs.jsonl`
 
+## 5) Pico Audit Workflow (45e74 commit)
+
+Pico audit commit from CSV:
+
+- `45e74ccd62758c6d67239913956e749adaba261c`
+
+This workflow is managed from `beak/`, with project-local binaries under:
+
+- `projects/pico-45e74ccd62758c6d67239913956e749adaba261c/`
+
+Install snapshot:
+
+```bash
+make pico-install PICO_COMMIT=45e74ccd62758c6d67239913956e749adaba261c
+```
+
+Pico source snapshot path (same style as OpenVM under `beak-py/out`):
+
+- `beak-py/out/pico-45e74ccd62758c6d67239913956e749adaba261c/pico-src`
+
+Build project binaries:
+
+```bash
+make pico-build PICO_COMMIT=45e74ccd62758c6d67239913956e749adaba261c
+```
+
+Run full workflow (single entry, OpenVM-style):
+
+```bash
+make pico-fuzz PICO_COMMIT=45e74ccd62758c6d67239913956e749adaba261c PICO_ITERS=1000
+```
+
+Run with explicit loop2 corpus:
+
+```bash
+make pico-fuzz \
+  PICO_COMMIT=45e74ccd62758c6d67239913956e749adaba261c \
+  PICO_ITERS=1000 \
+  PICO_CHAIN_DIRECT_INJECTION=1 \
+  PICO_LOOP2_INPUT=path/to/corpus.jsonl
+```
+
+Note: Pico currently uses an OpenVM-compatible Rust CLI surface for loop1/loop2 orchestration, but its
+backend replay/injection path is still partial (not yet equivalent to OpenVM backend completeness).

@@ -1,0 +1,11 @@
+[package]
+name = "pico-real-backend"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rrs_lib = { package = "rrs-succinct", version = "0.1.0" }
+pico-vm = { path = "../../../beak-py/out/pico-45e74ccd62758c6d67239913956e749adaba261c/pico-src/vm" }

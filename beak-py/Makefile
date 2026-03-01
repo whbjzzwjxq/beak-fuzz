@@ -45,7 +45,7 @@ install-risc0: $(VIRTUALENV)
 
 install-pico: $(VIRTUALENV)
 	uv sync --package pico-fuzzer
-	$(UV_RUN) pico-fuzzer install --zkvm-src ./pico-src --commit-or-branch dd5b7d1f4e164d289d110f1688509a22af6b241c
+	$(UV_RUN) pico-fuzzer install --commit-or-branch dd5b7d1f4e164d289d110f1688509a22af6b241c
 
 install-jolt: $(VIRTUALENV)
 	uv sync --package jolt-fuzzer

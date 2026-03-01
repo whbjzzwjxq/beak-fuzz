@@ -15,11 +15,21 @@ UV_CACHE_DIR=/tmp/uv-cache make openvm-install COMMIT=336f1a475e5aa3513c4c5a2663
 ## 2) Build
 
 ```bash
-cd projects/openvm-336f1a475e5aa3513c4c5a266399f4128c119bba
+cd path/to/beak/projects/openvm-336f1a475e5aa3513c4c5a266399f4128c119bba
 cargo build --release --bin beak-trace --bin beak-fuzz
 ```
 
-## 3) Coverage status for commit 336f
+## 3) Loop1 + targeted injection (single run)
+
+Use this command to run loop1 with chained direct-injection replay.  
+`--timeout-ms 100000` is intentionally high to reduce false negatives from slow
+cases.
+
+```bash
+cd path/to/beak/projects/openvm-336f1a475e5aa3513c4c5a266399f4128c119bba && cargo run --release -q --bin beak-fuzz -- --chain-direct-injection --iters 1000 --timeout-ms 100000 --oracle-precheck-max-steps 0
+```
+
+## 4) Coverage status for commit 336f
 
 This commit has 8 relevant `o..` targets:
 
@@ -34,7 +44,7 @@ Current bucket->injection pipeline supports and was validated for:
 
 So the answer to "all 336 `o..` targets?" is: **not yet**.
 
-## 4) Repro commands (direct bucket->injection)
+## 5) Repro commands (direct bucket->injection)
 
 All commands run from `projects/openvm-336f1a475e5aa3513c4c5a266399f4128c119bba`.
 
@@ -90,10 +100,10 @@ Expected log contains:
 
 - `[beak-witness-inject] kind=openvm.audit_o15.divrem_special_case_on_invalid ...`
 
-## 5) Inspect outputs
+## 6) Inspect outputs
 
 ```bash
-ls -lt ../../storage/fuzzing_seeds/loop2-direct-openvm-336f1a47-*-bugs.jsonl | head
+ls -lt path/to/beak/storage/fuzzing_seeds/loop2-direct-openvm-336f1a47-*-bugs.jsonl | head
 ```
 
 For injected phase entries, check:

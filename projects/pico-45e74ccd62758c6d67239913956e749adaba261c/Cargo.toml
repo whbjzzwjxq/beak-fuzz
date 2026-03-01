@@ -1,0 +1,24 @@
+[package]
+name = "beak-pico-45e74ccd"
+version = "0.1.0"
+edition = "2021"
+description = "Pico-specific beak binaries (commit 45e74ccd)"
+publish = false
+
+[lib]
+path = "src/lib/mod.rs"
+
+[[bin]]
+name = "beak-fuzz"
+path = "src/bin/fuzz.rs"
+
+[[bin]]
+name = "beak-trace"
+path = "src/bin/trace.rs"
+
+[dependencies]
+beak-core = { path = "../../crates/beak-core" }
+clap = "4.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+strum = { version = "0.26", features = ["derive"] }

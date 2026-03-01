@@ -1,0 +1,34 @@
+[package]
+name = "beak-openvm-f038f61d"
+version = "0.1.0"
+edition = "2021"
+description = "OpenVM-specific beak binaries (commit f038f61d)"
+publish = false
+
+[lib]
+path = "src/lib/mod.rs"
+
+[[bin]]
+name = "beak-trace"
+path = "src/bin/trace.rs"
+
+[[bin]]
+name = "beak-fuzz"
+path = "src/bin/fuzz.rs"
+
+[dependencies]
+beak-core = { path = "../../crates/beak-core" }
+clap = "4.5"
+serde_json = "1"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2"
+strum = { version = "0.27", features = ["derive"] }
+p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "88d7f05" }
+
+# OpenVM path dependencies (scoped to one specific commit)
+fuzzer_utils = { path = "../../beak-py/out/openvm-f038f61d21db3aecd3029e1a23ba1ba0bb314800/openvm-src/crates/fuzzer_utils" }
+openvm-sdk = { path = "../../beak-py/out/openvm-f038f61d21db3aecd3029e1a23ba1ba0bb314800/openvm-src/crates/sdk" }
+openvm-circuit = { path = "../../beak-py/out/openvm-f038f61d21db3aecd3029e1a23ba1ba0bb314800/openvm-src/crates/vm" }
+openvm-transpiler = { path = "../../beak-py/out/openvm-f038f61d21db3aecd3029e1a23ba1ba0bb314800/openvm-src/crates/toolchain/transpiler" }
+openvm-rv32im-transpiler = { path = "../../beak-py/out/openvm-f038f61d21db3aecd3029e1a23ba1ba0bb314800/openvm-src/extensions/rv32im/transpiler" }
+openvm-instructions = { path = "../../beak-py/out/openvm-f038f61d21db3aecd3029e1a23ba1ba0bb314800/openvm-src/crates/toolchain/instructions" }

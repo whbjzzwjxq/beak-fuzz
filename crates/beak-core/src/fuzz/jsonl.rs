@@ -38,6 +38,23 @@ pub struct BugRecord {
     pub metadata: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RunRecord {
+    pub zkvm_commit: String,
+    pub rng_seed: u64,
+    pub timeout_ms: u64,
+    /// Monotonic per-process evaluation id in this run.
+    pub eval_id: u64,
+    pub timed_out: bool,
+    pub bucket_hits_sig: String,
+    pub micro_op_count: usize,
+    pub backend_error: Option<String>,
+    pub oracle_error: Option<String>,
+    pub mismatch_regs: Vec<(u32, u32, u32)>, // (idx, oracle, backend)
+    pub instructions: Vec<u32>,
+    pub metadata: serde_json::Value,
+}
+
 #[derive(Clone)]
 pub struct JsonlWriter {
     // LineWriter flushes on newline, so corpus/bugs entries appear even for long runs.
@@ -69,4 +86,3 @@ impl JsonlWriter {
         Ok(())
     }
 }
-

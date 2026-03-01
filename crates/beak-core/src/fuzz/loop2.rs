@@ -252,6 +252,7 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
     }
 
     let mut bug_count = 0usize;
+    let mut resolved_direct_buckets: HashSet<String> = HashSet::new();
     let take_n = if cfg.initial_limit == 0 {
         seeds.len()
     } else {
@@ -263,15 +264,41 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
             continue;
         }
 
+        backend.clear_direct_injection();
         let baseline_probe = run_single_eval(&cfg, &mut backend, &words);
-        let has_direct_injection_target = baseline_probe
+        let target_buckets: Vec<String> = baseline_probe
             .bucket_hits
             .iter()
-            .any(|h| backend.bucket_has_direct_injection(&h.bucket_id));
-        let mut phases = vec![("baseline", false, baseline_probe)];
+            .filter(|h| backend.bucket_has_direct_injection(&h.bucket_id))
+            .filter(|h| !resolved_direct_buckets.contains(&h.bucket_id))
+            .map(|h| h.bucket_id.clone())
+            .collect();
+        let has_direct_injection_target = !target_buckets.is_empty();
+        let mut phases = vec![("baseline", false, baseline_probe.clone())];
         if has_direct_injection_target {
-            phases.push(("injected", true, run_single_eval(&cfg, &mut backend, &words)));
+            let filtered_hits: Vec<BucketHit> = phases[0]
+                .2
+                .bucket_hits
+                .iter()
+                .filter(|h| target_buckets.iter().any(|b| b == &h.bucket_id))
+                .cloned()
+                .collect();
+            if backend.arm_direct_injection_from_hits(&filtered_hits).is_some() {
+                let injected = run_single_eval(&cfg, &mut backend, &words);
+                let injected_found_bug = !injected.mismatch_regs.is_empty()
+                    || injected.backend_error.is_some()
+                    || injected.oracle_error.is_some()
+                    || injected.timed_out
+                    || (injected.backend_error.is_none() && injected.oracle_error.is_none());
+                if injected_found_bug {
+                    for bucket_id in &target_buckets {
+                        resolved_direct_buckets.insert(bucket_id.clone());
+                    }
+                }
+                phases.push(("injected", true, injected));
+            }
         }
+        backend.clear_direct_injection();
         for (phase_name, is_injected_phase, stats) in phases {
             let mismatch = !stats.mismatch_regs.is_empty();
             let mut metadata = match seed_meta.clone() {
@@ -286,7 +313,6 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
                 "has_direct_injection_target".to_string(),
                 json!(has_direct_injection_target),
             );
-
             let corpus = CorpusRecord {
                 zkvm_commit: cfg.zkvm_commit.clone(),
                 rng_seed: cfg.rng_seed,
@@ -362,5 +388,6 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
     Ok(Loop1Outputs {
         corpus_path,
         bugs_path,
+        runs_path: None,
     })
 }

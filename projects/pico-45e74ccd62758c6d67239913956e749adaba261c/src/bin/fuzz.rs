@@ -1,6 +1,6 @@
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
 
 use clap::{Arg, Command};
 use serde_json::json;
@@ -9,11 +9,9 @@ use beak_core::fuzz::loop1::{run_loop1_threaded, Loop1Config, DEFAULT_RNG_SEED};
 use beak_core::fuzz::loop2::run_direct_bucket_mutate_threaded;
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
-use beak_openvm_336f1a47::backend::{
-    run_backend_once, OpenVmBackend, WorkerRequest, WorkerResponse,
-};
+use beak_pico_45e74ccd::backend::{run_backend_once, PicoBackend, WorkerRequest, WorkerResponse};
 
-const ZKVM_COMMIT: &str = "336f1a475e5aa3513c4c5a266399f4128c119bba";
+const ZKVM_COMMIT: &str = "45e74ccd62758c6d67239913956e749adaba261c";
 const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
 
 fn workspace_root() -> PathBuf {
@@ -69,7 +67,7 @@ fn write_inline_seed_jsonl(root: &Path, words: &[u32]) -> PathBuf {
         .as_secs();
     let dir = root.join("storage/fuzzing_seeds");
     std::fs::create_dir_all(&dir).expect("create storage/fuzzing_seeds");
-    let path = dir.join(format!(".tmp-inline-openvm-336f1a47-{ts}.jsonl"));
+    let path = dir.join(format!(".tmp-inline-pico-45e74ccd-{ts}.jsonl"));
     let line = json!({
         "instructions": words,
         "metadata": {
@@ -84,7 +82,7 @@ fn write_inline_seed_jsonl(root: &Path, words: &[u32]) -> PathBuf {
 
 fn main() {
     let matches = Command::new("beak-fuzz")
-        .about("Loop1: in-process mutational fuzzing (oracle vs OpenVM) with bucket-guided feedback.")
+        .about("Loop1: in-process mutational fuzzing (oracle vs Pico) with bucket-guided feedback.")
         .arg(
             Arg::new("bin")
                 .long("bin")
@@ -93,22 +91,24 @@ fn main() {
                 .action(clap::ArgAction::Append),
         )
         .arg(
+            Arg::new("seeds_jsonl")
+                .long("seeds-jsonl")
+                .default_value("storage/fuzzing_seeds/initial.jsonl")
+                .help(
+                    "Path to the initial seed JSONL (relative to workspace root unless absolute).",
+                ),
+        )
+        .arg(
             Arg::new("timeout_ms")
                 .long("timeout-ms")
                 .default_value("500")
                 .help("Best-effort per-seed wall-time timeout in milliseconds."),
         )
         .arg(
-            Arg::new("iters")
-                .long("iters")
-                .default_value("100")
-                .help("Loop1 iteration count (ignored when --bucket-direct-mutate is set)."),
-        )
-        .arg(
-            Arg::new("oracle_precheck_max_steps")
-                .long("oracle-precheck-max-steps")
-                .default_value("400")
-                .help("Loop1 pre-check step cap; if oracle reaches this bound, skip backend for this input. Set 0 to disable."),
+            Arg::new("initial_limit")
+                .long("initial-limit")
+                .default_value("0")
+                .help("Limit number of initial seeds loaded (0 = no limit)."),
         )
         .arg(
             Arg::new("no_initial_eval")
@@ -117,29 +117,16 @@ fn main() {
                 .help("Skip the initial corpus evaluation pass (useful for smoke tests)."),
         )
         .arg(
-            Arg::new("oracle_memory_model")
-                .long("oracle-memory-model")
-                .default_value("shared-code-data")
-                .help("Oracle memory model: shared-code-data | split-code-data."),
+            Arg::new("max_instructions")
+                .long("max-instructions")
+                .default_value("256")
+                .help("Maximum number of RISC-V instruction words in a seed."),
         )
         .arg(
-            Arg::new("oracle_code_base")
-                .long("oracle-code-base")
-                .default_value("0x0")
-                .help("Oracle code base address for split-code-data mode (u32, hex or decimal)."),
-        )
-        .arg(
-            Arg::new("oracle_data_size_bytes")
-                .long("oracle-data-size-bytes")
-                .default_value("65536")
-                .help("Oracle zeroed data RAM bytes for split-code-data mode."),
-        )
-        .arg(
-            Arg::new("worker_loop")
-                .long("worker-loop")
-                .hide(true)
-                .action(clap::ArgAction::SetTrue)
-                .help("Run persistent backend worker loop from stdin JSONL."),
+            Arg::new("iters")
+                .long("iters")
+                .default_value("100")
+                .help("Number of fuzz iterations (in addition to initial corpus evaluation)."),
         )
         .arg(
             Arg::new("bucket_direct_mutate")
@@ -151,7 +138,38 @@ fn main() {
             Arg::new("chain_direct_injection")
                 .long("chain-direct-injection")
                 .action(clap::ArgAction::SetTrue)
-                .help("Loop1 mode: if a seed hits a direct-injection bucket, rerun the same seed once with witness injection."),
+                .help("Enable loop2 chained direct-injection replay from loop1 baseline hits."),
+        )
+        .arg(
+            Arg::new("oracle_precheck_max_steps")
+                .long("oracle-precheck-max-steps")
+                .default_value("0")
+                .help("If > 0, run a cheap oracle step-bounded precheck and skip likely non-terminating seeds."),
+        )
+        .arg(
+            Arg::new("oracle_memory_model")
+                .long("oracle-memory-model")
+                .default_value("split-code-data")
+                .help("Oracle memory model: shared-code-data | split-code-data."),
+        )
+        .arg(
+            Arg::new("oracle_code_base")
+                .long("oracle-code-base")
+                .default_value("0x1000")
+                .help("Oracle code base address for split-code-data mode (u32, hex or decimal)."),
+        )
+        .arg(
+            Arg::new("oracle_data_size_bytes")
+                .long("oracle-data-size-bytes")
+                .default_value("0")
+                .help("Oracle zeroed data RAM bytes for split-code-data mode."),
+        )
+        .arg(
+            Arg::new("worker_loop")
+                .long("worker-loop")
+                .hide(true)
+                .action(clap::ArgAction::SetTrue)
+                .help("Run persistent backend worker loop from stdin JSONL."),
         )
         .get_matches();
 
@@ -163,33 +181,27 @@ fn main() {
     let root = workspace_root();
     let inline_words = collect_bin_words(&matches);
     let seeds_path = if inline_words.is_empty() {
-        resolve_path(&root, "storage/fuzzing_seeds/initial.jsonl")
+        let seeds_arg = matches.get_one::<String>("seeds_jsonl").unwrap().to_string();
+        resolve_path(&root, &seeds_arg)
     } else {
         write_inline_seed_jsonl(&root, &inline_words)
     };
 
     let timeout_ms: u64 =
         matches.get_one::<String>("timeout_ms").unwrap().parse().expect("timeout-ms");
-    let requested_iters: usize = matches
-        .get_one::<String>("iters")
-        .unwrap()
-        .parse()
-        .expect("iters");
-    let oracle_precheck_max_steps: u32 = matches
+    let requested_initial_limit: usize =
+        matches.get_one::<String>("initial_limit").unwrap().parse().expect("initial-limit");
+    let no_initial_eval = matches.get_flag("no_initial_eval");
+    let requested_max_instructions: usize =
+        matches.get_one::<String>("max_instructions").unwrap().parse().expect("max-instructions");
+    let requested_iters: usize = matches.get_one::<String>("iters").unwrap().parse().expect("iters");
+    let bucket_direct_mutate = matches.get_flag("bucket_direct_mutate");
+    let chain_direct_injection = matches.get_flag("chain_direct_injection");
+    let precheck_oracle_max_steps: u32 = matches
         .get_one::<String>("oracle_precheck_max_steps")
         .unwrap()
         .parse()
         .expect("oracle-precheck-max-steps");
-    let initial_limit: usize = if inline_words.is_empty() { 0 } else { 1 };
-    let no_initial_eval = matches.get_flag("no_initial_eval");
-    let bucket_direct_mutate = matches.get_flag("bucket_direct_mutate");
-    let chain_direct_injection = matches.get_flag("chain_direct_injection");
-    let max_instructions: usize = if inline_words.is_empty() {
-        256
-    } else {
-        inline_words.len().max(1)
-    };
-    let iters: usize = if bucket_direct_mutate { 1 } else { requested_iters };
     let oracle_memory_model = OracleMemoryModel::parse(
         matches.get_one::<String>("oracle_memory_model").unwrap(),
     )
@@ -201,8 +213,20 @@ fn main() {
         "oracle-data-size-bytes",
     );
 
+    let initial_limit: usize = if inline_words.is_empty() {
+        requested_initial_limit
+    } else {
+        1
+    };
+    let max_instructions: usize = if inline_words.is_empty() {
+        requested_max_instructions
+    } else {
+        inline_words.len().max(1)
+    };
+    let iters: usize = if bucket_direct_mutate { 1 } else { requested_iters };
+
     let cfg = Loop1Config {
-        zkvm_tag: "openvm".to_string(),
+        zkvm_tag: "pico".to_string(),
         zkvm_commit: ZKVM_COMMIT.to_string(),
         rng_seed: DEFAULT_RNG_SEED,
         timeout_ms,
@@ -219,14 +243,14 @@ fn main() {
         max_instructions,
         iters,
         chain_direct_injection: !bucket_direct_mutate && chain_direct_injection,
-        precheck_oracle_max_steps: oracle_precheck_max_steps,
+        precheck_oracle_max_steps,
         stack_size_bytes: 256 * 1024 * 1024,
     };
 
     let res = if bucket_direct_mutate {
-        run_direct_bucket_mutate_threaded(cfg, move || OpenVmBackend::new(max_instructions, timeout_ms))
+        run_direct_bucket_mutate_threaded(cfg, move || PicoBackend::new(max_instructions, timeout_ms))
     } else {
-        run_loop1_threaded(cfg, move || OpenVmBackend::new(max_instructions, timeout_ms))
+        run_loop1_threaded(cfg, move || PicoBackend::new(max_instructions, timeout_ms))
     };
     match res {
         Ok(out) => {
@@ -269,6 +293,7 @@ fn run_worker_loop() {
                     run_backend_once(
                         req.request_id,
                         &req.words,
+                        req.timeout_ms,
                         req.iteration,
                         req.inject_kind.as_deref(),
                         req.inject_step,

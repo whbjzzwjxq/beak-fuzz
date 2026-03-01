@@ -9,7 +9,7 @@ use libafl::prelude::*;
 use libafl_bolts::rands::StdRand;
 use libafl_bolts::tuples::tuple_list;
 use libafl_bolts::Named;
-use crate::fuzz::jsonl::{BugRecord, CorpusRecord, JsonlWriter};
+use crate::fuzz::jsonl::{BugRecord, CorpusRecord, JsonlWriter, RunRecord};
 use crate::fuzz::seed::FuzzingSeed;
 use crate::rv32im::instruction::RV32IMInstruction;
 use crate::rv32im::oracle::{OracleConfig, RISCVOracle};
@@ -39,6 +39,10 @@ pub struct Loop1Config {
     pub no_initial_eval: bool,
     pub max_instructions: usize,
     pub iters: usize,
+    pub chain_direct_injection: bool,
+    /// If > 0, run a cheap oracle pre-check and skip backend execution when the input reaches
+    /// this step bound (likely non-terminating path).
+    pub precheck_oracle_max_steps: u32,
 
     pub stack_size_bytes: usize,
 }
@@ -47,6 +51,7 @@ pub struct Loop1Config {
 pub struct Loop1Outputs {
     pub corpus_path: PathBuf,
     pub bugs_path: PathBuf,
+    pub runs_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -82,12 +87,21 @@ pub trait LoopBackend {
     fn bucket_has_direct_injection(&self, _bucket_id: &str) -> bool {
         false
     }
+
+    /// Clear any pending direct witness-injection plan for the next run.
+    fn clear_direct_injection(&mut self) {}
+
+    /// Select and arm a direct witness-injection plan from current bucket hits.
+    /// Returns the selected injection kind if armed.
+    fn arm_direct_injection_from_hits(&mut self, _hits: &[BucketHit]) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 struct RunStats {
+    eval_id: u64,
     bucket_hits_sig: String,
-    bucket_hit_count: usize,
     /// Copied from `BackendEval::micro_op_count` for logging/bug records.
     micro_op_count: usize,
     bucket_hits: Vec<BucketHit>,
@@ -95,9 +109,79 @@ struct RunStats {
     backend_error: Option<String>,
     oracle_error: Option<String>,
     timed_out: bool,
+    has_direct_injection_target: bool,
+    injected_phase: bool,
+    direct_injection_kind: Option<String>,
+    target_buckets: Vec<String>,
+    baseline_bucket_hits_sig: Option<String>,
+    underconstrained_candidate: bool,
+    skip_reason: Option<String>,
 }
 
 static LAST_RUN: LazyLock<Mutex<RunStats>> = LazyLock::new(|| Mutex::new(RunStats::default()));
+
+fn eval_once<B: LoopBackend>(
+    cfg: &Loop1Config,
+    timeout: Duration,
+    backend: &mut B,
+    words: &[u32],
+) -> RunStats {
+    let start = Instant::now();
+    backend.prepare_for_run(cfg.rng_seed);
+
+    let oracle_regs = catch_unwind_nonfatal(std::panic::AssertUnwindSafe(|| {
+        RISCVOracle::execute_with_config(words, cfg.oracle)
+    }));
+    let panic_oracle_error = match oracle_regs.as_ref() {
+        Err(p) => Some(panic_payload_to_string(p.as_ref())),
+        _ => None,
+    };
+    let backend_regs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        backend.prove_and_read_final_regs(words)
+    }));
+    let panic_backend_error = match backend_regs.as_ref() {
+        Err(p) => Some(panic_payload_to_string(p.as_ref())),
+        _ => None,
+    };
+    let final_regs = match backend_regs {
+        Ok(Ok(r)) => Some(r),
+        Ok(Err(_)) => None,
+        Err(_) => None,
+    };
+    let mismatches = match (oracle_regs.as_ref(), final_regs.as_ref()) {
+        (Ok(oracle), Some(regs)) => mismatch_regs(oracle, regs),
+        _ => Vec::new(),
+    };
+
+    let eval = backend.collect_eval();
+    let backend_error = eval.backend_error.clone().or(panic_backend_error);
+    let oracle_error = panic_oracle_error.map(|e| format!("oracle {e}"));
+    let bucket_sigs = sorted_signatures_from_hits(&eval.bucket_hits);
+    let sig = canonical_bucket_sig(&bucket_sigs);
+    let backend_timed_out = backend_error
+        .as_deref()
+        .map(|e| e.contains("timed out"))
+        .unwrap_or(false);
+    let timed_out = start.elapsed() > timeout || backend_timed_out;
+
+    RunStats {
+        eval_id: 0,
+        bucket_hits_sig: sig,
+        micro_op_count: eval.micro_op_count,
+        bucket_hits: eval.bucket_hits,
+        mismatch_regs: mismatches,
+        backend_error,
+        oracle_error,
+        timed_out,
+        has_direct_injection_target: false,
+        injected_phase: false,
+        direct_injection_kind: None,
+        target_buckets: Vec::new(),
+        baseline_bucket_hits_sig: None,
+        underconstrained_candidate: false,
+        skip_reason: None,
+    }
+}
 
 fn now_ts_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs()
@@ -215,18 +299,20 @@ struct BucketNoveltyFeedback {
     seen_bucket_ids: HashSet<String>,
     corpus_writer: JsonlWriter,
     bug_writer: JsonlWriter,
+    run_writer: JsonlWriter,
     cfg: Loop1Config,
     name: std::borrow::Cow<'static, str>,
     written_bug_keys: HashSet<String>,
 }
 
 impl BucketNoveltyFeedback {
-    fn new(corpus_writer: JsonlWriter, bug_writer: JsonlWriter, cfg: Loop1Config) -> Self {
+    fn new(corpus_writer: JsonlWriter, bug_writer: JsonlWriter, run_writer: JsonlWriter, cfg: Loop1Config) -> Self {
         Self {
             seen: HashSet::new(),
             seen_bucket_ids: HashSet::new(),
             corpus_writer,
             bug_writer,
+            run_writer,
             cfg,
             name: "BucketNoveltyFeedback".into(),
             written_bug_keys: HashSet::new(),
@@ -262,48 +348,39 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
             }
         }
 
-        // Always record mismatches as "bugs" (independent of corpus novelty).
-        if !stats.mismatch_regs.is_empty() {
+        let underconstrained_candidate = stats.underconstrained_candidate;
+        let mismatch = !stats.mismatch_regs.is_empty();
+        let has_exception = stats.timed_out || stats.backend_error.is_some() || stats.oracle_error.is_some();
+        let is_bug = mismatch || has_exception || underconstrained_candidate;
+        if is_bug {
             let words = decode_words_from_input(input, 2048);
+            let kind = if has_exception {
+                "exception"
+            } else if mismatch {
+                "mismatch"
+            } else {
+                "underconstrained_candidate"
+            };
+            let backend_err = stats.backend_error.clone().unwrap_or_else(|| "none".to_string());
+            let oracle_err = stats.oracle_error.clone().unwrap_or_else(|| "none".to_string());
             let bug_key = format!(
-                "mismatch|{}|{}",
-                stats.bucket_hits_sig,
-                words.iter().map(|w| format!("{w:08x}")).collect::<Vec<_>>().join(",")
-            );
-            if self.written_bug_keys.insert(bug_key) {
-                let rec = BugRecord {
-                    zkvm_commit: self.cfg.zkvm_commit.clone(),
-                    rng_seed: self.cfg.rng_seed,
-                    timeout_ms: self.cfg.timeout_ms,
-                    timed_out: stats.timed_out,
-                    bucket_hits_sig: stats.bucket_hits_sig.clone(),
-                    micro_op_count: stats.micro_op_count,
-                    backend_error: stats.backend_error.clone(),
-                    oracle_error: stats.oracle_error.clone(),
-                    bucket_hits: stats.bucket_hits.clone(),
-                    mismatch_regs: stats.mismatch_regs.clone(),
-                    instructions: words,
-                    metadata: serde_json::json!({ "kind": "mismatch" }),
-                };
-                self.bug_writer.append_json_line(&rec).map_err(|e| Error::unknown(e))?;
-            }
-        }
-
-        // Record backend exceptions (timeout/panic/backend_error), even without register mismatch.
-        if stats.timed_out || stats.backend_error.is_some() || stats.oracle_error.is_some() {
-            let words = decode_words_from_input(input, 2048);
-            let backend_err =
-                stats.backend_error.clone().unwrap_or_else(|| "none".to_string());
-            let oracle_err =
-                stats.oracle_error.clone().unwrap_or_else(|| "none".to_string());
-            let bug_key = format!(
-                "exception|{}|{}|{}|{}",
+                "{kind}|{}|{}|{}|{}|{}",
                 stats.bucket_hits_sig,
                 backend_err,
                 oracle_err,
+                stats.direct_injection_kind.clone().unwrap_or_else(|| "none".to_string()),
                 words.iter().map(|w| format!("{w:08x}")).collect::<Vec<_>>().join(",")
             );
             if self.written_bug_keys.insert(bug_key) {
+                eprintln!(
+                    "[LOOP1][BUG] eval_id={} kind={} mismatches={} timed_out={} injected={} sig={}",
+                    stats.eval_id,
+                    kind,
+                    stats.mismatch_regs.len(),
+                    stats.timed_out,
+                    stats.injected_phase,
+                    stats.bucket_hits_sig
+                );
                 let rec = BugRecord {
                     zkvm_commit: self.cfg.zkvm_commit.clone(),
                     rng_seed: self.cfg.rng_seed,
@@ -314,11 +391,17 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
                     backend_error: stats.backend_error.clone(),
                     oracle_error: stats.oracle_error.clone(),
                     bucket_hits: stats.bucket_hits.clone(),
-                    mismatch_regs: Vec::new(),
+                    mismatch_regs: if mismatch { stats.mismatch_regs.clone() } else { Vec::new() },
                     instructions: words,
                     metadata: serde_json::json!({
-                        "kind": "exception",
+                        "kind": kind,
                         "timed_out": stats.timed_out,
+                        "injected_phase": stats.injected_phase,
+                        "has_direct_injection_target": stats.has_direct_injection_target,
+                        "direct_injection_kind": stats.direct_injection_kind,
+                        "target_buckets": stats.target_buckets,
+                        "baseline_bucket_hits_sig": stats.baseline_bucket_hits_sig,
+                        "underconstrained_candidate": underconstrained_candidate,
                     }),
                 };
                 self.bug_writer.append_json_line(&rec).map_err(|e| Error::unknown(e))?;
@@ -336,11 +419,39 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
             bandit::update(arm_idx, reward);
         }
 
+        let words = decode_words_from_input(input, 2048);
+        let run_rec = RunRecord {
+            zkvm_commit: self.cfg.zkvm_commit.clone(),
+            rng_seed: self.cfg.rng_seed,
+            timeout_ms: self.cfg.timeout_ms,
+            eval_id: stats.eval_id,
+            timed_out: stats.timed_out,
+            bucket_hits_sig: stats.bucket_hits_sig.clone(),
+            micro_op_count: stats.micro_op_count,
+            backend_error: stats.backend_error.clone(),
+            oracle_error: stats.oracle_error.clone(),
+            mismatch_regs: stats.mismatch_regs.clone(),
+            instructions: words.clone(),
+            metadata: serde_json::json!({
+                "kind": "run",
+                "is_bug": is_bug,
+                "is_interesting": is_new_combo,
+                "new_bucket_id_count": new_bucket_id_count,
+                "skip_reason": stats.skip_reason,
+                "injected_phase": stats.injected_phase,
+                "has_direct_injection_target": stats.has_direct_injection_target,
+                "direct_injection_kind": stats.direct_injection_kind,
+                "target_buckets": stats.target_buckets,
+                "baseline_bucket_hits_sig": stats.baseline_bucket_hits_sig,
+                "underconstrained_candidate": stats.underconstrained_candidate,
+            }),
+        };
+        self.run_writer.append_json_line(&run_rec).map_err(|e| Error::unknown(e))?;
+
         if !is_new_combo {
             return Ok(false);
         }
 
-        let words = decode_words_from_input(input, 2048);
         let rec = CorpusRecord {
             zkvm_commit: self.cfg.zkvm_commit.clone(),
             rng_seed: self.cfg.rng_seed,
@@ -352,6 +463,12 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
             metadata: serde_json::json!({
                 "kind": "interesting",
                 "new_bucket_id_count": new_bucket_id_count,
+                "injected_phase": stats.injected_phase,
+                "has_direct_injection_target": stats.has_direct_injection_target,
+                "direct_injection_kind": stats.direct_injection_kind,
+                "target_buckets": stats.target_buckets,
+                "baseline_bucket_hits_sig": stats.baseline_bucket_hits_sig,
+                "underconstrained_candidate": stats.underconstrained_candidate,
             }),
         };
         self.corpus_writer.append_json_line(&rec).map_err(|e| Error::unknown(e))?;
@@ -427,16 +544,19 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     let prefix = format!("{base_prefix}-iter{}", cfg.iters);
     let corpus_path = cfg.out_dir.join(format!("{prefix}-corpus.jsonl"));
     let bugs_path = cfg.out_dir.join(format!("{prefix}-bugs.jsonl"));
+    let runs_path = cfg.out_dir.join(format!("{prefix}-runs.jsonl"));
 
     let corpus_writer = JsonlWriter::open_append(&corpus_path)?;
     let bug_writer = JsonlWriter::open_append(&bugs_path)?;
+    let run_writer = JsonlWriter::open_append(&runs_path)?;
 
     // --- libAFL setup ---
     let rand = StdRand::with_seed(cfg.rng_seed);
     let corpus = InMemoryCorpus::<BytesInput>::new();
     let solutions = InMemoryCorpus::<BytesInput>::new();
 
-    let mut feedback = BucketNoveltyFeedback::new(corpus_writer.clone(), bug_writer.clone(), cfg.clone());
+    let mut feedback =
+        BucketNoveltyFeedback::new(corpus_writer.clone(), bug_writer.clone(), run_writer.clone(), cfg.clone());
     let mut objective = NeverObjective::new();
     let mut state: LoopState =
         StdState::new(rand, corpus, solutions, &mut feedback, &mut objective)
@@ -465,70 +585,132 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
     let monitor = SimpleMonitor::new(|_s| {});
     let mut mgr = SimpleEventManager::new(monitor);
+    let mut resolved_direct_buckets: HashSet<String> = HashSet::new();
+    let mut eval_id_counter: u64 = 0;
 
     // Executor harness: run backend execution, collect trace/eval, and compare regs.
     let timeout = Duration::from_millis(cfg.timeout_ms);
     let mut harness = |input: &BytesInput| -> ExitKind {
-        let start = Instant::now();
+        eval_id_counter = eval_id_counter.saturating_add(1);
+        let eval_id = eval_id_counter;
         let words = decode_words_from_input(input, cfg.max_instructions);
         if !backend.is_usable_seed(&words)
             || words.iter().any(|w| RV32IMInstruction::from_word(*w).is_err())
         {
             let mut last = LAST_RUN.lock().unwrap();
-            *last = RunStats::default();
+            *last = RunStats {
+                eval_id,
+                skip_reason: Some("invalid_or_unusable_seed".to_string()),
+                ..RunStats::default()
+            };
             return ExitKind::Ok;
         }
+        if cfg.precheck_oracle_max_steps > 0 {
+            let pre = RISCVOracle::execute_with_step_limit(&words, cfg.oracle, cfg.precheck_oracle_max_steps);
+            if pre.hit_step_limit {
+                eprintln!(
+                    "[LOOP1][WARN] skip seed: oracle precheck hit step limit (steps={} limit={} words={})",
+                    pre.steps,
+                    cfg.precheck_oracle_max_steps,
+                    words.len()
+                );
+                let mut last = LAST_RUN.lock().unwrap();
+                *last = RunStats {
+                    eval_id,
+                    skip_reason: Some("oracle_precheck_step_limit".to_string()),
+                    ..RunStats::default()
+                };
+                return ExitKind::Ok;
+            }
+        }
 
-        backend.prepare_for_run(cfg.rng_seed);
+        backend.clear_direct_injection();
+        let baseline = eval_once(&cfg, timeout, &mut backend, &words);
+        let mut final_stats = baseline.clone();
 
-        let oracle_regs = catch_unwind_nonfatal(std::panic::AssertUnwindSafe(|| {
-            RISCVOracle::execute_with_config(&words, cfg.oracle)
-        }));
-        let panic_oracle_error = match oracle_regs.as_ref() {
-            Err(p) => Some(panic_payload_to_string(p.as_ref())),
-            _ => None,
-        };
-        let backend_regs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            backend.prove_and_read_final_regs(&words)
-        }));
-        let panic_backend_error = match backend_regs.as_ref() {
-            Err(p) => Some(panic_payload_to_string(p.as_ref())),
-            _ => None,
-        };
-        let final_regs = match backend_regs {
-            Ok(Ok(r)) => Some(r),
-            Ok(Err(_)) => None,
-            Err(_) => None,
-        };
-        let mismatches = match (oracle_regs.as_ref(), final_regs.as_ref()) {
-            (Ok(oracle), Some(regs)) => mismatch_regs(oracle, regs),
-            _ => Vec::new(),
-        };
+        if cfg.chain_direct_injection {
+            // De-duplicate and deterministically order target buckets so replay order is stable.
+            let mut target_buckets: Vec<String> = baseline
+                .bucket_hits
+                .iter()
+                .filter(|h| backend.bucket_has_direct_injection(&h.bucket_id))
+                .filter(|h| !resolved_direct_buckets.contains(&h.bucket_id))
+                .map(|h| h.bucket_id.clone())
+                .collect();
+            target_buckets.sort();
+            target_buckets.dedup();
 
-        let eval = backend.collect_eval();
-        let backend_error = eval.backend_error.clone().or(panic_backend_error);
-        let oracle_error = panic_oracle_error.map(|e| format!("oracle {e}"));
-        let bucket_sigs = sorted_signatures_from_hits(&eval.bucket_hits);
-        let sig = canonical_bucket_sig(&bucket_sigs);
-        let bucket_hit_count = eval.bucket_hits.len();
+            if !target_buckets.is_empty() {
+                final_stats.has_direct_injection_target = true;
+                final_stats.target_buckets = target_buckets.clone();
 
-        let backend_timed_out = backend_error
-            .as_deref()
-            .map(|e| e.contains("timed out"))
-            .unwrap_or(false);
-        let timed_out = start.elapsed() > timeout || backend_timed_out;
+                let mut best_injected: Option<RunStats> = None;
+                for bucket_id in &target_buckets {
+                    let filtered_hits: Vec<BucketHit> = baseline
+                        .bucket_hits
+                        .iter()
+                        .filter(|h| h.bucket_id == *bucket_id)
+                        .cloned()
+                        .collect();
+                    if filtered_hits.is_empty() {
+                        continue;
+                    }
+
+                    backend.clear_direct_injection();
+                    let Some(inject_kind) = backend.arm_direct_injection_from_hits(&filtered_hits) else {
+                        continue;
+                    };
+
+                    let mut injected = eval_once(&cfg, timeout, &mut backend, &words);
+                    injected.has_direct_injection_target = true;
+                    injected.injected_phase = true;
+                    injected.direct_injection_kind = Some(inject_kind);
+                    injected.target_buckets = vec![bucket_id.clone()];
+                    injected.baseline_bucket_hits_sig = Some(baseline.bucket_hits_sig.clone());
+                    injected.underconstrained_candidate =
+                        baseline.backend_error.is_none()
+                            && baseline.oracle_error.is_none()
+                            && injected.backend_error.is_none()
+                            && injected.oracle_error.is_none();
+
+                    if injected.underconstrained_candidate {
+                        // Mark resolved only for true underconstrained signals.
+                        // mismatch/exception/timeout are intentionally not resolved.
+                        resolved_direct_buckets.insert(bucket_id.clone());
+                    }
+
+                    let rank = |s: &RunStats| -> u8 {
+                        if s.underconstrained_candidate {
+                            5
+                        } else if !s.mismatch_regs.is_empty() {
+                            4
+                        } else if s.backend_error.is_some() || s.oracle_error.is_some() {
+                            3
+                        } else if s.timed_out {
+                            2
+                        } else {
+                            0
+                        }
+                    };
+                    let replace = match best_injected.as_ref() {
+                        None => true,
+                        Some(prev) => rank(&injected) > rank(prev),
+                    };
+                    if replace {
+                        best_injected = Some(injected);
+                    }
+                }
+
+                if let Some(injected) = best_injected {
+                    final_stats = injected;
+                }
+            }
+        }
+        backend.clear_direct_injection();
+        final_stats.eval_id = eval_id;
 
         let mut last = LAST_RUN.lock().unwrap();
-        *last = RunStats {
-            bucket_hits_sig: sig,
-            bucket_hit_count,
-            micro_op_count: eval.micro_op_count,
-            bucket_hits: eval.bucket_hits.clone(),
-            mismatch_regs: mismatches.clone(),
-            backend_error,
-            oracle_error,
-            timed_out,
-        };
+        *last = final_stats;
 
         // We treat timeouts as a *soft* signal (recorded in `RunStats`) and do not propagate
         // `ExitKind::Timeout` to libAFL, as it may short-circuit feedback/corpus logic on some
@@ -557,6 +739,11 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     if !cfg.no_initial_eval {
         let initial_count = state.corpus().count();
         for idx in 0..initial_count {
+            eprintln!(
+                "[LOOP1][initial {}/{}] evaluating seed corpus entry",
+                idx + 1,
+                initial_count
+            );
             let id = CorpusId::from(idx);
             let Ok(tc_cell) = state.corpus().get(id) else { continue };
             let tc = tc_cell.borrow();
@@ -566,14 +753,41 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
         }
     }
 
-    for _ in 0..cfg.iters {
+    for i in 0..cfg.iters {
         fuzzer
             .fuzz_one(&mut stages, &mut executor, &mut state, &mut mgr)
             .map_err(|e| format!("fuzz_one failed: {e}"))?;
+        let s = LAST_RUN.lock().unwrap().clone();
+        let kind = if s.underconstrained_candidate {
+            "underconstrained_candidate"
+        } else if !s.mismatch_regs.is_empty() {
+            "mismatch"
+        } else if s.timed_out || s.backend_error.is_some() || s.oracle_error.is_some() {
+            "exception"
+        } else if s.skip_reason.is_some() {
+            "skip"
+        } else {
+            "ok"
+        };
+        eprintln!(
+            "[LOOP1][iter {}/{}] eval_id={} kind={} mismatches={} timed_out={} sig={}",
+            i + 1,
+            cfg.iters,
+            s.eval_id,
+            kind,
+            s.mismatch_regs.len(),
+            s.timed_out,
+            s.bucket_hits_sig
+        );
     }
 
     corpus_writer.flush()?;
     bug_writer.flush()?;
+    run_writer.flush()?;
 
-    Ok(Loop1Outputs { corpus_path, bugs_path })
+    Ok(Loop1Outputs {
+        corpus_path,
+        bugs_path,
+        runs_path: Some(runs_path),
+    })
 }

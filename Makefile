@@ -1,6 +1,7 @@
 .PHONY: extract-initial-seeds openvm-install openvm-build openvm-run openvm-example-x0 \
 	openvm-fuzz-build openvm-fuzz openvm-fuzz-5min openvm-fuzz-quick \
-	openvm-trace openvm-trace-buckets
+	openvm-trace openvm-trace-buckets \
+	pico-install pico-build pico-run pico-fuzz
 
 # Commit selector (required for OpenVM targets).
 #
@@ -12,6 +13,7 @@
 # COMMIT can be a full SHA or an alias defined in:
 #   beak-py/projects/openvm-fuzzer/openvm_fuzzer/settings.py
 COMMIT ?= bmk-regzero
+PICO_COMMIT ?= 45e74ccd62758c6d67239913956e749adaba261c
 BIN ?= beak-trace
 ARGS ?=
 
@@ -26,6 +28,23 @@ MAX_INSTRUCTIONS ?= 32
 ITERS ?= 500
 FAST_TEST ?= 1
 NO_INITIAL_EVAL ?= 1
+
+# Pico (OpenVM-style project entry)
+PICO_PROJECT_DIR ?= projects/pico-$(PICO_COMMIT)
+PICO_ZKVM_DIR ?= $(abspath beak-py/out/pico-$(PICO_COMMIT)/pico-src)
+PICO_OUT_DIR ?= $(abspath $(PICO_PROJECT_DIR)/out)
+PICO_SEEDS ?= storage/fuzzing_seeds/initial.jsonl
+PICO_ITERS ?= 1000
+PICO_LOOP2_INPUT ?=
+PICO_CHAIN_DIRECT_INJECTION ?= 0
+PICO_ARGS ?=
+
+define _require_pico_commit
+	@if [ -z "$(PICO_COMMIT)" ]; then \
+		echo "error: PICO_COMMIT is required (full SHA, e.g. 45e74ccd...)"; \
+		exit 2; \
+	fi
+endef
 
 define _require_commit
 	@if [ -z "$(COMMIT)" ]; then \
@@ -86,3 +105,28 @@ openvm-fuzz: openvm-fuzz-build
 		--max-instructions "$(MAX_INSTRUCTIONS)" \
 		$(if $(filter 1 true yes,$(NO_INITIAL_EVAL)),--no-initial-eval,) \
 		--iters "$(ITERS)"
+
+pico-install:
+	$(_require_pico_commit)
+	@mkdir -p "$(PICO_PROJECT_DIR)"
+	cd beak-py && UV_CACHE_DIR=$${UV_CACHE_DIR:-/tmp/uv-cache} make install
+	cd beak-py && UV_CACHE_DIR=$${UV_CACHE_DIR:-/tmp/uv-cache} uv run pico-fuzzer install --commit-or-branch "$(PICO_COMMIT)"
+
+pico-build:
+	$(_require_pico_commit)
+	@mkdir -p "$(PICO_PROJECT_DIR)"
+	cd "$(PICO_PROJECT_DIR)" && CARGO_TARGET_DIR="$$PWD/target" cargo build --release --bin beak-trace --bin beak-fuzz
+
+pico-run: pico-build
+	$(_require_pico_commit)
+	@mkdir -p "$(PICO_OUT_DIR)"
+	cd "$(PICO_PROJECT_DIR)" && UV_CACHE_DIR=$${UV_CACHE_DIR:-/tmp/uv-cache} cargo run --release -q --bin beak-fuzz -- \
+		--iters "$(PICO_ITERS)" \
+		--seeds-jsonl "$(PICO_SEEDS)" \
+		$(if $(PICO_LOOP2_INPUT),--chain-direct-injection --input-corpus "$(PICO_LOOP2_INPUT)",) \
+		$(if $(filter 1 true yes,$(PICO_CHAIN_DIRECT_INJECTION)),--chain-direct-injection,) \
+		$(PICO_ARGS)
+
+# OpenVM-like single entry: project-local beak-fuzz workflow
+pico-fuzz: pico-run
+	@echo "Pico full repro finished for $(PICO_COMMIT)"

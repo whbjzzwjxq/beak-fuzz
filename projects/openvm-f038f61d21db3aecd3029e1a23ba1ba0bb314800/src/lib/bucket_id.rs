@@ -8,6 +8,8 @@ pub enum OpenVMBucketId {
     InputHasCsr,
     #[strum(serialize = "openvm.input.has_fence")]
     InputHasFence,
+    #[strum(serialize = "openvm.input.has_loadstore")]
+    InputHasLoadStore,
 
     #[strum(serialize = "openvm.time.start_nonzero")]
     TimeStartNonzero,
@@ -145,4 +147,10 @@ pub enum OpenVMBucketId {
     Loop2TargetBaseAluImmLimbs,
     #[strum(serialize = "openvm.loop2.target.auipc_pc_limbs")]
     Loop2TargetAuipcPcLimbs,
+    #[strum(serialize = "openvm.loop2.target.connector_start_ts")]
+    Loop2TargetConnectorStartTs,
+    #[strum(serialize = "openvm.loop2.target.loadstore_mem_as")]
+    Loop2TargetLoadstoreMemAs,
+    #[strum(serialize = "openvm.loop2.target.volatile_addr_range")]
+    Loop2TargetVolatileAddrRange,
 }

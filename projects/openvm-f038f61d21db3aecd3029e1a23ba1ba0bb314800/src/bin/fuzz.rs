@@ -9,11 +9,11 @@ use beak_core::fuzz::loop1::{run_loop1_threaded, Loop1Config, DEFAULT_RNG_SEED};
 use beak_core::fuzz::loop2::run_direct_bucket_mutate_threaded;
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
-use beak_openvm_336f1a47::backend::{
+use beak_openvm_f038f61d::backend::{
     run_backend_once, OpenVmBackend, WorkerRequest, WorkerResponse,
 };
 
-const ZKVM_COMMIT: &str = "336f1a475e5aa3513c4c5a266399f4128c119bba";
+const ZKVM_COMMIT: &str = "f038f61d21db3aecd3029e1a23ba1ba0bb314800";
 const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
 
 fn workspace_root() -> PathBuf {
@@ -69,7 +69,7 @@ fn write_inline_seed_jsonl(root: &Path, words: &[u32]) -> PathBuf {
         .as_secs();
     let dir = root.join("storage/fuzzing_seeds");
     std::fs::create_dir_all(&dir).expect("create storage/fuzzing_seeds");
-    let path = dir.join(format!(".tmp-inline-openvm-336f1a47-{ts}.jsonl"));
+    let path = dir.join(format!(".tmp-inline-openvm-f038f61d-{ts}.jsonl"));
     let line = json!({
         "instructions": words,
         "metadata": {

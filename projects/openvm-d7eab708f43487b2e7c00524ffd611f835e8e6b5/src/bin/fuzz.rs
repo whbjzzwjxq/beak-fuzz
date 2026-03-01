@@ -151,6 +151,8 @@ fn main() {
         no_initial_eval,
         max_instructions,
         iters,
+        chain_direct_injection: false,
+        precheck_oracle_max_steps: 0,
         stack_size_bytes: 256 * 1024 * 1024,
     };
 
@@ -159,6 +161,9 @@ fn main() {
         Ok(out) => {
             println!("Wrote corpus JSONL: {}", out.corpus_path.display());
             println!("Wrote bugs   JSONL: {}", out.bugs_path.display());
+            if let Some(runs_path) = out.runs_path.as_ref() {
+                println!("Wrote runs   JSONL: {}", runs_path.display());
+            }
         }
         Err(e) => {
             eprintln!("{e}");

@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 members = [
     "beak-py",
     "openvm-fuzzer",
+    "pico-fuzzer",
     "zkvm-fuzzer-utils",
 ]
 
@@ -16,6 +17,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "jinja2" },
     { name = "openvm-fuzzer" },
+    { name = "pico-fuzzer" },
     { name = "zkvm-fuzzer-utils" },
 ]
 
@@ -31,6 +33,7 @@ dev = [
 requires-dist = [
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "openvm-fuzzer", editable = "projects/openvm-fuzzer" },
+    { name = "pico-fuzzer", editable = "projects/pico-fuzzer" },
     { name = "zkvm-fuzzer-utils", editable = "libs/zkvm-fuzzer-utils" },
 ]
 
@@ -284,6 +287,17 @@ sdist = { url = "https://files.pythonhosted.org/packages/4c/b2/bb8e495d5262bfec4
 wheels = [
     { url = "https://files.pythonhosted.org/packages/32/2b/121e912bd60eebd623f873fd090de0e84f322972ab25a7f9044c056804ed/pathspec-1.0.3-py3-none-any.whl", hash = "sha256:e80767021c1cc524aa3fb14bedda9c34406591343cc42797b386ce7b9354fb6c", size = 55021, upload-time = "2026-01-09T15:46:44.652Z" },
 ]
+
+[[package]]
+name = "pico-fuzzer"
+version = "0.0.1"
+source = { editable = "projects/pico-fuzzer" }
+dependencies = [
+    { name = "zkvm-fuzzer-utils" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "zkvm-fuzzer-utils", editable = "libs/zkvm-fuzzer-utils" }]
 
 [[package]]
 name = "platformdirs"

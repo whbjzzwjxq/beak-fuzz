@@ -7,6 +7,7 @@ dependencies = [
     "jinja2>=3.1.6",
     "zkvm-fuzzer-utils",
     "openvm-fuzzer",
+    "pico-fuzzer",
 ]
 
 [dependency-groups]
@@ -23,6 +24,7 @@ workspace = { members = ["libs/*", "projects/*"] }
 [tool.uv.sources]
 zkvm-fuzzer-utils = { workspace = true }
 openvm-fuzzer = { workspace = true }
+pico-fuzzer = { workspace = true }
 
 [tool.black]
 line-length = 100

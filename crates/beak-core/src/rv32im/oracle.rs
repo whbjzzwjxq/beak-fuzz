@@ -4,6 +4,13 @@ use rrs_lib::memories::{MemorySpace, VecMemory};
 
 const MAX_INSTRUCTIONS: u32 = 1000;
 
+#[derive(Debug, Clone, Copy)]
+pub struct OracleExecution {
+    pub regs: [u32; 32],
+    pub steps: u32,
+    pub hit_step_limit: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OracleMemoryModel {
     /// Legacy model: code and data share one region at address 0.
@@ -55,9 +62,20 @@ impl RISCVOracle {
 
     /// Execute with configurable memory model so backends can align oracle semantics.
     pub fn execute_with_config(words: &[u32], cfg: OracleConfig) -> [u32; 32] {
+        Self::execute_with_step_limit(words, cfg, MAX_INSTRUCTIONS).regs
+    }
+
+    /// Execute with configurable memory model and an explicit max-step bound.
+    /// Returns registers plus execution metadata so callers can reject likely-infinite loops
+    /// before invoking expensive backends.
+    pub fn execute_with_step_limit(words: &[u32], cfg: OracleConfig, max_steps: u32) -> OracleExecution {
         let mut regs = [0u32; 32];
         if words.is_empty() {
-            return regs;
+            return OracleExecution {
+                regs,
+                steps: 0,
+                hit_step_limit: false,
+            };
         }
 
         let code_len_bytes = (words.len() * 4) as u32;
@@ -103,7 +121,7 @@ impl RISCVOracle {
         };
 
         let mut steps = 0u32;
-        while steps < MAX_INSTRUCTIONS {
+        while steps < max_steps {
             match executor.step() {
                 Ok(()) => steps += 1,
                 Err(
@@ -120,6 +138,10 @@ impl RISCVOracle {
             regs[i] = hart.registers[i];
         }
         regs[0] = 0; // x0 is always 0
-        regs
+        OracleExecution {
+            regs,
+            steps,
+            hit_step_limit: steps >= max_steps,
+        }
     }
 }

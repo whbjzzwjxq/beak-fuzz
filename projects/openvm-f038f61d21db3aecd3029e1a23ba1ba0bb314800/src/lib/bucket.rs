@@ -316,6 +316,19 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
         if row.kind == OpenVMChipRowKind::Padding {
             saw_padding_kind = true;
         }
+        if base.chip_name.contains("Volatile") {
+            push_hit(
+                &mut hits,
+                &mut seen,
+                OpenVMBucketId::Loop2TargetVolatileAddrRange,
+                details_kv(&[
+                    ("kind", json!(kind)),
+                    ("chip_name", json!(base.chip_name)),
+                    ("step_idx", json!(base.step_idx)),
+                    ("op_idx", json!(base.op_idx)),
+                ]),
+            );
+        }
 
         match &row.payload {
             // ---- ALU family (always-write) ----
@@ -420,19 +433,17 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                         );
                     }
 
-                    // Loop2 target (audit-o5 candidate): gate to immediates that
-                    // actually exercise higher immediate limbs.
-                    if v >= 256 || v <= -256 {
-                        push_hit(
-                            &mut hits,
-                            &mut seen,
-                            OpenVMBucketId::Loop2TargetBaseAluImmLimbs,
-                            details_kv(&[
-                                ("kind", json!(kind)),
-                                ("imm", json!(v)),
-                            ]),
-                        );
-                    }
+                    // Loop2 target (audit-o5 candidate): mutate immediate-limb paths on
+                    // ALU-family rows where rs2 comes from an immediate.
+                    push_hit(
+                        &mut hits,
+                        &mut seen,
+                        OpenVMBucketId::Loop2TargetBaseAluImmLimbs,
+                        details_kv(&[
+                            ("kind", json!(kind)),
+                            ("imm", json!(v)),
+                        ]),
+                    );
                 }
 
                 // Proxy: record base-ALU local opcode id (keeps bucket space bounded by opcode set).
@@ -794,7 +805,6 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                 op: _op,
                 rs1_ptr,
                 rd_rs2_ptr,
-                imm,
                 imm_sign,
                 mem_as,
                 effective_ptr,
@@ -808,6 +818,18 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     &mut seen,
                     OpenVMBucketId::MemAccessSeen,
                     details_kv(&[]),
+                );
+                push_hit(
+                    &mut hits,
+                    &mut seen,
+                    OpenVMBucketId::Loop2TargetLoadstoreMemAs,
+                    details_kv(&[
+                        ("kind", json!(kind)),
+                        ("chip_name", json!(base.chip_name)),
+                        ("step_idx", json!(base.step_idx)),
+                        ("op_idx", json!(base.op_idx)),
+                        ("mem_as", json!(*mem_as)),
+                    ]),
                 );
 
                 let mem_as_bucket = if *mem_as == 0 {
@@ -829,13 +851,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                         &mut hits,
                         &mut seen,
                         OpenVMBucketId::MemImmSignTrue,
-                        details_kv(&[
-                            ("kind", json!(kind)),
-                            ("chip_name", json!(base.chip_name)),
-                            ("step_idx", json!(base.step_idx)),
-                            ("op_idx", json!(base.op_idx)),
-                            ("imm", json!(*imm)),
-                        ]),
+                        details_kv(&[]),
                     );
                 }
 
@@ -901,7 +917,6 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                 op: _op,
                 rs1_ptr,
                 rd_ptr,
-                imm,
                 imm_sign,
                 mem_as,
                 effective_ptr,
@@ -914,18 +929,24 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     OpenVMBucketId::MemAccessSeen,
                     details_kv(&[]),
                 );
+                push_hit(
+                    &mut hits,
+                    &mut seen,
+                    OpenVMBucketId::Loop2TargetLoadstoreMemAs,
+                    details_kv(&[
+                        ("kind", json!(kind)),
+                        ("chip_name", json!(base.chip_name)),
+                        ("step_idx", json!(base.step_idx)),
+                        ("op_idx", json!(base.op_idx)),
+                        ("mem_as", json!(*mem_as)),
+                    ]),
+                );
                 if *imm_sign {
                     push_hit(
                         &mut hits,
                         &mut seen,
                         OpenVMBucketId::MemImmSignTrue,
-                        details_kv(&[
-                            ("kind", json!(kind)),
-                            ("chip_name", json!(base.chip_name)),
-                            ("step_idx", json!(base.step_idx)),
-                            ("op_idx", json!(base.op_idx)),
-                            ("imm", json!(*imm)),
-                        ]),
+                        details_kv(&[]),
                     );
                 }
 
@@ -972,7 +993,29 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
             }
 
             // ---- System chips ----
-            OpenVMChipRowPayload::Connector { is_terminate, exit_code, .. } => {
+            OpenVMChipRowPayload::Connector {
+                from_timestamp,
+                to_timestamp,
+                is_terminate,
+                exit_code,
+                ..
+            } => {
+                if matches!(from_timestamp, Some(0)) {
+                    push_hit(
+                        &mut hits,
+                        &mut seen,
+                        OpenVMBucketId::Loop2TargetConnectorStartTs,
+                        details_kv(&[
+                            ("kind", json!(kind)),
+                            ("chip_name", json!(base.chip_name)),
+                            ("step_idx", json!(base.step_idx)),
+                            ("op_idx", json!(base.op_idx)),
+                            ("from_timestamp", json!(from_timestamp)),
+                            ("to_timestamp", json!(to_timestamp)),
+                            ("is_terminate", json!(is_terminate)),
+                        ]),
+                    );
+                }
                 if *is_terminate {
                     push_hit(
                         &mut hits,

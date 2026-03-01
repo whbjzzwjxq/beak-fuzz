@@ -1095,15 +1095,19 @@ def _patch_336f_auipc_core_witness_injection(openvm_install_path: Path) -> None:
         // BEAK-INSERT: guard.336f.auipc.core.preprocess_o7
         let beak_witness_step = fuzzer_utils::next_witness_step();
         if fuzzer_utils::should_inject_witness("openvm.audit_o7.auipc_pc_limbs", beak_witness_step) {
+            let can_inject_o7 = ((from_pc >> 24) != 0) || (((imm >> 16) & 0xff) != 0);
             eprintln!(
-                "[beak-witness-inject] kind=openvm.audit_o7.auipc_pc_limbs step={} from_pc={}",
+                "[beak-witness-inject] kind=openvm.audit_o7.auipc_pc_limbs step={} from_pc={} imm={}",
                 beak_witness_step,
-                from_pc
+                from_pc,
+                imm
             );
-            // Forge out-of-range decomposition on unchecked pc limbs.
-            pc_limbs[1] = from_pc;
-            pc_limbs[2] = from_pc.wrapping_add(1);
-            imm_limbs[0] = imm;
+            if can_inject_o7 {
+                let from_pc_hi = (from_pc >> RV32_CELL_BITS) & RV32_LIMB_MAX;
+                let from_pc_top = (from_pc >> (RV32_CELL_BITS * 3)) & RV32_LIMB_MAX;
+                pc_limbs[1] = from_pc_hi.wrapping_add(1) & RV32_LIMB_MAX;
+                pc_limbs[2] = from_pc_top.wrapping_add(1) & RV32_LIMB_MAX;
+            }
         }
         // BEAK-INSERT-END
 """
@@ -1247,6 +1251,66 @@ def _patch_336f_divrem_core_witness_injection(openvm_install_path: Path) -> None
     path.write_text(c)
 
 
+def _patch_336f_bitwise_lookup_shadow_multiplicity_injection(openvm_install_path: Path) -> None:
+    """
+    Add a witness-only (prove-side) shadow multiplicity mutation for audit-o1.
+    This mutates lookup multiplicity in the bitwise lookup trace generation path
+    without touching runtime instruction execution / interaction emission.
+    """
+    path = (
+        openvm_install_path
+        / "crates"
+        / "circuits"
+        / "primitives"
+        / "src"
+        / "bitwise_op_lookup"
+        / "mod.rs"
+    )
+    if not path.exists():
+        return
+    c = path.read_text()
+    try:
+        c = _insert_before(
+            c,
+            anchor="        RowMajorMatrix::new(rows, NUM_BITWISE_OP_LOOKUP_COLS)",
+            guard="// BEAK-INSERT: guard.336f.bitwise.lookup.o1.shadow_mult",
+            insert=r"""
+        // BEAK-INSERT: guard.336f.bitwise.lookup.o1.shadow_mult
+        // Witness-only shadow multiplicity mutation for audit-o1.
+        // This intentionally mutates *prove-side* lookup multiplicity while keeping
+        // runtime behavior unchanged.
+        if std::env::var("BEAK_OPENVM_WITNESS_INJECT_KIND").ok().as_deref()
+            == Some("openvm.audit_o1.bitwise_mult_p_plus_1")
+        {
+            // BabyBear prime: 2^31 - 2^27 + 1 = 2013265921.
+            // We inject p+1 as a weak aliasing signal bucket.
+            const BEAK_BABYBEAR_P_PLUS_1: u32 = 2_013_265_922;
+            let mut injected = false;
+            for row in rows.chunks_mut(NUM_BITWISE_OP_LOOKUP_COLS) {
+                let cols: &mut BitwiseOperationLookupCols<F> = row.borrow_mut();
+                if cols.mult_xor != F::ZERO {
+                    cols.mult_xor = F::from_canonical_u32(BEAK_BABYBEAR_P_PLUS_1);
+                    injected = true;
+                    eprintln!(
+                        "[beak-witness-inject] kind=openvm.audit_o1.bitwise_mult_p_plus_1 mode=shadow_lookup_multiplicity"
+                    );
+                    break;
+                }
+            }
+            if !injected {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.audit_o1.bitwise_mult_p_plus_1 mode=shadow_lookup_multiplicity no_nonzero_xor_row"
+                );
+            }
+        }
+        // BEAK-INSERT-END
+""",
+        )
+    except RuntimeError:
+        return
+    path.write_text(c)
+
+
 def _patch_f038_volatile_witness_injection(openvm_install_path: Path) -> None:
     path = (
         openvm_install_path
@@ -1283,11 +1347,36 @@ def _patch_f038_volatile_witness_injection(openvm_install_path: Path) -> None:
                     // Forge a high canonical address tuple on the boundary row.
                     row.addr_space = Val::<SC>::from_canonical_u32(1 << 29);
                     row.pointer = Val::<SC>::from_canonical_u32(1 << 29);
+                    // Emit explicit marker so injected-phase trace observes volatile boundary mutation.
+                    fuzzer_utils::emit_memory_interaction(
+                        "send",
+                        Some("witness_inject_o25"),
+                        1 << 29,
+                        1 << 29,
+                        vec![0],
+                        0,
+                    );
                 }
                 // BEAK-INSERT-END
 """
     if "// BEAK-INSERT: guard.f038.volatile.o25" not in c and old in c:
         c = c.replace(old, new, 1)
+    if 'Some("witness_inject_o25")' not in c and "row.pointer = Val::<SC>::from_canonical_u32(1 << 29);" in c:
+        c = c.replace(
+            "                    row.pointer = Val::<SC>::from_canonical_u32(1 << 29);\n",
+            """                    row.pointer = Val::<SC>::from_canonical_u32(1 << 29);
+                    // Emit explicit marker so injected-phase trace observes volatile boundary mutation.
+                    fuzzer_utils::emit_memory_interaction(
+                        "send",
+                        Some("witness_inject_o25"),
+                        1 << 29,
+                        1 << 29,
+                        vec![0],
+                        0,
+                    );
+""",
+            1,
+        )
     path.write_text(c)
 
 
@@ -1390,6 +1479,15 @@ def _patch_f038_loadstore_mem_as_witness_injection(openvm_install_path: Path) ->
             );
             // Force RAM address space as a forged witness value.
             beak_mem_as = F::ZERO;
+            // Emit an explicit interaction-log marker so injected phase is observable in trace buckets.
+            fuzzer_utils::emit_memory_interaction(
+                "send",
+                Some("witness_inject_o51"),
+                0,
+                ptr_val,
+                read_record.1.iter().map(|x| x.as_canonical_u32()).collect(),
+                0,
+            );
         }
 
         Ok((
@@ -1411,6 +1509,39 @@ def _patch_f038_loadstore_mem_as_witness_injection(openvm_install_path: Path) ->
 """
     if "mem_as: beak_mem_as," not in c and old2 in c:
         c = c.replace(old2, new2, 1)
+    marker = 'Some("witness_inject_o51")'
+    if marker not in c and "beak_mem_as = F::ZERO;" in c:
+        c = c.replace(
+            "            beak_mem_as = F::ZERO;\n",
+            """            beak_mem_as = F::ZERO;
+            // Emit an explicit interaction-log marker so injected phase is observable in trace buckets.
+            fuzzer_utils::emit_memory_interaction(
+                "send",
+                Some("witness_inject_o51"),
+                0,
+                ptr_val,
+                read_record.1.iter().map(|x| x.as_canonical_u32()).collect(),
+                0,
+            );
+""",
+            1,
+        )
+    path.write_text(c)
+
+
+def _patch_witness_step_wildcard_support(openvm_install_path: Path) -> None:
+    path = openvm_install_path / "crates" / "fuzzer_utils" / "src" / "lib.rs"
+    if not path.exists():
+        return
+    c = path.read_text()
+    old = "        self.injection_enabled && self.injection_kind == kind && self.injection_step == step\n"
+    new = (
+        "        self.injection_enabled\n"
+        "            && self.injection_kind == kind\n"
+        "            && (self.injection_step == step || self.injection_step == u64::MAX)\n"
+    )
+    if old in c and "self.injection_step == u64::MAX" not in c:
+        c = c.replace(old, new, 1)
     path.write_text(c)
 
 
@@ -2061,6 +2192,9 @@ def apply(*, openvm_install_path: Path, commit_or_branch: str) -> None:
     elif commit in {OPENVM_BENCHMARK_336F_COMMIT, OPENVM_BENCHMARK_F038_COMMIT}:
         # Keep audit snapshots on a lightweight, layout-compatible injection set.
         # Start with one concrete adapter-level injection used by loop2/audit-o5 workflow.
+        # Also emit system connector chip-row as a first-class trace record, so connector-related
+        # loop2 injections do not rely on coarse proxy buckets.
+        _patch_regzero_system_connector_emit_chip_row(openvm_install_path)
         _patch_336f_base_alu_adapter_emit_chip_row(openvm_install_path)
         _patch_336f_auipc_core_emit_chip_row(openvm_install_path)
         _patch_336f_loadstore_core_emit_chip_row(openvm_install_path)
@@ -2068,6 +2202,8 @@ def apply(*, openvm_install_path: Path, commit_or_branch: str) -> None:
         _patch_336f_auipc_core_witness_injection(openvm_install_path)
         _patch_336f_loadstore_adapter_witness_injection(openvm_install_path)
         _patch_336f_divrem_core_witness_injection(openvm_install_path)
+        _patch_336f_bitwise_lookup_shadow_multiplicity_injection(openvm_install_path)
+        _patch_witness_step_wildcard_support(openvm_install_path)
         if commit == OPENVM_BENCHMARK_F038_COMMIT:
             _patch_f038_volatile_witness_injection(openvm_install_path)
             _patch_f038_connector_witness_injection(openvm_install_path)

@@ -13,8 +13,9 @@ use openvm_instructions::LocalOpcode;
 use openvm_instructions::SystemOpcode;
 use openvm_rv32im_transpiler::{Rv32ITranspilerExtension, Rv32MTranspilerExtension};
 use openvm_sdk::config::{AppConfig, SdkVmConfig};
+use openvm_sdk::prover::AppProver;
 use openvm_sdk::{Sdk, StdIn, F};
-use openvm_stark_backend::p3_field::PrimeField32;
+use p3_field::PrimeField32;
 use openvm_transpiler::transpiler::Transpiler;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -35,12 +36,22 @@ fn build_vm_config() -> SdkVmConfig {
         .rv32m(Default::default())
         .io(Default::default())
         .build();
-    vm_config.system.config = vm_config
-        .system
-        .config
-        .clone()
-        .with_max_segment_len(256)
-        .with_continuations();
+    let force_volatile = std::env::var("BEAK_OPENVM_FORCE_VOLATILE")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let mut sys_cfg = vm_config.system.config.clone().with_max_segment_len(256);
+    if !force_volatile {
+        sys_cfg = sys_cfg.with_continuations();
+    } else {
+        sys_cfg = sys_cfg.without_continuations();
+    }
+    vm_config.system.config = sys_cfg;
+    eprintln!(
+        "[beak-vm-config] force_volatile={} continuation_enabled={}",
+        force_volatile,
+        vm_config.system.config.continuation_enabled
+    );
     vm_config
 }
 
@@ -115,6 +126,7 @@ pub fn run_backend_once(
     let t1 = Instant::now();
     let sdk = build_sdk();
     let vm_config = build_vm_config();
+    let continuation_enabled = vm_config.system.config.continuation_enabled;
     let app_config = AppConfig {
         app_fri_params: Default::default(),
         app_vm_config: vm_config,
@@ -193,19 +205,30 @@ pub fn run_backend_once(
     }
 
     let t6 = Instant::now();
-    let proof = sdk
-        .generate_app_proof(app_pk.clone(), app_committed_exe.clone(), StdIn::default())
-        .map_err(|e| {
-            let msg = format!("generate_app_proof failed: {e:?}");
+    let app_vk = app_pk.get_app_vk();
+    if continuation_enabled {
+        let proof = sdk
+            .generate_app_proof(app_pk.clone(), app_committed_exe.clone(), StdIn::default())
+            .map_err(|e| {
+                let msg = format!("generate_app_proof failed: {e:?}");
+                eval.backend_error = Some(msg.clone());
+                msg
+            })?;
+        sdk.verify_app_proof(&app_vk, &proof).map_err(|e| {
+            let msg = format!("verify_app_proof failed: {e:?}");
             eval.backend_error = Some(msg.clone());
             msg
         })?;
-    let app_vk = app_pk.get_app_vk();
-    sdk.verify_app_proof(&app_vk, &proof).map_err(|e| {
-        let msg = format!("verify_app_proof failed: {e:?}");
-        eval.backend_error = Some(msg.clone());
-        msg
-    })?;
+    } else {
+        let app_prover = AppProver::new(app_pk.app_vm_pk.clone(), app_committed_exe.clone());
+        let proof = app_prover.generate_app_proof_without_continuations(StdIn::default());
+        sdk.verify_app_proof_without_continuations(&app_vk, &proof)
+            .map_err(|e| {
+                let msg = format!("verify_app_proof_without_continuations failed: {e:?}");
+                eval.backend_error = Some(msg.clone());
+                msg
+            })?;
+    }
     let ms_prove_verify = t6.elapsed().as_millis();
     eprintln!(
         "[openvm-backend-worker] iter={} prove_verify_ms={ms_prove_verify}",
@@ -262,17 +285,36 @@ impl OpenVmBackend {
     }
 
     fn map_bucket_to_injection(bucket_id: &str, step: u64) -> Option<WitnessInjectionPlan> {
-        let kind = match bucket_id {
-            "openvm.loop2.target.base_alu_imm_limbs" => "openvm.audit_o5.rs2_imm_limbs",
-            "openvm.interaction.bitwise.op_xor" | "openvm.alu.base_alu_seen" => "openvm.audit_o1.bitwise_mult_p_plus_1",
-            "openvm.loop2.target.auipc_pc_limbs" => "openvm.audit_o7.auipc_pc_limbs",
-            "openvm.mem.imm_sign_true" => return Some(WitnessInjectionPlan {
-                kind: "openvm.audit_o8.loadstore_imm_sign".to_string(),
-                step: Self::WITNESS_STEP_WILDCARD,
-            }),
-            "openvm.divrem.div_by_zero"
-            | "openvm.divrem.overflow_case"
-            | "openvm.divrem.rs1_eq_rs2" => "openvm.audit_o15.divrem_special_case_on_invalid",
+        let (kind, step) = match bucket_id {
+            "openvm.loop2.target.base_alu_imm_limbs" => ("openvm.audit_o5.rs2_imm_limbs", step),
+            "openvm.loop2.target.loadstore_mem_as" => ("openvm.audit_o51.loadstore_mem_as", step),
+            "openvm.loop2.target.connector_start_ts" => {
+                ("openvm.audit_o26.connector_start_ts", Self::WITNESS_STEP_WILDCARD)
+            }
+            "openvm.loop2.target.volatile_addr_range" => {
+                ("openvm.audit_o25.volatile_addr_range", Self::WITNESS_STEP_WILDCARD)
+            }
+            "openvm.interaction.bitwise.op_xor" => {
+                ("openvm.audit_o1.bitwise_mult_p_plus_1", step)
+            }
+            "openvm.loop2.target.auipc_pc_limbs" => ("openvm.audit_o7.auipc_pc_limbs", step),
+            "openvm.mem.access_seen" => ("openvm.audit_o51.loadstore_mem_as", step),
+            "openvm.mem.addr_space.is_other" => {
+                ("openvm.audit_o51.loadstore_mem_as", step)
+            }
+            "openvm.input.has_loadstore" => {
+                ("openvm.audit_o51.loadstore_mem_as", step)
+            }
+            "openvm.interaction.range_check.value_out_of_range"
+            | "openvm.interaction.memory.addr_space.is_other" => {
+                ("openvm.audit_o25.volatile_addr_range", Self::WITNESS_STEP_WILDCARD)
+            }
+            "openvm.time.start_nonzero"
+            | "openvm.time.row_timestamp_missing"
+            | "openvm.interaction.execution.timestamp_non_monotonic"
+            | "openvm.interaction.memory.timestamp_non_monotonic" => {
+                ("openvm.audit_o26.connector_start_ts", Self::WITNESS_STEP_WILDCARD)
+            }
             _ => return None,
         };
         Some(WitnessInjectionPlan {
@@ -292,21 +334,16 @@ impl OpenVmBackend {
     fn select_injection_from_hits(
         hits: &[beak_core::trace::BucketHit],
     ) -> Option<WitnessInjectionPlan> {
-        const TARGET_PRIORITY: [&str; 8] = [
-            "openvm.loop2.target.auipc_pc_limbs",
-            "openvm.divrem.div_by_zero",
-            "openvm.divrem.overflow_case",
-            "openvm.divrem.rs1_eq_rs2",
-            "openvm.mem.imm_sign_true",
+        // Prefer explicit loop2 target buckets when present.
+        const TARGET_PRIORITY: [&str; 4] = [
+            "openvm.loop2.target.volatile_addr_range",
+            "openvm.loop2.target.loadstore_mem_as",
+            "openvm.loop2.target.connector_start_ts",
             "openvm.loop2.target.base_alu_imm_limbs",
-            "openvm.interaction.bitwise.op_xor",
-            "openvm.alu.base_alu_seen",
         ];
         for target in TARGET_PRIORITY {
             if let Some(hit) = hits.iter().find(|h| h.bucket_id == target) {
-                if let Some(plan) =
-                    Self::map_bucket_to_injection(&hit.bucket_id, Self::step_from_hit(hit))
-                {
+                if let Some(plan) = Self::map_bucket_to_injection(&hit.bucket_id, Self::step_from_hit(hit)) {
                     return Some(plan);
                 }
             }
@@ -520,11 +557,15 @@ impl LoopBackend for OpenVmBackend {
         let mut saw_ecall = false;
         let mut saw_csr = false;
         let mut saw_fence = false;
+        let mut saw_loadstore = false;
         for &w in &self.last_words {
             let opcode = w & 0x7f;
             if opcode == 0x0f {
                 saw_fence = true;
                 continue;
+            }
+            if opcode == 0x03 || opcode == 0x23 {
+                saw_loadstore = true;
             }
             if opcode != 0x73 {
                 continue;
@@ -553,6 +594,12 @@ impl LoopBackend for OpenVmBackend {
         if saw_fence {
             self.eval.bucket_hits.push(beak_core::trace::BucketHit::new(
                 OpenVMBucketId::InputHasFence.as_ref().to_string(),
+                details.clone(),
+            ));
+        }
+        if saw_loadstore {
+            self.eval.bucket_hits.push(beak_core::trace::BucketHit::new(
+                OpenVMBucketId::InputHasLoadStore.as_ref().to_string(),
                 details.clone(),
             ));
         }
