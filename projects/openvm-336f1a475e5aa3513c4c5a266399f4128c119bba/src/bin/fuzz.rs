@@ -111,15 +111,9 @@ fn main() {
                 .help("Loop1 pre-check step cap; if oracle reaches this bound, skip backend for this input. Set 0 to disable."),
         )
         .arg(
-            Arg::new("no_initial_eval")
-                .long("no-initial-eval")
-                .action(clap::ArgAction::SetTrue)
-                .help("Skip the initial corpus evaluation pass (useful for smoke tests)."),
-        )
-        .arg(
             Arg::new("oracle_memory_model")
                 .long("oracle-memory-model")
-                .default_value("shared-code-data")
+                .default_value("split-code-data")
                 .help("Oracle memory model: shared-code-data | split-code-data."),
         )
         .arg(
@@ -181,7 +175,6 @@ fn main() {
         .parse()
         .expect("oracle-precheck-max-steps");
     let initial_limit: usize = if inline_words.is_empty() { 0 } else { 1 };
-    let no_initial_eval = matches.get_flag("no_initial_eval");
     let bucket_direct_mutate = matches.get_flag("bucket_direct_mutate");
     let chain_direct_injection = matches.get_flag("chain_direct_injection");
     let max_instructions: usize = if inline_words.is_empty() {
@@ -215,7 +208,6 @@ fn main() {
         out_dir: root.join("storage/fuzzing_seeds"),
         output_prefix: None,
         initial_limit,
-        no_initial_eval,
         max_instructions,
         iters,
         chain_direct_injection: !bucket_direct_mutate && chain_direct_injection,

@@ -1,17 +1,17 @@
-{"instructions": [20972307, 335548531, 335553907, 915, 7685427], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_20", "label_addr": 2147484068}}
-{"instructions": [22020883, 335566195, 336057715, 915, 7685427], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_21", "label_addr": 2147484088}}
-{"instructions": [23069459, 336093299, 335553907, 32506771, 7671907, 335761523], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_22", "label_addr": 2147484108}}
-{"instructions": [2097939, 335553907, 3146643, 7685427], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_2", "label_addr": 2147484132}}
-{"instructions": [3146515, 335607283, 3146643, 7718195], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_3", "label_addr": 2147484148}}
-{"instructions": [4195091, 335799923, 2098067, 7750963], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_4", "label_addr": 2147484164}}
-{"instructions": [5243667, 335730419, 6292371, 7783731], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_5", "label_addr": 2147484180}}
-{"instructions": [6292243, 195896631, 3735356691, 335877619, 2098067, 7718195], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_6", "label_addr": 2147484196}}
-{"instructions": [7340819, 9527, 3735356691, 335885811, 195896247, 3735258003, 7718195], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_7", "label_addr": 2147484220}}
-{"instructions": [8389395, 50487, 4009035027, 335881715, 195888055, 7718195], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_8", "label_addr": 2147484248}}
-{"instructions": [9437971, 195896631, 3735356691, 335877491, 195937207, 4008936339, 7685427], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_9", "label_addr": 2147484272}}
-{"instructions": [10486547, 9527, 3735356691, 335885683, 195896247, 3735258003, 7685427], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_10", "label_addr": 2147484300}}
-{"instructions": [11535123, 50487, 4009035027, 335881587, 195888055, 7685427], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_11", "label_addr": 2147484328}}
-{"instructions": [12583699, 335553907, 195937207, 4008936339, 7671907, 268436115, 268611699, 663, 16941715, 336760947, 270532723], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_12", "label_addr": 2147484352}}
+{"instructions": [20972307, 915, 7685427], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_20", "label_addr": 2147484068}}
+{"instructions": [22020883, 915, 7685427], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_21", "label_addr": 2147484088}}
+{"instructions": [23069459, 32506771, 7671907], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_22", "label_addr": 2147484108}}
+{"instructions": [2097939, 3146643, 7685427], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_2", "label_addr": 2147484132}}
+{"instructions": [3146515, 3146643, 7718195], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_3", "label_addr": 2147484148}}
+{"instructions": [4195091, 2098067, 7750963], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_4", "label_addr": 2147484164}}
+{"instructions": [5243667, 6292371, 7783731], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_5", "label_addr": 2147484180}}
+{"instructions": [6292243, 195896631, 3735356691, 2098067, 7718195], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_6", "label_addr": 2147484196}}
+{"instructions": [7340819, 9527, 3735356691, 195896247, 3735258003, 7718195], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_7", "label_addr": 2147484220}}
+{"instructions": [8389395, 50487, 4009035027, 195888055, 7718195], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_8", "label_addr": 2147484248}}
+{"instructions": [9437971, 195896631, 3735356691, 195937207, 4008936339, 7685427], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_9", "label_addr": 2147484272}}
+{"instructions": [10486547, 9527, 3735356691, 195896247, 3735258003, 7685427], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_10", "label_addr": 2147484300}}
+{"instructions": [11535123, 50487, 4009035027, 195888055, 7685427], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_11", "label_addr": 2147484328}}
+{"instructions": [12583699, 195937207, 4008936339, 7671907, 268436115, 663, 16941715, 270532723], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_12", "label_addr": 2147484352}}
 {"instructions": [15729427, 19, 915, 7357747], "metadata": {"source": "storage/riscv-tests-artifacts/rv32si-p-csr.dump", "label": "test_15", "label_addr": 2147484396}}
 {"instructions": [2097939, 1427, 1555, 12945203, 915, 7816499], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-p-add.dump", "label": "test_2", "label_addr": 2147484044}}
 {"instructions": [3146515, 1050003, 1050131, 12945203, 2098067, 7816499], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-p-add.dump", "label": "test_3", "label_addr": 2147484068}}
@@ -241,7 +241,7 @@
 {"instructions": [19923731, 915, 147, 19, 659, 19, 7376995, 1278867, 2097811, 5476451], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-p-bne.dump", "label": "test_19", "label_addr": 2147484624}}
 {"instructions": [20972307, 915, 147, 19, 19, 659, 7376995, 1278867, 2097811, 5476451], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-p-bne.dump", "label": "test_20", "label_addr": 2147484664}}
 {"instructions": [22020883, 1048723, 36963, 1081491, 1081491, 1081491, 1081491, 1081491, 1081491, 3146643, 7390515], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-p-bne.dump", "label": "test_21", "label_addr": 2147484704}}
-{"instructions": [2097939, 19, 465568659, 7770211, 104859411, 4294379283, 462947, 8855, 10653731, 8855, 11702307, 4111, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 10135, 3704063891, 492391], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-p-fence_i.dump", "label": "test_2", "label_addr": 2147484128}}
+{"instructions": [2097939, 19, 465568659, 7770211, 104859411, 4294379283, 462947, 8855, 10653731, 8855, 11702307, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 10135, 3704063891, 492391], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-p-fence_i.dump", "label": "test_2", "label_addr": 2147484128}}
 {"instructions": [3146515, 19, 814744467, 7783731], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-p-fence_i.dump", "label": "test_3", "label_addr": 2147484236}}
 {"instructions": [2097939, 147, 16778223], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-p-jal.dump", "label": "test_2", "label_addr": 2147484044}}
 {"instructions": [3146515, 1048723, 20971631, 1081491, 1081491, 1081491, 1081491, 1081491, 1081491, 3146643, 7390515], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-p-jal.dump", "label": "test_3", "label_addr": 2147484080}}
@@ -1158,7 +1158,7 @@
 {"instructions": [19923731, 915, 147, 19, 659, 19, 7376995, 1278867, 2097811, 5476451], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-v-bne.dump", "label": "test_19", "label_addr": 2147494992}}
 {"instructions": [20972307, 915, 147, 19, 19, 659, 7376995, 1278867, 2097811, 5476451], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-v-bne.dump", "label": "test_20", "label_addr": 2147495032}}
 {"instructions": [22020883, 1048723, 36963, 1081491, 1081491, 1081491, 1081491, 1081491, 1081491, 3146643, 7390515], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-v-bne.dump", "label": "test_21", "label_addr": 2147495072}}
-{"instructions": [2097939, 19, 465568659, 7770211, 104859411, 4294379283, 462947, 663, 10653731, 663, 11702307, 4111, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 1943, 1422362515, 492391], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-v-fence_i.dump", "label": "test_2", "label_addr": 2147494496}}
+{"instructions": [2097939, 19, 465568659, 7770211, 104859411, 4294379283, 462947, 663, 10653731, 663, 11702307, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 1943, 1422362515, 492391], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-v-fence_i.dump", "label": "test_2", "label_addr": 2147494496}}
 {"instructions": [3146515, 19, 814744467, 7783731], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-v-fence_i.dump", "label": "test_3", "label_addr": 2147494604}}
 {"instructions": [3146515, 1048723, 20971631, 1081491, 1081491, 1081491, 1081491, 1081491, 1081491, 3146643, 7390515], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-v-jal.dump", "label": "test_3", "label_addr": 2147494448}}
 {"instructions": [3146515, 663, 16941715, 164583], "metadata": {"source": "storage/riscv-tests-artifacts/rv32ui-v-jalr.dump", "label": "test_3", "label_addr": 2147494448}}

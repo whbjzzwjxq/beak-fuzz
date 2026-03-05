@@ -1,7 +1,8 @@
 .PHONY: extract-initial-seeds openvm-install openvm-build openvm-run openvm-example-x0 \
 	openvm-fuzz-build openvm-fuzz openvm-fuzz-5min openvm-fuzz-quick \
 	openvm-trace openvm-trace-buckets \
-	pico-install pico-build pico-run pico-fuzz
+	pico-install pico-build pico-run pico-fuzz \
+	sp1-install sp1-build sp1-run sp1-fuzz
 
 # Commit selector (required for OpenVM targets).
 #
@@ -14,6 +15,7 @@
 #   beak-py/projects/openvm-fuzzer/openvm_fuzzer/settings.py
 COMMIT ?= bmk-regzero
 PICO_COMMIT ?= 45e74ccd62758c6d67239913956e749adaba261c
+SP1_COMMIT ?= 7f643da16813af4c0fbaad4837cd7409386cf38c
 BIN ?= beak-trace
 ARGS ?=
 
@@ -27,7 +29,6 @@ INITIAL_LIMIT ?= 0
 MAX_INSTRUCTIONS ?= 32
 ITERS ?= 500
 FAST_TEST ?= 1
-NO_INITIAL_EVAL ?= 1
 
 # Pico (OpenVM-style project entry)
 PICO_PROJECT_DIR ?= projects/pico-$(PICO_COMMIT)
@@ -35,13 +36,28 @@ PICO_ZKVM_DIR ?= $(abspath beak-py/out/pico-$(PICO_COMMIT)/pico-src)
 PICO_OUT_DIR ?= $(abspath $(PICO_PROJECT_DIR)/out)
 PICO_SEEDS ?= storage/fuzzing_seeds/initial.jsonl
 PICO_ITERS ?= 1000
-PICO_LOOP2_INPUT ?=
 PICO_CHAIN_DIRECT_INJECTION ?= 0
 PICO_ARGS ?=
+
+# SP1 (OpenVM-style project entry)
+SP1_PROJECT_DIR ?= projects/sp1-$(SP1_COMMIT)
+SP1_ZKVM_DIR ?= $(abspath beak-py/out/sp1-$(SP1_COMMIT)/sp1-src)
+SP1_OUT_DIR ?= $(abspath $(SP1_PROJECT_DIR)/out)
+SP1_SEEDS ?= storage/fuzzing_seeds/initial.jsonl
+SP1_ITERS ?= 1000
+SP1_CHAIN_DIRECT_INJECTION ?= 0
+SP1_ARGS ?=
 
 define _require_pico_commit
 	@if [ -z "$(PICO_COMMIT)" ]; then \
 		echo "error: PICO_COMMIT is required (full SHA, e.g. 45e74ccd...)"; \
+		exit 2; \
+	fi
+endef
+
+define _require_sp1_commit
+	@if [ -z "$(SP1_COMMIT)" ]; then \
+		echo "error: SP1_COMMIT is required (full SHA, e.g. 7f643da...)"; \
 		exit 2; \
 	fi
 endef
@@ -97,13 +113,12 @@ openvm-fuzz: openvm-fuzz-build
 	$(_require_commit)
 	@resolved="$$( $(_openvm_resolve) )" && \
 	proj="projects/openvm-$${resolved}" && \
-	echo "Running loop1 in $${proj} (iters=$(ITERS), initial_limit=$(INITIAL_LIMIT), no_initial_eval=$(NO_INITIAL_EVAL))" && \
+	echo "Running loop1 in $${proj} (iters=$(ITERS), initial_limit=$(INITIAL_LIMIT))" && \
 	cd "$${proj}" && FAST_TEST="$(FAST_TEST)" cargo run --release -q --bin beak-fuzz -- \
 		--seeds-jsonl "$(SEEDS_JSONL)" \
 		--timeout-ms "$(TIMEOUT_MS)" \
 		--initial-limit "$(INITIAL_LIMIT)" \
 		--max-instructions "$(MAX_INSTRUCTIONS)" \
-		$(if $(filter 1 true yes,$(NO_INITIAL_EVAL)),--no-initial-eval,) \
 		--iters "$(ITERS)"
 
 pico-install:
@@ -123,10 +138,33 @@ pico-run: pico-build
 	cd "$(PICO_PROJECT_DIR)" && UV_CACHE_DIR=$${UV_CACHE_DIR:-/tmp/uv-cache} cargo run --release -q --bin beak-fuzz -- \
 		--iters "$(PICO_ITERS)" \
 		--seeds-jsonl "$(PICO_SEEDS)" \
-		$(if $(PICO_LOOP2_INPUT),--chain-direct-injection --input-corpus "$(PICO_LOOP2_INPUT)",) \
 		$(if $(filter 1 true yes,$(PICO_CHAIN_DIRECT_INJECTION)),--chain-direct-injection,) \
 		$(PICO_ARGS)
 
 # OpenVM-like single entry: project-local beak-fuzz workflow
 pico-fuzz: pico-run
 	@echo "Pico full repro finished for $(PICO_COMMIT)"
+
+sp1-install:
+	$(_require_sp1_commit)
+	@mkdir -p "$(SP1_PROJECT_DIR)"
+	cd beak-py && UV_CACHE_DIR=$${UV_CACHE_DIR:-/tmp/uv-cache} make install
+	cd beak-py && UV_CACHE_DIR=$${UV_CACHE_DIR:-/tmp/uv-cache} uv run sp1-fuzzer install --commit-or-branch "$(SP1_COMMIT)"
+
+sp1-build:
+	$(_require_sp1_commit)
+	@mkdir -p "$(SP1_PROJECT_DIR)"
+	cd "$(SP1_PROJECT_DIR)" && CARGO_TARGET_DIR="$$PWD/target" cargo build --release --bin beak-trace --bin beak-fuzz
+
+sp1-run: sp1-build
+	$(_require_sp1_commit)
+	@mkdir -p "$(SP1_OUT_DIR)"
+	cd "$(SP1_PROJECT_DIR)" && UV_CACHE_DIR=$${UV_CACHE_DIR:-/tmp/uv-cache} cargo run --release -q --bin beak-fuzz -- \
+		--iters "$(SP1_ITERS)" \
+		--seeds-jsonl "$(SP1_SEEDS)" \
+		$(if $(filter 1 true yes,$(SP1_CHAIN_DIRECT_INJECTION)),--chain-direct-injection,) \
+		$(SP1_ARGS)
+
+# OpenVM-like single entry: project-local beak-fuzz workflow
+sp1-fuzz: sp1-run
+	@echo "SP1 full repro finished for $(SP1_COMMIT)"

@@ -4,10 +4,6 @@ use strum::{AsRefStr, EnumIter, EnumString, VariantNames};
 pub enum OpenVMBucketId {
     #[strum(serialize = "openvm.input.has_ecall")]
     InputHasEcall,
-    #[strum(serialize = "openvm.input.has_csr")]
-    InputHasCsr,
-    #[strum(serialize = "openvm.input.has_fence")]
-    InputHasFence,
 
     #[strum(serialize = "openvm.time.start_nonzero")]
     TimeStartNonzero,
@@ -139,4 +135,3 @@ pub enum OpenVMBucketId {
     #[strum(serialize = "openvm.interaction.bitwise.z_eq_0")]
     InteractionBitwiseZEq0,
 }
-

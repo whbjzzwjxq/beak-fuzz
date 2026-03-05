@@ -55,9 +55,8 @@ fn build_exe(words: &[u32]) -> Result<std::sync::Arc<VmExe<F>>, String> {
 }
 
 fn is_openvm_supported_rv32_word(word: u32) -> bool {
-    // We still keep fence filtered in this harness.
-    let opcode = word & 0x7f;
-    opcode != 0x0f
+    let _ = word;
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -440,22 +439,14 @@ impl LoopBackend for OpenVmBackend {
         // does not fully model certain instruction classes.
         let details = HashMap::new();
         let mut saw_ecall = false;
-        let mut saw_csr = false;
-        let mut saw_fence = false;
         for &w in &self.last_words {
             let opcode = w & 0x7f;
-            if opcode == 0x0f {
-                saw_fence = true;
-                continue;
-            }
             if opcode != 0x73 {
                 continue;
             }
             if let Ok(insn) = RV32IMInstruction::from_word(w) {
                 match insn.mnemonic.as_str() {
                     "ecall" | "ebreak" => saw_ecall = true,
-                    // Any CSR family op.
-                    "csrrw" | "csrrs" | "csrrc" | "csrrwi" | "csrrsi" | "csrrci" => saw_csr = true,
                     _ => {}
                 }
             }
@@ -463,18 +454,6 @@ impl LoopBackend for OpenVmBackend {
         if saw_ecall {
             self.eval.bucket_hits.push(beak_core::trace::BucketHit::new(
                 OpenVMBucketId::InputHasEcall.as_ref().to_string(),
-                details.clone(),
-            ));
-        }
-        if saw_csr {
-            self.eval.bucket_hits.push(beak_core::trace::BucketHit::new(
-                OpenVMBucketId::InputHasCsr.as_ref().to_string(),
-                details.clone(),
-            ));
-        }
-        if saw_fence {
-            self.eval.bucket_hits.push(beak_core::trace::BucketHit::new(
-                OpenVMBucketId::InputHasFence.as_ref().to_string(),
                 details.clone(),
             ));
         }

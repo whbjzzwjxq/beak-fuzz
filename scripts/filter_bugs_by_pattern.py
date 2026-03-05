@@ -5,7 +5,6 @@ output the remaining lines (by line number and/or full JSONL).
 
 Uninteresting (see docs/BUG_REPORTS.md) includes:
   - timeout
-  - CSR semantics (failed_exit2 with only openvm.input.has_csr)
   - read/write regzero (bucket hits openvm.reg.read_rs1_x0 / read_rs2_x0, or mismatch on x0)
   - Known doc bugs: Invalid LoadStoreOp, opcode 225 conversion, index-out-of-bounds (DivRem), code-as-data mismatch
 
@@ -13,11 +12,11 @@ Usage:
   # Show pattern summary
   python scripts/filter_bugs_by_pattern.py --summary storage/.../bugs.jsonl
 
-  # Exclude default uninteresting patterns (timeout, csr, regzero, doc-known), output remaining
+  # Exclude default uninteresting patterns (timeout, regzero, doc-known), output remaining
   python scripts/filter_bugs_by_pattern.py --default-exclude -o filtered.jsonl storage/.../bugs.jsonl
 
   # Exclude custom patterns
-  python scripts/filter_bugs_by_pattern.py --exclude timeout,failed_exit2_csr storage/.../bugs.jsonl
+  python scripts/filter_bugs_by_pattern.py --exclude timeout,regzero storage/.../bugs.jsonl
 
   # Only output line numbers
   python scripts/filter_bugs_by_pattern.py --default-exclude --lines-only storage/.../bugs.jsonl
@@ -31,10 +30,9 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-# Default uninteresting: timeout, CSR semantics, read/write regzero, and known bugs from docs/BUG_REPORTS.md
+# Default uninteresting: timeout, read/write regzero, and known bugs from docs/BUG_REPORTS.md
 DEFAULT_UNINTERESTING = [
     "timeout",
-    "failed_exit2_csr",  # CSR 不一致语义
     "regzero",           # read/write regzero
     "index_out_of_bounds",  # DivRem trace fill / index len 0 (BUG_REPORTS)
     "invalid_loadstore_op",  # Invalid LoadStoreOp (BUG_REPORTS)
@@ -77,8 +75,6 @@ def classify_backend_error(be: str | None) -> str:
 def bucket_category(sig: str) -> str:
     if not sig:
         return "empty"
-    if sig.strip() == "openvm.input.has_csr":
-        return "only_has_csr"
     return "has_more"
 
 
@@ -131,8 +127,6 @@ def classify_line(obj: dict) -> tuple[str, str]:
 
     if kind == "exception" and timed_out and be_cat == "timeout":
         label = "timeout"
-    elif kind == "exception" and not timed_out and be_cat == "failed_exit2" and bucket == "only_has_csr":
-        label = "failed_exit2_csr"
     elif kind == "mismatch" and be_cat == "null":
         if is_code_as_data_mismatch(obj):
             label = "code_as_data_mismatch"
@@ -190,13 +184,13 @@ def main() -> None:
     ap.add_argument(
         "--default-exclude",
         action="store_true",
-        help="Exclude default uninteresting patterns (timeout, csr, regzero, doc-known). Same as docs/BUG_REPORTS.md + timeout + read/write regzero + CSR semantics.",
+        help="Exclude default uninteresting patterns (timeout, regzero, doc-known). Same as docs/BUG_REPORTS.md + timeout + read/write regzero.",
     )
     ap.add_argument(
         "--exclude",
         type=str,
         metavar="PATTERNS",
-        help="Comma-separated pattern labels or IDs to exclude (e.g. timeout,failed_exit2_csr). Ignored if --default-exclude is set.",
+        help="Comma-separated pattern labels or IDs to exclude (e.g. timeout,regzero). Ignored if --default-exclude is set.",
     )
     ap.add_argument(
         "-o", "--output",

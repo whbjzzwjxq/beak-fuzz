@@ -8,6 +8,7 @@ dependencies = [
     "zkvm-fuzzer-utils",
     "openvm-fuzzer",
     "pico-fuzzer",
+    "sp1-fuzzer",
 ]
 
 [dependency-groups]
@@ -25,6 +26,7 @@ workspace = { members = ["libs/*", "projects/*"] }
 zkvm-fuzzer-utils = { workspace = true }
 openvm-fuzzer = { workspace = true }
 pico-fuzzer = { workspace = true }
+sp1-fuzzer = { workspace = true }
 
 [tool.black]
 line-length = 100
@@ -49,5 +51,6 @@ profile = "black"
 pythonpath = [
     "libs/zkvm-fuzzer-utils",
     "projects/openvm-fuzzer",
+    "projects/sp1-fuzzer",
 ]
 testpaths = ["libs", "projects"]

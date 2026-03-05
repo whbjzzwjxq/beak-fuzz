@@ -15,6 +15,7 @@ beak-py/
     zkvm-fuzzer-utils/       Shared utilities used by project installers/patchers
   projects/
     openvm-fuzzer/           OpenVM snapshot materialization + patch pipeline
+    sp1-fuzzer/              SP1 snapshot materialization + patch pipeline
     <other-zkvm>-fuzzer/     Similar per-zkVM packages (optional / evolving)
   out/                       Materialized snapshots and generated artifacts
 ```
@@ -90,4 +91,3 @@ side), not here.
 - **Minimal coupling**: keep Python focused on installation/patching; avoid circular dependencies
   between Python and Rust trace schemas.
 - **Readable**: prefer straightforward file edits over meta-programming or heavy frameworks.
-

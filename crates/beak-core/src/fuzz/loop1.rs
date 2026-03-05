@@ -36,7 +36,6 @@ pub struct Loop1Config {
     pub output_prefix: Option<String>,
 
     pub initial_limit: usize,
-    pub no_initial_eval: bool,
     pub max_instructions: usize,
     pub iters: usize,
     pub chain_direct_injection: bool,
@@ -736,21 +735,19 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
 
     let mut stages = tuple_list!(StdMutationalStage::new(SeedMutator::new(cfg.max_instructions)));
 
-    if !cfg.no_initial_eval {
-        let initial_count = state.corpus().count();
-        for idx in 0..initial_count {
-            eprintln!(
-                "[LOOP1][initial {}/{}] evaluating seed corpus entry",
-                idx + 1,
-                initial_count
-            );
-            let id = CorpusId::from(idx);
-            let Ok(tc_cell) = state.corpus().get(id) else { continue };
-            let tc = tc_cell.borrow();
-            let Some(input) = tc.input().as_ref().cloned() else { continue };
-            drop(tc);
-            let _ = fuzzer.evaluate_input(&mut state, &mut executor, &mut mgr, &input);
-        }
+    let initial_count = state.corpus().count();
+    for idx in 0..initial_count {
+        eprintln!(
+            "[LOOP1][initial {}/{}] evaluating seed corpus entry",
+            idx + 1,
+            initial_count
+        );
+        let id = CorpusId::from(idx);
+        let Ok(tc_cell) = state.corpus().get(id) else { continue };
+        let tc = tc_cell.borrow();
+        let Some(input) = tc.input().as_ref().cloned() else { continue };
+        drop(tc);
+        let _ = fuzzer.evaluate_input(&mut state, &mut executor, &mut mgr, &input);
     }
 
     for i in 0..cfg.iters {

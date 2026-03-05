@@ -37,7 +37,7 @@ install-openvm: $(VIRTUALENV)
 
 install-sp1: $(VIRTUALENV)
 	uv sync --package sp1-fuzzer
-	$(UV_RUN) sp1-fuzzer install --zkvm-src ./sp1-src --commit-or-branch 7f643da16813af4c0fbaad4837cd7409386cf38c --inject
+	$(UV_RUN) sp1-fuzzer install --commit-or-branch 7f643da16813af4c0fbaad4837cd7409386cf38c
 
 install-risc0: $(VIRTUALENV)
 	uv sync --package risc0-fuzzer

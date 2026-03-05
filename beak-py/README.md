@@ -73,3 +73,9 @@ Note: the current loop1 mutator/seed pipeline does not strictly enforce this con
 `openvm-fuzzer install --commit-or-branch <alias|hash>` accepts both pinned aliases (e.g. `bmk-regzero`)
 and full commit hashes. See `beak-py/projects/openvm-fuzzer/openvm_fuzzer/settings.py` for the current
 alias list and pinned commits.
+
+## SP1 Commit Options
+
+`sp1-fuzzer install --commit-or-branch <alias|hash>` accepts both pinned aliases and full commit
+hashes. See `beak-py/projects/sp1-fuzzer/sp1_fuzzer/settings.py` for the current alias list and
+pinned commits.

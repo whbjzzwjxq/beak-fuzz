@@ -31,7 +31,6 @@ cargo run --release -q --bin beak-fuzz -- --iters 1000
 Optional flags:
 
 - `--chain-direct-injection`: emit loop2-direct output skeleton
-- `--input-corpus <path>`: optional loop2 input corpus when direct injection is enabled
 
 Install location (OpenVM-style):
 

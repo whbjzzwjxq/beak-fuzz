@@ -111,12 +111,6 @@ fn main() {
                 .help("Limit number of initial seeds loaded (0 = no limit)."),
         )
         .arg(
-            Arg::new("no_initial_eval")
-                .long("no-initial-eval")
-                .action(clap::ArgAction::SetTrue)
-                .help("Skip the initial corpus evaluation pass (useful for smoke tests)."),
-        )
-        .arg(
             Arg::new("max_instructions")
                 .long("max-instructions")
                 .default_value("256")
@@ -191,7 +185,6 @@ fn main() {
         matches.get_one::<String>("timeout_ms").unwrap().parse().expect("timeout-ms");
     let requested_initial_limit: usize =
         matches.get_one::<String>("initial_limit").unwrap().parse().expect("initial-limit");
-    let no_initial_eval = matches.get_flag("no_initial_eval");
     let requested_max_instructions: usize =
         matches.get_one::<String>("max_instructions").unwrap().parse().expect("max-instructions");
     let requested_iters: usize = matches.get_one::<String>("iters").unwrap().parse().expect("iters");
@@ -239,7 +232,6 @@ fn main() {
         out_dir: root.join("storage/fuzzing_seeds"),
         output_prefix: None,
         initial_limit,
-        no_initial_eval,
         max_instructions,
         iters,
         chain_direct_injection: !bucket_direct_mutate && chain_direct_injection,

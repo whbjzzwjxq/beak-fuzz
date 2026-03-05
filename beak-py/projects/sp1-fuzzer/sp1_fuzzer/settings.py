@@ -1,0 +1,23 @@
+SP1_BENCHMARK_7F64_ALIAS = "bmk-7f64"
+SP1_BENCHMARK_811A_ALIAS = "bmk-811a"
+
+SP1_BENCHMARK_7F64_COMMIT = "7f643da16813af4c0fbaad4837cd7409386cf38c"
+SP1_BENCHMARK_811A_COMMIT = "811a3f2c03914088c7c9e1774266934a3f9f5359"
+
+SP1_AVAILABLE_COMMITS_OR_BRANCHES = [
+    SP1_BENCHMARK_7F64_ALIAS,
+    SP1_BENCHMARK_811A_ALIAS,
+    SP1_BENCHMARK_7F64_COMMIT,
+    SP1_BENCHMARK_811A_COMMIT,
+    "main",
+]
+
+SP1_ZKVM_GIT_REPOSITORY = "https://github.com/succinctlabs/sp1.git"
+
+
+def resolve_sp1_commit(commit_or_branch: str) -> str:
+    if commit_or_branch == SP1_BENCHMARK_7F64_ALIAS:
+        return SP1_BENCHMARK_7F64_COMMIT
+    if commit_or_branch == SP1_BENCHMARK_811A_ALIAS:
+        return SP1_BENCHMARK_811A_COMMIT
+    return commit_or_branch

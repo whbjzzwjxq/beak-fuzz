@@ -25,6 +25,7 @@ This repository is organized to keep zkVM-specific code isolated, and keep share
   - Owns its own `Cargo.lock` and `rust-toolchain.toml`.
   - Example:
     - `projects/openvm-d7eab708f43487b2e7c00524ffd611f835e8e6b5/`: OpenVM-specific binaries for one snapshot.
+    - `projects/sp1-7f643da16813af4c0fbaad4837cd7409386cf38c/`: SP1-specific binaries for one snapshot.
 - `beak-py/`
   - Python tooling and workflows (project scaffolding, utilities, offline processing, etc.).
 - `storage/`
@@ -84,7 +85,7 @@ This preserves differential checking and bucket extraction while keeping per-inp
 ## Loop1 Execution Model
 
 - Initial seeds are loaded from `--seeds-jsonl` (optionally capped by `--initial-limit`).
-- If `--no-initial-eval` is not set, loop1 evaluates each initial corpus entry once before mutational fuzzing.
+- Loop1 evaluates each initial corpus entry once before mutational fuzzing.
 - Then loop1 runs `--iters` times, where each iteration executes one `fuzz_one` step.
 - A single `fuzz_one` can evaluate multiple candidate inputs internally, so backend run counters can exceed `--iters`.
 

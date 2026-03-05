@@ -88,15 +88,13 @@ make openvm-fuzz \
   INITIAL_LIMIT=1 \
   MAX_INSTRUCTIONS=32 \
   TIMEOUT_MS=2000 \
-  FAST_TEST=1 \
-  NO_INITIAL_EVAL=1
+  FAST_TEST=1
 ```
 
 Notes:
 
 - The fuzz target is run in release mode by default (`cargo run --release -q --bin beak-fuzz`).
 - `FAST_TEST=1` enables fast insecure parameters for local fuzz/debug.
-- `NO_INITIAL_EVAL=1` skips the initial corpus evaluation pass for faster smoke runs.
 - Outputs are written to `storage/fuzzing_seeds/` as:
   - `loop1-...-corpus.jsonl`
   - `loop1-...-bugs.jsonl`
@@ -133,15 +131,48 @@ Run full workflow (single entry, OpenVM-style):
 make pico-fuzz PICO_COMMIT=45e74ccd62758c6d67239913956e749adaba261c PICO_ITERS=1000
 ```
 
-Run with explicit loop2 corpus:
+Run with chained direct injection enabled:
 
 ```bash
 make pico-fuzz \
   PICO_COMMIT=45e74ccd62758c6d67239913956e749adaba261c \
   PICO_ITERS=1000 \
-  PICO_CHAIN_DIRECT_INJECTION=1 \
-  PICO_LOOP2_INPUT=path/to/corpus.jsonl
+  PICO_CHAIN_DIRECT_INJECTION=1
 ```
 
 Note: Pico currently uses an OpenVM-compatible Rust CLI surface for loop1/loop2 orchestration, but its
 backend replay/injection path is still partial (not yet equivalent to OpenVM backend completeness).
+
+## 6) SP1 Audit Workflow (7f64 / 811a commits)
+
+SP1 commits from benchmark CSV:
+
+- `7f643da16813af4c0fbaad4837cd7409386cf38c`
+- `811a3f2c03914088c7c9e1774266934a3f9f5359`
+
+Install snapshot:
+
+```bash
+make sp1-install SP1_COMMIT=7f643da16813af4c0fbaad4837cd7409386cf38c
+```
+
+Build project binaries:
+
+```bash
+make sp1-build SP1_COMMIT=7f643da16813af4c0fbaad4837cd7409386cf38c
+```
+
+Run full workflow:
+
+```bash
+make sp1-fuzz SP1_COMMIT=7f643da16813af4c0fbaad4837cd7409386cf38c SP1_ITERS=1000
+```
+
+Run with chained direct injection enabled:
+
+```bash
+make sp1-fuzz \
+  SP1_COMMIT=811a3f2c03914088c7c9e1774266934a3f9f5359 \
+  SP1_ITERS=1000 \
+  SP1_CHAIN_DIRECT_INJECTION=1
+```
