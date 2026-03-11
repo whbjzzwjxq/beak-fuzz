@@ -9,11 +9,11 @@ pub enum Sp1BucketId {
     #[strum(serialize = "sp1.input.has_auipc")]
     InputHasAuipc,
 
-    #[strum(serialize = "sp1.loop1.oracle.regzero_store_addr0")]
-    Loop1OracleRegzeroStoreAddr0,
+    #[strum(serialize = "sp1.reg.store_addr_zero_via_x0")]
+    RegStoreAddrZeroViaX0,
 
-    #[strum(serialize = "sp1.loop2.target.mem_load_path")]
-    Loop2TargetMemLoadPath,
-    #[strum(serialize = "sp1.loop2.target.multiplicity_bool_constraint")]
-    Loop2TargetMultiplicityBoolConstraint,
+    #[strum(serialize = "sp1.sem.memory.timestamped_load_path")]
+    SemMemoryTimestampedLoadPath,
+    #[strum(serialize = "sp1.sem.lookup.boolean_multiplicity")]
+    SemLookupBooleanMultiplicity,
 }

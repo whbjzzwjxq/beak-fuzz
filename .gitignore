@@ -28,6 +28,14 @@ target
 storage/fuzzing_seeds/loop1-*.jsonl
 storage/fuzzing_seeds/loop2-direct-*.jsonl
 storage/fuzzing_seeds/.tmp-inline-*.jsonl
+storage/fuzzing_seeds/.campaign-*.log
+storage/fuzzing_seeds/.profile-*.log
+storage/fuzzing_seeds/benchmark-*-bugs.jsonl
+storage/fuzzing_seeds/benchmark-*-corpus.jsonl
+storage/fuzzing_seeds/benchmark-*-runs.jsonl
+
+# Python cache
+scripts/__pycache__/
 
 # Mac OS X
 .DS_Store

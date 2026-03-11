@@ -42,7 +42,7 @@ pub fn match_bucket_hits(trace: &Sp1Trace) -> Vec<BucketHit> {
                 push_hit(
                     &mut hits,
                     &mut seen,
-                    Sp1BucketId::Loop2TargetS26PaddingSendToTable,
+                    Sp1BucketId::SemRowPaddingInteractionSend,
                     details_kv(&[
                         ("step_idx", json!(insn.step_idx)),
                         ("mnemonic", json!(insn.mnemonic)),
@@ -60,7 +60,7 @@ pub fn match_bucket_hits(trace: &Sp1Trace) -> Vec<BucketHit> {
                 push_hit(
                     &mut hits,
                     &mut seen,
-                    Sp1BucketId::Loop2TargetMemLoadPath,
+                    Sp1BucketId::SemMemoryTimestampedLoadPath,
                     details_kv(&[
                         ("step_idx", json!(insn.step_idx)),
                         ("word", json!(format!("0x{:08x}", insn.word))),
@@ -70,7 +70,7 @@ pub fn match_bucket_hits(trace: &Sp1Trace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        Sp1BucketId::Loop2TargetMultiplicityBoolConstraint,
+                        Sp1BucketId::SemLookupBooleanMultiplicity,
                         details_kv(&[
                             ("step_idx", json!(insn.step_idx)),
                             ("word", json!(format!("0x{:08x}", insn.word))),
@@ -80,7 +80,7 @@ pub fn match_bucket_hits(trace: &Sp1Trace) -> Vec<BucketHit> {
                 push_hit(
                     &mut hits,
                     &mut seen,
-                    Sp1BucketId::Loop2TargetS27MemoryIsMemory,
+                    Sp1BucketId::SemMemoryKindSelectorConsistency,
                     details_kv(&[
                         ("step_idx", json!(insn.step_idx)),
                         ("word", json!(format!("0x{:08x}", insn.word))),
@@ -90,7 +90,7 @@ pub fn match_bucket_hits(trace: &Sp1Trace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        Sp1BucketId::Loop2TargetS29DigestInteractionKind,
+                        Sp1BucketId::SemInteractionDigestKindRoute,
                         details_kv(&[
                             ("step_idx", json!(insn.step_idx)),
                             ("word", json!(format!("0x{:08x}", insn.word))),
@@ -111,7 +111,7 @@ pub fn match_bucket_hits(trace: &Sp1Trace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        Sp1BucketId::Loop1OracleRegzeroStoreAddr0,
+                        Sp1BucketId::RegStoreAddrZeroViaX0,
                         details_kv(&[
                             ("step_idx", json!(insn.step_idx)),
                             ("word", json!(format!("0x{:08x}", insn.word))),
@@ -123,7 +123,7 @@ pub fn match_bucket_hits(trace: &Sp1Trace) -> Vec<BucketHit> {
                 push_hit(
                     &mut hits,
                     &mut seen,
-                    Sp1BucketId::Loop2TargetS28EcallNextPc,
+                    Sp1BucketId::SemControlEcallNextPc,
                     details_kv(&[
                         ("step_idx", json!(insn.step_idx)),
                         ("word", json!(format!("0x{:08x}", insn.word))),

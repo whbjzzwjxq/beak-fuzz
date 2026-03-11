@@ -1,4 +1,4 @@
-use beak_core::fuzz::loop1::{BackendEval, LoopBackend};
+use beak_core::fuzz::benchmark::{BackendEval, BenchmarkBackend};
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::Trace;
 
@@ -320,7 +320,7 @@ impl OpenVmBackend {
     }
 }
 
-impl LoopBackend for OpenVmBackend {
+impl BenchmarkBackend for OpenVmBackend {
     fn is_usable_seed(&self, words: &[u32]) -> bool {
         if words.is_empty() {
             return false;

@@ -49,11 +49,11 @@ install-pico: $(VIRTUALENV)
 
 install-jolt: $(VIRTUALENV)
 	uv sync --package jolt-fuzzer
-	$(UV_RUN) jolt-fuzzer install --zkvm-src ./jolt-src --commit-or-branch main
+	$(UV_RUN) jolt-fuzzer install --zkvm-src ./jolt-src --commit-or-branch e9caa23565dbb13019afe61a2c95f51d1999e286
 
 install-nexus: $(VIRTUALENV)
 	uv sync --package nexus-fuzzer
-	$(UV_RUN) nexus-fuzzer install --zkvm-src ./nexus-src --commit-or-branch main
+	$(UV_RUN) nexus-fuzzer install --zkvm-src ./nexus-src --commit-or-branch 636ccb360d0f4ae657ae4bb64e1e275ccec8826
 
 $(PYRIGHTCONFIG):
 	@echo "Generating $(PYRIGHTCONFIG) for pyright ..."

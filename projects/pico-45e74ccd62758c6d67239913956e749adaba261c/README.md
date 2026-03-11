@@ -1,4 +1,4 @@
-# Pico 45e74ccd Repro (OpenVM-style Project Entry)
+# Pico 45e74ccd Benchmark Repro
 
 Target commit:
 
@@ -19,18 +19,22 @@ cd path/to/beak/projects/pico-45e74ccd62758c6d67239913956e749adaba261c
 cargo build --release --bin beak-trace --bin beak-fuzz
 ```
 
-## 3) Full workflow (single command)
+## 3) Benchmark run (single command)
 
-Run install + loop1 using a single project-local Rust entry:
+Run the initial-corpus benchmark with semantic witness search:
 
 ```bash
 cd path/to/beak/projects/pico-45e74ccd62758c6d67239913956e749adaba261c
-cargo run --release -q --bin beak-fuzz -- --iters 1000
+cargo run --release -q --bin beak-fuzz -- \
+  --initial-limit 1000 \
+  --timeout-ms 3000 \
+  --semantic-window-before 16 \
+  --semantic-window-after 64 \
+  --semantic-max-trials-per-bucket 64
 ```
 
-Optional flags:
-
-- `--chain-direct-injection`: emit loop2-direct output skeleton
+Outputs are written under `path/to/beak/storage/fuzzing_seeds/` with the
+prefix `benchmark-pico-45e74ccd-...`.
 
 Install location (OpenVM-style):
 
@@ -38,7 +42,7 @@ Install location (OpenVM-style):
 
 ## 4) Targeted trace run (`beak-trace`)
 
-Run loop2 replay for one inline binary (no `audit-check/` fixtures):
+Run a targeted benchmark for one inline binary:
 
 ```bash
 cd path/to/beak/projects/pico-45e74ccd62758c6d67239913956e749adaba261c

@@ -44,7 +44,7 @@ pub fn match_bucket_hits(trace: &PicoTrace) -> Vec<BucketHit> {
                 push_hit(
                     &mut hits,
                     &mut seen,
-                    PicoBucketId::Loop2TargetMemLoadPath,
+                    PicoBucketId::SemMemoryTimestampedLoadPath,
                     details_kv(&[
                         ("step_idx", json!(insn.step_idx)),
                         ("word", json!(format!("0x{:08x}", insn.word))),
@@ -54,7 +54,7 @@ pub fn match_bucket_hits(trace: &PicoTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        PicoBucketId::Loop2TargetMultiplicityBoolConstraint,
+                        PicoBucketId::SemLookupBooleanMultiplicity,
                         details_kv(&[
                             ("step_idx", json!(insn.step_idx)),
                             ("word", json!(format!("0x{:08x}", insn.word))),
@@ -74,7 +74,7 @@ pub fn match_bucket_hits(trace: &PicoTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        PicoBucketId::Loop1OracleRegzeroStoreAddr0,
+                        PicoBucketId::RegStoreAddrZeroViaX0,
                         details_kv(&[
                             ("step_idx", json!(insn.step_idx)),
                             ("word", json!(format!("0x{:08x}", insn.word))),

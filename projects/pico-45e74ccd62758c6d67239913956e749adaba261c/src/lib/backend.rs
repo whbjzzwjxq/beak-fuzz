@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -5,7 +6,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use beak_core::fuzz::loop1::{BackendEval, LoopBackend};
+use beak_core::fuzz::benchmark::{
+    BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
+};
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{BucketHit, Trace};
 use serde::{Deserialize, Serialize};
@@ -38,6 +41,8 @@ pub struct WorkerResponse {
     pub micro_op_count: usize,
     pub bucket_hits: Vec<BucketHit>,
     pub backend_error: Option<String>,
+    pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
+    pub injection_applied: bool,
 }
 
 const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
@@ -57,6 +62,23 @@ struct RealRunnerResponse {
     prove_ok: bool,
     verify_ok: bool,
     error: Option<String>,
+    observed_injection_sites: BTreeMap<String, Vec<u64>>,
+    injection_applied: bool,
+}
+
+const TIMESTAMP_INJECT_KIND: &str = "pico.audit_timestamp.mem_offset_flip";
+const BOOL_INJECT_KIND: &str = "pico.audit_multiplicity_bool_constraint.local_event_row";
+
+fn base_inject_kind(kind: &str) -> &str {
+    kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
+}
+
+fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
+    if variant.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind}::{variant}")
+    }
 }
 
 fn real_runner_manifest_path() -> PathBuf {
@@ -190,6 +212,8 @@ pub fn run_backend_once(
     inject_step: u64,
 ) -> Result<WorkerResponse, String> {
     let mut eval = BackendEval::default();
+    let mut observed_injection_sites = BTreeMap::new();
+    let mut injection_applied = false;
 
     let runner_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_pico_real_backend(words, timeout_ms, inject_kind, inject_step)
@@ -197,6 +221,8 @@ pub fn run_backend_once(
 
     match runner_res {
         Ok(Ok(resp)) => {
+            observed_injection_sites = resp.observed_injection_sites;
+            injection_applied = resp.injection_applied;
             eval.final_regs = resp.final_regs;
             eval.micro_op_count = resp.micro_op_count;
             if let Some(err) = resp.error {
@@ -235,6 +261,8 @@ pub fn run_backend_once(
         micro_op_count: eval.micro_op_count,
         bucket_hits: eval.bucket_hits,
         backend_error: eval.backend_error,
+        observed_injection_sites,
+        injection_applied,
     })
 }
 
@@ -242,6 +270,7 @@ pub struct PicoBackend {
     max_instructions: usize,
     timeout_ms: u64,
     eval: BackendEval,
+    last_observed_injection_sites: BTreeMap<String, Vec<u64>>,
     current_iteration: u64,
     next_request_id: u64,
     pending_injection: Option<WitnessInjectionPlan>,
@@ -261,6 +290,7 @@ impl PicoBackend {
             max_instructions,
             timeout_ms,
             eval: BackendEval::default(),
+            last_observed_injection_sites: BTreeMap::new(),
             current_iteration: 0,
             next_request_id: 1,
             pending_injection: None,
@@ -268,21 +298,18 @@ impl PicoBackend {
         }
     }
 
-    fn map_bucket_to_injection(bucket_id: &str, _step: u64) -> Option<WitnessInjectionPlan> {
-        let (kind, step) = match bucket_id {
-            // Row-level witness injection in MemoryReadWrite + MemoryInitializeFinalize.
-            "pico.loop2.target.mem_load_path" => ("pico.audit_timestamp.mem_row_wraparound", u64::MAX),
-            // Row-level witness injection in MemoryLocal (is_real column).
-            "pico.loop2.target.multiplicity_bool_constraint" => (
-                "pico.audit_multiplicity_bool_constraint.local_event_row",
-                u64::MAX,
-            ),
-            _ => return None,
-        };
-        Some(WitnessInjectionPlan {
-            kind: kind.to_string(),
-            step,
-        })
+    fn ordered_steps_around_anchor(steps: &[u64], anchor: u64) -> Vec<u64> {
+        let mut ordered = steps.to_vec();
+        ordered.sort_by_key(|step| {
+            let dist = if *step >= anchor {
+                step.saturating_sub(anchor)
+            } else {
+                anchor.saturating_sub(*step)
+            };
+            (dist, *step)
+        });
+        ordered.dedup();
+        ordered
     }
 
     fn step_from_hit(hit: &BucketHit) -> u64 {
@@ -293,24 +320,82 @@ impl PicoBackend {
             .unwrap_or(0)
     }
 
-    fn select_injection_from_hits(hits: &[BucketHit]) -> Option<WitnessInjectionPlan> {
-        const TARGET_PRIORITY: [&str; 2] = [
-            "pico.loop2.target.multiplicity_bool_constraint",
-            "pico.loop2.target.mem_load_path",
-        ];
-        for target in TARGET_PRIORITY {
-            if let Some(hit) = hits.iter().find(|h| h.bucket_id == target) {
-                if let Some(plan) = Self::map_bucket_to_injection(&hit.bucket_id, Self::step_from_hit(hit)) {
-                    return Some(plan);
-                }
-            }
+    fn timestamp_variant_specs() -> Vec<String> {
+        let mut specs = Vec::new();
+        for rank in 0..1024u32 {
+            specs.push(format!("mode=noop_prefix,rank={rank}"));
         }
-        for hit in hits {
-            if let Some(plan) = Self::map_bucket_to_injection(&hit.bucket_id, Self::step_from_hit(hit)) {
-                return Some(plan);
-            }
+        specs.push("mode=prev_timestamp_zero".to_string());
+        specs.push("mode=prev_chunk_alias".to_string());
+        specs.push("mode=memory_pos_c".to_string());
+        specs.push("mode=memory_pos_b".to_string());
+        specs.push("mode=memory_pos_a".to_string());
+        specs.push("mode=legacy_wrap".to_string());
+        specs
+    }
+
+    fn bool_variant_specs() -> Vec<String> {
+        let mut specs = Vec::new();
+        for rank in 0..1024u32 {
+            specs.push(format!("mode=noop_prefix,rank={rank}"));
         }
-        None
+        specs.push("mode=is_real_zero".to_string());
+        specs.push("mode=legacy_is_real_twice".to_string());
+        specs.push("mode=is_real_shadow_zero".to_string());
+        specs
+    }
+
+    fn inject_kinds_for_base(inject_kind: &str) -> Vec<String> {
+        match inject_kind {
+            TIMESTAMP_INJECT_KIND => Self::timestamp_variant_specs()
+                .into_iter()
+                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
+                .collect(),
+            BOOL_INJECT_KIND => Self::bool_variant_specs()
+                .into_iter()
+                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
+                .collect(),
+            _ => vec![inject_kind.to_string()],
+        }
+    }
+
+    fn semantic_candidate_from_hit(&self, hit: &BucketHit) -> Vec<SemanticInjectionCandidate> {
+        let anchor = Self::step_from_hit(hit);
+        let (semantic_class, inject_kind, fallback_schedule) = match hit.bucket_id.as_str() {
+            "pico.sem.memory.timestamped_load_path" => (
+                "pico.semantic.memory.access_position_consistency",
+                TIMESTAMP_INJECT_KIND,
+                InjectionSchedule::AroundAnchor(anchor),
+            ),
+            "pico.sem.lookup.boolean_multiplicity" => (
+                "pico.semantic.lookup.boolean_multiplicity",
+                BOOL_INJECT_KIND,
+                InjectionSchedule::AroundAnchor(anchor),
+            ),
+            _ => return Vec::new(),
+        };
+        let schedule = self
+            .last_observed_injection_sites
+            .get(base_inject_kind(inject_kind))
+            .map(|steps| InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor)))
+            .unwrap_or(fallback_schedule);
+        Self::inject_kinds_for_base(inject_kind)
+            .into_iter()
+            .map(|kind| SemanticInjectionCandidate {
+                bucket_id: hit.bucket_id.clone(),
+                semantic_class: semantic_class.to_string(),
+                inject_kind: kind,
+                schedule: schedule.clone(),
+            })
+            .collect()
+    }
+
+    fn semantic_candidate_priority(candidate: &SemanticInjectionCandidate) -> u8 {
+        match candidate.bucket_id.as_str() {
+            "pico.sem.lookup.boolean_multiplicity" => 0,
+            "pico.sem.memory.timestamped_load_path" => 1,
+            _ => 2,
+        }
     }
 
     fn start_worker(&mut self) -> Result<(), String> {
@@ -402,7 +487,7 @@ impl PicoBackend {
     }
 }
 
-impl LoopBackend for PicoBackend {
+impl BenchmarkBackend for PicoBackend {
     fn is_usable_seed(&self, words: &[u32]) -> bool {
         if words.is_empty() || words.len() > self.max_instructions {
             return false;
@@ -412,6 +497,7 @@ impl LoopBackend for PicoBackend {
 
     fn prepare_for_run(&mut self, _rng_seed: u64) {
         self.eval = BackendEval::default();
+        self.last_observed_injection_sites.clear();
         self.current_iteration = self.current_iteration.saturating_add(1);
     }
 
@@ -421,6 +507,7 @@ impl LoopBackend for PicoBackend {
         self.eval.bucket_hits.clear();
         self.eval.micro_op_count = 0;
         self.eval.final_regs = None;
+        self.eval.semantic_injection_applied = false;
         self.start_worker()?;
 
         let request_id = self.next_request_id;
@@ -505,7 +592,9 @@ impl LoopBackend for PicoBackend {
             bucket_hits: resp.bucket_hits,
             final_regs: resp.final_regs,
             backend_error: resp.backend_error.clone(),
+            semantic_injection_applied: resp.injection_applied,
         };
+        self.last_observed_injection_sites = resp.observed_injection_sites;
 
         if let Some(err) = resp.backend_error {
             return Err(err);
@@ -518,17 +607,24 @@ impl LoopBackend for PicoBackend {
         self.eval.clone()
     }
 
-    fn bucket_has_direct_injection(&self, bucket_id: &str) -> bool {
-        Self::map_bucket_to_injection(bucket_id, 0).is_some()
-    }
-
-    fn clear_direct_injection(&mut self) {
+    fn clear_semantic_injection(&mut self) {
         self.pending_injection = None;
     }
 
-    fn arm_direct_injection_from_hits(&mut self, hits: &[BucketHit]) -> Option<String> {
-        self.pending_injection = Self::select_injection_from_hits(hits);
-        self.pending_injection.as_ref().map(|p| p.kind.clone())
+    fn arm_semantic_injection(&mut self, kind: &str, step: u64) -> Result<(), String> {
+        self.pending_injection = Some(WitnessInjectionPlan {
+            kind: kind.to_string(),
+            step,
+        });
+        Ok(())
+    }
+
+    fn semantic_injection_candidates(&self, hits: &[BucketHit]) -> Vec<SemanticInjectionCandidate> {
+        let mut candidates: Vec<_> = hits.iter()
+            .flat_map(|hit| self.semantic_candidate_from_hit(hit))
+            .collect();
+        candidates.sort_by_key(Self::semantic_candidate_priority);
+        candidates
     }
 }
 

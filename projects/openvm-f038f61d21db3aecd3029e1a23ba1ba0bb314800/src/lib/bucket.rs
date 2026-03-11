@@ -320,7 +320,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
             push_hit(
                 &mut hits,
                 &mut seen,
-                OpenVMBucketId::Loop2TargetVolatileAddrRange,
+                OpenVMBucketId::SemMemoryVolatileBoundaryRange,
                 details_kv(&[
                     ("kind", json!(kind)),
                     ("chip_name", json!(base.chip_name)),
@@ -433,15 +433,17 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                         );
                     }
 
-                    // Loop2 target (audit-o5 candidate): mutate immediate-limb paths on
-                    // ALU-family rows where rs2 comes from an immediate.
+                    // Semantic target: mutate immediate-limb paths on ALU-family
+                    // rows where rs2 comes from an immediate.
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        OpenVMBucketId::Loop2TargetBaseAluImmLimbs,
+                        OpenVMBucketId::SemAluImmediateLimbConsistency,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("imm", json!(v)),
+                            ("step_idx", json!(base.step_idx)),
+                            ("op_idx", json!(base.op_idx)),
                         ]),
                     );
                 }
@@ -774,22 +776,19 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     OpenVMBucketId::AuipcSeen,
                     details_kv(&[]),
                 );
-                let can_inject_o7 = ((*from_pc >> 24) != 0) || (((*imm >> 16) & 0xff) != 0);
-                if can_inject_o7 {
-                    push_hit(
-                        &mut hits,
-                        &mut seen,
-                        OpenVMBucketId::Loop2TargetAuipcPcLimbs,
-                        details_kv(&[
-                            ("kind", json!(kind)),
-                            ("chip_name", json!(base.chip_name)),
-                            ("step_idx", json!(base.step_idx)),
-                            ("op_idx", json!(base.op_idx)),
-                            ("from_pc", json!(*from_pc)),
-                            ("imm", json!(*imm)),
-                        ]),
-                    );
-                }
+                push_hit(
+                    &mut hits,
+                    &mut seen,
+                    OpenVMBucketId::SemControlAuipcPcLimbConsistency,
+                    details_kv(&[
+                        ("kind", json!(kind)),
+                        ("chip_name", json!(base.chip_name)),
+                        ("step_idx", json!(base.step_idx)),
+                        ("op_idx", json!(base.op_idx)),
+                        ("from_pc", json!(*from_pc)),
+                        ("imm", json!(*imm)),
+                    ]),
+                );
                 if *rd_ptr == 0 {
                     push_hit(
                         &mut hits,
@@ -822,7 +821,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                 push_hit(
                     &mut hits,
                     &mut seen,
-                    OpenVMBucketId::Loop2TargetLoadstoreMemAs,
+                    OpenVMBucketId::SemMemoryAddressSpaceConsistency,
                     details_kv(&[
                         ("kind", json!(kind)),
                         ("chip_name", json!(base.chip_name)),
@@ -932,7 +931,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                 push_hit(
                     &mut hits,
                     &mut seen,
-                    OpenVMBucketId::Loop2TargetLoadstoreMemAs,
+                    OpenVMBucketId::SemMemoryAddressSpaceConsistency,
                     details_kv(&[
                         ("kind", json!(kind)),
                         ("chip_name", json!(base.chip_name)),
@@ -1004,7 +1003,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        OpenVMBucketId::Loop2TargetConnectorStartTs,
+                        OpenVMBucketId::SemTimeBoundaryOriginConsistency,
                         details_kv(&[
                             ("kind", json!(kind)),
                             ("chip_name", json!(base.chip_name)),
@@ -1064,8 +1063,23 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
         );
     }
 
-    // Coarse loop2 candidate (audit-o3): if the same step contains inactive rows
-    // and still has interactions, treat it as a mutation target.
+    if seen.contains(OpenVMBucketId::SystemTerminate.as_ref())
+        && seen.contains(OpenVMBucketId::TimeRowTimestampMissing.as_ref())
+        && !seen.contains(OpenVMBucketId::MemAccessSeen.as_ref())
+    {
+        push_hit(
+            &mut hits,
+            &mut seen,
+            OpenVMBucketId::SemTimeBoundaryOriginConsistency,
+            details_kv(&[
+                ("kind", json!("connector_fallback")),
+                ("chip_name", json!("SystemConnector")),
+            ]),
+        );
+    }
+
+    // Suspicious semantic pattern: the same step contains inactive rows and
+    // still has interactions.
     let max_steps = trace.instructions().len();
     for step in 0..max_steps {
         let has_invalid = trace.chip_rows_for_step(step).any(|r| !r.base().is_valid);
@@ -1079,7 +1093,7 @@ pub fn match_bucket_hits(trace: &OpenVMTrace) -> Vec<BucketHit> {
         push_hit(
             &mut hits,
             &mut seen,
-            OpenVMBucketId::Loop2InactiveRowStepHasInteraction,
+            OpenVMBucketId::RowInvalidHasInteraction,
             details_kv(&[
                 ("step_idx", json!(step)),
                 ("interaction_count", json!(ia_count)),

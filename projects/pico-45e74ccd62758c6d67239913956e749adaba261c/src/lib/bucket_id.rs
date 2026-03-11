@@ -9,11 +9,11 @@ pub enum PicoBucketId {
     #[strum(serialize = "pico.input.has_auipc")]
     InputHasAuipc,
 
-    #[strum(serialize = "pico.loop1.oracle.regzero_store_addr0")]
-    Loop1OracleRegzeroStoreAddr0,
+    #[strum(serialize = "pico.reg.store_addr_zero_via_x0")]
+    RegStoreAddrZeroViaX0,
 
-    #[strum(serialize = "pico.loop2.target.mem_load_path")]
-    Loop2TargetMemLoadPath,
-    #[strum(serialize = "pico.loop2.target.multiplicity_bool_constraint")]
-    Loop2TargetMultiplicityBoolConstraint,
+    #[strum(serialize = "pico.sem.memory.timestamped_load_path")]
+    SemMemoryTimestampedLoadPath,
+    #[strum(serialize = "pico.sem.lookup.boolean_multiplicity")]
+    SemLookupBooleanMultiplicity,
 }

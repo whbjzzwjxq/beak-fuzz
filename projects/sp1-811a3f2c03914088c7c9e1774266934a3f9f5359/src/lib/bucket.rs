@@ -30,7 +30,6 @@ fn push_hit(
 pub fn match_bucket_hits(trace: &Sp1Trace) -> Vec<BucketHit> {
     let mut hits = Vec::new();
     let mut seen = HashSet::<String>::new();
-    let mut saw_store = false;
 
     for insn in trace.instructions() {
         match insn.mnemonic.as_str() {
@@ -44,23 +43,12 @@ pub fn match_bucket_hits(trace: &Sp1Trace) -> Vec<BucketHit> {
                 push_hit(
                     &mut hits,
                     &mut seen,
-                    Sp1BucketId::Loop2TargetMemLoadPath,
+                    Sp1BucketId::SemMemoryTimestampedLoadPath,
                     details_kv(&[
                         ("step_idx", json!(insn.step_idx)),
                         ("word", json!(format!("0x{:08x}", insn.word))),
                     ]),
                 );
-                if saw_store {
-                    push_hit(
-                        &mut hits,
-                        &mut seen,
-                        Sp1BucketId::Loop2TargetMultiplicityBoolConstraint,
-                        details_kv(&[
-                            ("step_idx", json!(insn.step_idx)),
-                            ("word", json!(format!("0x{:08x}", insn.word))),
-                        ]),
-                    );
-                }
             }
             "sw" => {
                 push_hit(
@@ -69,12 +57,20 @@ pub fn match_bucket_hits(trace: &Sp1Trace) -> Vec<BucketHit> {
                     Sp1BucketId::InputHasStore,
                     HashMap::new(),
                 );
-                saw_store = true;
+                push_hit(
+                    &mut hits,
+                    &mut seen,
+                    Sp1BucketId::SemLookupBooleanMultiplicity,
+                    details_kv(&[
+                        ("step_idx", json!(insn.step_idx)),
+                        ("word", json!(format!("0x{:08x}", insn.word))),
+                    ]),
+                );
                 if insn.rs1 == Some(0) && insn.imm == Some(0) {
                     push_hit(
                         &mut hits,
                         &mut seen,
-                        Sp1BucketId::Loop1OracleRegzeroStoreAddr0,
+                        Sp1BucketId::RegStoreAddrZeroViaX0,
                         details_kv(&[
                             ("step_idx", json!(insn.step_idx)),
                             ("word", json!(format!("0x{:08x}", insn.word))),

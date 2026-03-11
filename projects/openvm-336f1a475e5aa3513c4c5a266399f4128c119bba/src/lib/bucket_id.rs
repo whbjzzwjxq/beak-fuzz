@@ -77,6 +77,8 @@ pub enum OpenVMBucketId {
     MemAddrSpaceIsOther,
     #[strum(serialize = "openvm.mem.imm_sign_true")]
     MemImmSignTrue,
+    #[strum(serialize = "openvm.sem.memory.immediate_sign_consistency")]
+    SemMemoryImmediateSignConsistency,
     #[strum(serialize = "openvm.mem.effective_ptr_zero")]
     MemEffectivePtrZero,
     #[strum(serialize = "openvm.mem.effective_ptr_unaligned2")]
@@ -135,10 +137,12 @@ pub enum OpenVMBucketId {
     #[strum(serialize = "openvm.interaction.bitwise.z_eq_0")]
     InteractionBitwiseZEq0,
 
-    #[strum(serialize = "openvm.loop2.inactive_row.step_has_interaction")]
-    Loop2InactiveRowStepHasInteraction,
-    #[strum(serialize = "openvm.loop2.target.base_alu_imm_limbs")]
-    Loop2TargetBaseAluImmLimbs,
-    #[strum(serialize = "openvm.loop2.target.auipc_pc_limbs")]
-    Loop2TargetAuipcPcLimbs,
+    #[strum(serialize = "openvm.row.invalid_has_interaction")]
+    RowInvalidHasInteraction,
+    #[strum(serialize = "openvm.sem.alu.immediate_limb_consistency")]
+    SemAluImmediateLimbConsistency,
+    #[strum(serialize = "openvm.sem.bitwise.xor_lookup_consistency")]
+    SemBitwiseXorLookupConsistency,
+    #[strum(serialize = "openvm.sem.control.auipc_pc_limb_consistency")]
+    SemControlAuipcPcLimbConsistency,
 }

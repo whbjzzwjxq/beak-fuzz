@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Arg, Command};
 
-use beak_core::fuzz::loop1::{run_loop1_threaded, Loop1Config, DEFAULT_RNG_SEED};
+use beak_core::fuzz::benchmark::{run_benchmark_threaded, BenchmarkConfig, DEFAULT_RNG_SEED};
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
 use beak_openvm_d7eab708::backend::{
@@ -40,7 +40,7 @@ fn parse_u32_arg(value: &str, name: &str) -> u32 {
 
 fn main() {
     let matches = Command::new("beak-fuzz")
-        .about("Loop1: in-process mutational fuzzing (oracle vs OpenVM) with bucket-guided feedback.")
+        .about("Initial-corpus benchmark with semantic witness search (oracle vs OpenVM).")
         .arg(
             Arg::new("seeds_jsonl")
                 .long("seeds-jsonl")
@@ -68,10 +68,28 @@ fn main() {
                 .help("Maximum number of RISC-V instruction words in a seed."),
         )
         .arg(
-            Arg::new("iters")
-                .long("iters")
-                .default_value("100")
-                .help("Number of fuzz iterations (in addition to initial corpus evaluation)."),
+            Arg::new("semantic_window_before")
+                .long("semantic-window-before")
+                .default_value("16")
+                .help("Search this many witness steps before a matched semantic anchor."),
+        )
+        .arg(
+            Arg::new("semantic_window_after")
+                .long("semantic-window-after")
+                .default_value("64")
+                .help("Search this many witness steps after a matched semantic anchor."),
+        )
+        .arg(
+            Arg::new("semantic_step_stride")
+                .long("semantic-step-stride")
+                .default_value("1")
+                .help("Stride used when expanding semantic witness search windows."),
+        )
+        .arg(
+            Arg::new("semantic_max_trials_per_bucket")
+                .long("semantic-max-trials-per-bucket")
+                .default_value("64")
+                .help("Maximum injected replay attempts for each semantic bucket on a seed."),
         )
         .arg(
             Arg::new("oracle_memory_model")
@@ -115,7 +133,26 @@ fn main() {
         matches.get_one::<String>("initial_limit").unwrap().parse().expect("initial-limit");
     let max_instructions: usize =
         matches.get_one::<String>("max_instructions").unwrap().parse().expect("max-instructions");
-    let iters: usize = matches.get_one::<String>("iters").unwrap().parse().expect("iters");
+    let semantic_window_before: u64 = matches
+        .get_one::<String>("semantic_window_before")
+        .unwrap()
+        .parse()
+        .expect("semantic-window-before");
+    let semantic_window_after: u64 = matches
+        .get_one::<String>("semantic_window_after")
+        .unwrap()
+        .parse()
+        .expect("semantic-window-after");
+    let semantic_step_stride: u64 = matches
+        .get_one::<String>("semantic_step_stride")
+        .unwrap()
+        .parse()
+        .expect("semantic-step-stride");
+    let semantic_max_trials_per_bucket: usize = matches
+        .get_one::<String>("semantic_max_trials_per_bucket")
+        .unwrap()
+        .parse()
+        .expect("semantic-max-trials-per-bucket");
     let oracle_memory_model = OracleMemoryModel::parse(
         matches.get_one::<String>("oracle_memory_model").unwrap(),
     )
@@ -127,7 +164,7 @@ fn main() {
         "oracle-data-size-bytes",
     );
 
-    let cfg = Loop1Config {
+    let cfg = BenchmarkConfig {
         zkvm_tag: "openvm".to_string(),
         zkvm_commit: ZKVM_COMMIT.to_string(),
         rng_seed: DEFAULT_RNG_SEED,
@@ -142,13 +179,16 @@ fn main() {
         output_prefix: None,
         initial_limit,
         max_instructions,
-        iters,
-        chain_direct_injection: false,
         precheck_oracle_max_steps: 0,
+        semantic_search_enabled: true,
+        semantic_window_before,
+        semantic_window_after,
+        semantic_step_stride,
+        semantic_max_trials_per_bucket,
         stack_size_bytes: 256 * 1024 * 1024,
     };
 
-    let res = run_loop1_threaded(cfg, move || OpenVmBackend::new(max_instructions, timeout_ms));
+    let res = run_benchmark_threaded(cfg, move || OpenVmBackend::new(max_instructions, timeout_ms));
     match res {
         Ok(out) => {
             println!("Wrote corpus JSONL: {}", out.corpus_path.display());

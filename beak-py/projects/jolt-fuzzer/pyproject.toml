@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jolt-fuzzer"
+version = "0.0.1"
+description = "Installer entry for the Jolt zkVM"
+requires-python = ">= 3.10"
+authors = []
+readme = "README.md"
+dependencies = [
+  "zkvm-fuzzer-utils",
+]
+
+[project.scripts]
+jolt-fuzzer = "jolt_fuzzer.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["jolt_fuzzer*"]
+exclude = []

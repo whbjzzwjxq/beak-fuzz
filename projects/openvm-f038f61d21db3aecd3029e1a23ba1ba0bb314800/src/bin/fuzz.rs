@@ -5,8 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Arg, Command};
 use serde_json::json;
 
-use beak_core::fuzz::loop1::{run_loop1_threaded, Loop1Config, DEFAULT_RNG_SEED};
-use beak_core::fuzz::loop2::run_direct_bucket_mutate_threaded;
+use beak_core::fuzz::benchmark::{run_benchmark_threaded, BenchmarkConfig, DEFAULT_RNG_SEED};
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
 use beak_openvm_f038f61d::backend::{
@@ -84,7 +83,7 @@ fn write_inline_seed_jsonl(root: &Path, words: &[u32]) -> PathBuf {
 
 fn main() {
     let matches = Command::new("beak-fuzz")
-        .about("Loop1: in-process mutational fuzzing (oracle vs OpenVM) with bucket-guided feedback.")
+        .about("Initial-corpus benchmark with semantic witness search (oracle vs OpenVM).")
         .arg(
             Arg::new("bin")
                 .long("bin")
@@ -93,22 +92,60 @@ fn main() {
                 .action(clap::ArgAction::Append),
         )
         .arg(
+            Arg::new("seeds_jsonl")
+                .long("seeds-jsonl")
+                .default_value("storage/fuzzing_seeds/initial.jsonl")
+                .help(
+                    "Path to the initial seed JSONL (relative to workspace root unless absolute).",
+                ),
+        )
+        .arg(
             Arg::new("timeout_ms")
                 .long("timeout-ms")
                 .default_value("500")
                 .help("Best-effort per-seed wall-time timeout in milliseconds."),
         )
         .arg(
-            Arg::new("iters")
-                .long("iters")
-                .default_value("100")
-                .help("Loop1 iteration count (ignored when --bucket-direct-mutate is set)."),
+            Arg::new("initial_limit")
+                .long("initial-limit")
+                .default_value("0")
+                .help("Limit number of initial seeds loaded (0 = no limit)."),
+        )
+        .arg(
+            Arg::new("max_instructions")
+                .long("max-instructions")
+                .default_value("256")
+                .help("Maximum number of RISC-V instruction words in a seed."),
+        )
+        .arg(
+            Arg::new("semantic_window_before")
+                .long("semantic-window-before")
+                .default_value("16")
+                .help("Search this many witness steps before a matched semantic anchor."),
+        )
+        .arg(
+            Arg::new("semantic_window_after")
+                .long("semantic-window-after")
+                .default_value("64")
+                .help("Search this many witness steps after a matched semantic anchor."),
+        )
+        .arg(
+            Arg::new("semantic_step_stride")
+                .long("semantic-step-stride")
+                .default_value("1")
+                .help("Stride used when expanding semantic witness search windows."),
+        )
+        .arg(
+            Arg::new("semantic_max_trials_per_bucket")
+                .long("semantic-max-trials-per-bucket")
+                .default_value("64")
+                .help("Maximum injected replay attempts for each semantic bucket on a seed."),
         )
         .arg(
             Arg::new("oracle_precheck_max_steps")
                 .long("oracle-precheck-max-steps")
                 .default_value("400")
-                .help("Loop1 pre-check step cap; if oracle reaches this bound, skip backend for this input. Set 0 to disable."),
+                .help("Oracle pre-check step cap; if oracle reaches this bound, skip backend for this input. Set 0 to disable."),
         )
         .arg(
             Arg::new("oracle_memory_model")
@@ -135,18 +172,6 @@ fn main() {
                 .action(clap::ArgAction::SetTrue)
                 .help("Run persistent backend worker loop from stdin JSONL."),
         )
-        .arg(
-            Arg::new("bucket_direct_mutate")
-                .long("bucket-direct-mutate")
-                .action(clap::ArgAction::SetTrue)
-                .help("Direct mode: hit bucket then immediately rerun same seed with witness injection (no random fuzz loop)."),
-        )
-        .arg(
-            Arg::new("chain_direct_injection")
-                .long("chain-direct-injection")
-                .action(clap::ArgAction::SetTrue)
-                .help("Loop1 mode: if a seed hits a direct-injection bucket, rerun the same seed once with witness injection."),
-        )
         .get_matches();
 
     if matches.get_flag("worker_loop") {
@@ -157,32 +182,58 @@ fn main() {
     let root = workspace_root();
     let inline_words = collect_bin_words(&matches);
     let seeds_path = if inline_words.is_empty() {
-        resolve_path(&root, "storage/fuzzing_seeds/initial.jsonl")
+        resolve_path(&root, matches.get_one::<String>("seeds_jsonl").unwrap())
     } else {
         write_inline_seed_jsonl(&root, &inline_words)
     };
 
     let timeout_ms: u64 =
         matches.get_one::<String>("timeout_ms").unwrap().parse().expect("timeout-ms");
-    let requested_iters: usize = matches
-        .get_one::<String>("iters")
+    let parsed_initial_limit: usize = matches
+        .get_one::<String>("initial_limit")
         .unwrap()
         .parse()
-        .expect("iters");
+        .expect("initial-limit");
+    let parsed_max_instructions: usize = matches
+        .get_one::<String>("max_instructions")
+        .unwrap()
+        .parse()
+        .expect("max-instructions");
     let oracle_precheck_max_steps: u32 = matches
         .get_one::<String>("oracle_precheck_max_steps")
         .unwrap()
         .parse()
         .expect("oracle-precheck-max-steps");
-    let initial_limit: usize = if inline_words.is_empty() { 0 } else { 1 };
-    let bucket_direct_mutate = matches.get_flag("bucket_direct_mutate");
-    let chain_direct_injection = matches.get_flag("chain_direct_injection");
+    let semantic_window_before: u64 = matches
+        .get_one::<String>("semantic_window_before")
+        .unwrap()
+        .parse()
+        .expect("semantic-window-before");
+    let semantic_window_after: u64 = matches
+        .get_one::<String>("semantic_window_after")
+        .unwrap()
+        .parse()
+        .expect("semantic-window-after");
+    let semantic_step_stride: u64 = matches
+        .get_one::<String>("semantic_step_stride")
+        .unwrap()
+        .parse()
+        .expect("semantic-step-stride");
+    let semantic_max_trials_per_bucket: usize = matches
+        .get_one::<String>("semantic_max_trials_per_bucket")
+        .unwrap()
+        .parse()
+        .expect("semantic-max-trials-per-bucket");
+    let initial_limit: usize = if inline_words.is_empty() {
+        parsed_initial_limit
+    } else {
+        1
+    };
     let max_instructions: usize = if inline_words.is_empty() {
-        256
+        parsed_max_instructions
     } else {
         inline_words.len().max(1)
     };
-    let iters: usize = if bucket_direct_mutate { 1 } else { requested_iters };
     let oracle_memory_model = OracleMemoryModel::parse(
         matches.get_one::<String>("oracle_memory_model").unwrap(),
     )
@@ -194,7 +245,7 @@ fn main() {
         "oracle-data-size-bytes",
     );
 
-    let cfg = Loop1Config {
+    let cfg = BenchmarkConfig {
         zkvm_tag: "openvm".to_string(),
         zkvm_commit: ZKVM_COMMIT.to_string(),
         rng_seed: DEFAULT_RNG_SEED,
@@ -209,17 +260,16 @@ fn main() {
         output_prefix: None,
         initial_limit,
         max_instructions,
-        iters,
-        chain_direct_injection: !bucket_direct_mutate && chain_direct_injection,
         precheck_oracle_max_steps: oracle_precheck_max_steps,
+        semantic_search_enabled: true,
+        semantic_window_before,
+        semantic_window_after,
+        semantic_step_stride,
+        semantic_max_trials_per_bucket,
         stack_size_bytes: 256 * 1024 * 1024,
     };
 
-    let res = if bucket_direct_mutate {
-        run_direct_bucket_mutate_threaded(cfg, move || OpenVmBackend::new(max_instructions, timeout_ms))
-    } else {
-        run_loop1_threaded(cfg, move || OpenVmBackend::new(max_instructions, timeout_ms))
-    };
+    let res = run_benchmark_threaded(cfg, move || OpenVmBackend::new(max_instructions, timeout_ms));
     match res {
         Ok(out) => {
             println!("Wrote corpus JSONL: {}", out.corpus_path.display());
@@ -273,6 +323,8 @@ fn run_worker_loop() {
                         micro_op_count: 0,
                         bucket_hits: Vec::new(),
                         backend_error: Some(e),
+                        observed_injection_sites: std::collections::BTreeMap::new(),
+                        injection_applied: false,
                     },
                     Err(p) => WorkerResponse {
                         request_id: req.request_id,
@@ -283,6 +335,8 @@ fn run_worker_loop() {
                             "worker panic in run_backend_once: {}",
                             panic_payload_to_string(p.as_ref())
                         )),
+                        observed_injection_sites: std::collections::BTreeMap::new(),
+                        injection_applied: false,
                     },
                 };
                 let payload = match serde_json::to_vec(&resp) {

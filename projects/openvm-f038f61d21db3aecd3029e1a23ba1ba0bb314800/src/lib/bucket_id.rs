@@ -137,16 +137,16 @@ pub enum OpenVMBucketId {
     #[strum(serialize = "openvm.interaction.bitwise.z_eq_0")]
     InteractionBitwiseZEq0,
 
-    #[strum(serialize = "openvm.loop2.inactive_row.step_has_interaction")]
-    Loop2InactiveRowStepHasInteraction,
-    #[strum(serialize = "openvm.loop2.target.base_alu_imm_limbs")]
-    Loop2TargetBaseAluImmLimbs,
-    #[strum(serialize = "openvm.loop2.target.auipc_pc_limbs")]
-    Loop2TargetAuipcPcLimbs,
-    #[strum(serialize = "openvm.loop2.target.connector_start_ts")]
-    Loop2TargetConnectorStartTs,
-    #[strum(serialize = "openvm.loop2.target.loadstore_mem_as")]
-    Loop2TargetLoadstoreMemAs,
-    #[strum(serialize = "openvm.loop2.target.volatile_addr_range")]
-    Loop2TargetVolatileAddrRange,
+    #[strum(serialize = "openvm.row.invalid_has_interaction")]
+    RowInvalidHasInteraction,
+    #[strum(serialize = "openvm.sem.alu.immediate_limb_consistency")]
+    SemAluImmediateLimbConsistency,
+    #[strum(serialize = "openvm.sem.control.auipc_pc_limb_consistency")]
+    SemControlAuipcPcLimbConsistency,
+    #[strum(serialize = "openvm.sem.time.boundary_origin_consistency")]
+    SemTimeBoundaryOriginConsistency,
+    #[strum(serialize = "openvm.sem.memory.address_space_consistency")]
+    SemMemoryAddressSpaceConsistency,
+    #[strum(serialize = "openvm.sem.memory.volatile_boundary_range")]
+    SemMemoryVolatileBoundaryRange,
 }

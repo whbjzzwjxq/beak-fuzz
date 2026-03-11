@@ -6,6 +6,8 @@ requires-python = ">=3.10"
 dependencies = [
     "jinja2>=3.1.6",
     "zkvm-fuzzer-utils",
+    "jolt-fuzzer",
+    "nexus-fuzzer",
     "openvm-fuzzer",
     "pico-fuzzer",
     "sp1-fuzzer",
@@ -24,6 +26,8 @@ workspace = { members = ["libs/*", "projects/*"] }
 
 [tool.uv.sources]
 zkvm-fuzzer-utils = { workspace = true }
+jolt-fuzzer = { workspace = true }
+nexus-fuzzer = { workspace = true }
 openvm-fuzzer = { workspace = true }
 pico-fuzzer = { workspace = true }
 sp1-fuzzer = { workspace = true }
@@ -50,7 +54,10 @@ profile = "black"
 [tool.pytest.ini_options]
 pythonpath = [
     "libs/zkvm-fuzzer-utils",
+    "projects/jolt-fuzzer",
+    "projects/nexus-fuzzer",
     "projects/openvm-fuzzer",
+    "projects/pico-fuzzer",
     "projects/sp1-fuzzer",
 ]
 testpaths = ["libs", "projects"]

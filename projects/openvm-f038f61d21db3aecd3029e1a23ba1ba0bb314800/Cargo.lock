@@ -3149,6 +3149,7 @@ version = "1.0.0-rc.1"
 dependencies = [
  "bitcode",
  "derive-new 0.6.0",
+ "fuzzer_utils",
  "itertools 0.14.0",
  "lazy_static",
  "num-bigint 0.4.6",

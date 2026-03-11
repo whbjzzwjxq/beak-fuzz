@@ -63,6 +63,7 @@ pub struct BackendEval {
     pub bucket_hits: Vec<BucketHit>,
     pub final_regs: Option<[u32; 32]>,
     pub backend_error: Option<String>,
+    pub semantic_injection_applied: bool,
 }
 
 pub trait LoopBackend {

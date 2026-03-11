@@ -2,6 +2,7 @@ use lazy_static::lazy_static;
 use openvm_stark_backend::p3_field::{Field, PrimeField32};
 use serde_json::json;
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use rand::rngs::StdRng;
@@ -85,6 +86,7 @@ pub struct GlobalState {
     pub injection_kind: String,
     pub injection_step: u64,
     pub witness_step_idx: u64,
+    pub observed_witness_sites: BTreeMap<String, Vec<u64>>,
     pub assertions_enabled: bool,
 
     pub rng: StdRng,
@@ -115,6 +117,7 @@ impl GlobalState {
             injection_kind,
             injection_step,
             witness_step_idx: 0,
+            observed_witness_sites: BTreeMap::new(),
             assertions_enabled: false,
             rng: StdRng::seed_from_u64(0),
             seed: 0,
@@ -137,6 +140,7 @@ impl GlobalState {
         self.row_count = 0;
         self.last_row_id = None;
         self.witness_step_idx = 0;
+        self.observed_witness_sites.clear();
         // Canonicalize Value trees before handing them out.
         //
         // We observed a serde edge case where a small subset of in-memory `Value`s may fail
@@ -158,8 +162,19 @@ impl GlobalState {
         cur
     }
 
+    fn note_witness_site(&mut self, kind: &str, step: u64) {
+        let sites = self.observed_witness_sites.entry(kind.to_string()).or_default();
+        if sites.last().copied() != Some(step) {
+            sites.push(step);
+        }
+    }
+
     pub fn should_inject_witness(&self, kind: &str, step: u64) -> bool {
         self.injection_enabled && self.injection_kind == kind && self.injection_step == step
+    }
+
+    pub fn take_observed_witness_sites(&mut self) -> BTreeMap<String, Vec<u64>> {
+        std::mem::take(&mut self.observed_witness_sites)
     }
 
     pub fn configure_witness_injection(&mut self, kind: Option<&str>, step: u64) {
@@ -868,7 +883,8 @@ pub fn next_witness_step() -> u64 {
 }
 
 pub fn should_inject_witness(kind: &str, step: u64) -> bool {
-    let state = GLOBAL_STATE.lock().unwrap();
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.note_witness_site(kind, step);
     state.should_inject_witness(kind, step)
 }
 
@@ -880,6 +896,11 @@ pub fn configure_witness_injection(kind: Option<&str>, step: u64) {
 pub fn take_json_logs() -> Vec<serde_json::Value> {
     let mut state = GLOBAL_STATE.lock().unwrap();
     state.take_json_logs()
+}
+
+pub fn take_observed_witness_sites() -> BTreeMap<String, Vec<u64>> {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.take_observed_witness_sites()
 }
 
 pub fn emit_base_alu_chip_row<const N: usize>(

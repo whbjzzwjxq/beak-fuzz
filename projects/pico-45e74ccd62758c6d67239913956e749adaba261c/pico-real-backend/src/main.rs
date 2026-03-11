@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
@@ -40,6 +41,42 @@ struct RunnerResponse {
     prove_ok: bool,
     verify_ok: bool,
     error: Option<String>,
+    observed_injection_sites: BTreeMap<String, Vec<u64>>,
+    injection_applied: bool,
+}
+
+const TIMESTAMP_INJECT_KIND: &str = "pico.audit_timestamp.mem_offset_flip";
+const BOOL_INJECT_KIND: &str = "pico.audit_multiplicity_bool_constraint.local_event_row";
+const LEGACY_BOOL_INJECT_KIND: &str = "pico.audit_isreal.local_event_row";
+
+fn base_inject_kind(kind: &str) -> &str {
+    kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
+}
+
+fn inject_variant_value<'a>(kind: &'a str, key: &str) -> Option<&'a str> {
+    let (_, variant) = kind.split_once("::")?;
+    for field in variant.split(',') {
+        let (field_key, field_value) = field.split_once('=')?;
+        if field_key == key {
+            return Some(field_value);
+        }
+    }
+    None
+}
+
+fn inject_variant_mode(kind: &str) -> Option<&str> {
+    inject_variant_value(kind, "mode")
+}
+
+fn mapped_env_inject_kind(kind: &str) -> String {
+    let base = match base_inject_kind(kind) {
+        BOOL_INJECT_KIND => LEGACY_BOOL_INJECT_KIND,
+        other => other,
+    };
+    match kind.split_once("::") {
+        Some((_, variant)) => format!("{base}::{variant}"),
+        None => base.to_string(),
+    }
 }
 
 fn i_from_r(opcode: Opcode, dec: &RType) -> Instruction {
@@ -270,15 +307,83 @@ fn mutate_records_for_injection(
     inject_step: u64,
 ) -> Result<(), String> {
     let kind = inject_kind.unwrap_or("");
-    std::env::set_var("BEAK_PICO_WITNESS_INJECT_KIND", kind);
+    std::env::set_var(
+        "BEAK_PICO_WITNESS_INJECT_KIND",
+        if kind.is_empty() {
+            String::new()
+        } else {
+            mapped_env_inject_kind(kind)
+        },
+    );
     std::env::set_var("BEAK_PICO_WITNESS_INJECT_STEP", inject_step.to_string());
-    if !kind.is_empty()
-        && kind != "pico.audit_timestamp.mem_row_wraparound"
-        && kind != "pico.audit_multiplicity_bool_constraint.local_event_row"
-    {
-        return Err(format!("unsupported inject_kind={kind}"));
+    if !kind.is_empty() {
+        match base_inject_kind(kind) {
+            TIMESTAMP_INJECT_KIND | BOOL_INJECT_KIND | LEGACY_BOOL_INJECT_KIND => {}
+            _ => return Err(format!("unsupported inject_kind={kind}")),
+        }
     }
     Ok(())
+}
+
+fn record_site(sites: &mut BTreeMap<String, Vec<u64>>, kind: &str, step: u64) {
+    let steps = sites.entry(kind.to_string()).or_default();
+    if steps.last().copied() != Some(step) {
+        steps.push(step);
+    }
+}
+
+fn collect_observed_injection_sites(records: &[EmulationRecord]) -> BTreeMap<String, Vec<u64>> {
+    let mut sites = BTreeMap::<String, Vec<u64>>::new();
+    let mut memory_step = 0u64;
+    let mut local_step = 0u64;
+    let mut init_finalize_step = 0u64;
+
+    for record in records {
+        for event in &record.cpu_events {
+            if event.instruction.is_memory_instruction() {
+                record_site(&mut sites, TIMESTAMP_INJECT_KIND, memory_step);
+                memory_step = memory_step.saturating_add(1);
+            }
+        }
+        for _ in record.get_local_mem_events() {
+            record_site(&mut sites, BOOL_INJECT_KIND, local_step);
+            local_step = local_step.saturating_add(1);
+        }
+        for _ in &record.memory_initialize_events {
+            record_site(&mut sites, TIMESTAMP_INJECT_KIND, init_finalize_step);
+            init_finalize_step = init_finalize_step.saturating_add(1);
+        }
+        for _ in &record.memory_finalize_events {
+            record_site(&mut sites, TIMESTAMP_INJECT_KIND, init_finalize_step);
+            init_finalize_step = init_finalize_step.saturating_add(1);
+        }
+    }
+
+    sites
+}
+
+fn injection_applies(
+    inject_kind: Option<&str>,
+    inject_step: u64,
+    observed_injection_sites: &BTreeMap<String, Vec<u64>>,
+) -> bool {
+    let Some(kind) = inject_kind else {
+        return false;
+    };
+    if matches!(inject_variant_mode(kind), Some("noop_prefix")) {
+        return false;
+    }
+    let key = match base_inject_kind(kind) {
+        LEGACY_BOOL_INJECT_KIND => BOOL_INJECT_KIND,
+        other => other,
+    };
+    let Some(steps) = observed_injection_sites.get(key) else {
+        return false;
+    };
+    if inject_step == u64::MAX {
+        return !steps.is_empty();
+    }
+    steps.contains(&inject_step)
 }
 
 fn run_one(
@@ -310,6 +415,8 @@ fn run_one(
         }
     }
     let regs = emulator.registers();
+    let observed_injection_sites = collect_observed_injection_sites(&records);
+    let injection_applied = injection_applies(inject_kind, inject_step, &observed_injection_sites);
 
     mutate_records_for_injection(&mut records, inject_kind, inject_step)?;
 
@@ -320,6 +427,8 @@ fn run_one(
             prove_ok: false,
             verify_ok: false,
             error: None,
+            observed_injection_sites,
+            injection_applied,
         });
     }
 
@@ -340,6 +449,8 @@ fn run_one(
                 prove_ok: false,
                 verify_ok: false,
                 error: Some(e),
+                observed_injection_sites,
+                injection_applied,
             });
         }
         Err(p) => {
@@ -352,6 +463,8 @@ fn run_one(
                     "prove/verify panic: {}",
                     panic_payload_to_string(p.as_ref())
                 )),
+                observed_injection_sites,
+                injection_applied,
             });
         }
     };
@@ -362,6 +475,8 @@ fn run_one(
         prove_ok: true,
         verify_ok,
         error: if verify_ok { None } else { Some("verify failed".to_string()) },
+        observed_injection_sites,
+        injection_applied,
     })
 }
 
@@ -371,13 +486,15 @@ fn main() {
         let _ = writeln!(
             std::io::stdout(),
             "{}",
-            serde_json::to_string(&RunnerResponse {
-                final_regs: None,
-                micro_op_count: 0,
-                prove_ok: false,
-                verify_ok: false,
-                error: Some("failed to read stdin".to_string()),
-            })
+                serde_json::to_string(&RunnerResponse {
+                    final_regs: None,
+                    micro_op_count: 0,
+                    prove_ok: false,
+                    verify_ok: false,
+                    error: Some("failed to read stdin".to_string()),
+                    observed_injection_sites: BTreeMap::new(),
+                    injection_applied: false,
+                })
             .unwrap_or_else(|_| "{\"error\":\"failed to serialize error\"}".to_string())
         );
         return;
@@ -395,6 +512,8 @@ fn main() {
                     prove_ok: false,
                     verify_ok: false,
                     error: Some(format!("invalid request json: {e}")),
+                    observed_injection_sites: BTreeMap::new(),
+                    injection_applied: false,
                 })
                 .unwrap_or_else(|_| "{\"error\":\"failed to serialize error\"}".to_string())
             );
@@ -417,6 +536,8 @@ fn main() {
             prove_ok: false,
             verify_ok: false,
             error: Some(e),
+            observed_injection_sites: BTreeMap::new(),
+            injection_applied: false,
         },
         Err(p) => RunnerResponse {
             final_regs: None,
@@ -424,6 +545,8 @@ fn main() {
             prove_ok: false,
             verify_ok: false,
             error: Some(format!("runner panic: {}", panic_payload_to_string(p.as_ref()))),
+            observed_injection_sites: BTreeMap::new(),
+            injection_applied: false,
         },
     };
 

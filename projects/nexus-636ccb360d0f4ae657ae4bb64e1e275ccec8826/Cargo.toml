@@ -1,0 +1,26 @@
+[package]
+name = "beak-nexus-636ccb36"
+version = "0.1.0"
+edition = "2021"
+description = "Nexus-specific beak binaries (commit 636ccb36)"
+publish = false
+
+[lib]
+path = "src/lib/mod.rs"
+
+[[bin]]
+name = "beak-fuzz"
+path = "src/bin/fuzz.rs"
+
+[[bin]]
+name = "beak-trace"
+path = "src/bin/trace.rs"
+
+[dependencies]
+beak-core = { path = "../../crates/beak-core" }
+clap = "4.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+nexus-common = { path = "../../beak-py/out/nexus-636ccb360d0f4ae657ae4bb64e1e275ccec8826/nexus-src/common" }
+nexus-vm = { path = "../../beak-py/out/nexus-636ccb360d0f4ae657ae4bb64e1e275ccec8826/nexus-src/vm" }
+nexus-vm-prover = { path = "../../beak-py/out/nexus-636ccb360d0f4ae657ae4bb64e1e275ccec8826/nexus-src/prover" }
