@@ -329,12 +329,10 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
                 && has_direct_injection_target
                 && stats.backend_error.is_none()
                 && stats.oracle_error.is_none();
-            if mismatch
-                || stats.backend_error.is_some()
-                || stats.oracle_error.is_some()
-                || underconstrained_candidate
-            {
-                let kind = if stats.backend_error.is_some() || stats.oracle_error.is_some() {
+            let has_exception =
+                !is_injected_phase && (stats.backend_error.is_some() || stats.oracle_error.is_some());
+            if mismatch || has_exception || underconstrained_candidate {
+                let kind = if has_exception {
                     "exception"
                 } else if mismatch {
                     "mismatch"

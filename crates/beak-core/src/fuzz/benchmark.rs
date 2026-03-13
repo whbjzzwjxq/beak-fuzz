@@ -327,10 +327,14 @@ fn metadata_object(seed_meta: &serde_json::Value) -> serde_json::Map<String, ser
 }
 
 fn bug_kind(stats: &EvalStats) -> Option<&'static str> {
+    let semantic_injected =
+        stats.phase == "semantic_search" && stats.semantic_injection_applied;
     if stats.phase == "semantic_search" && !stats.semantic_injection_applied {
         return None;
     }
-    if stats.backend_error.is_some() || stats.oracle_error.is_some() || stats.timed_out {
+    if !semantic_injected
+        && (stats.backend_error.is_some() || stats.oracle_error.is_some() || stats.timed_out)
+    {
         Some("exception")
     } else if !stats.mismatch_regs.is_empty() {
         Some("mismatch")

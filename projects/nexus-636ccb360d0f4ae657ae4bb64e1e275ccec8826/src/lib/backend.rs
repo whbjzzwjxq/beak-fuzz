@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::trace::NexusTrace;
 
-const STORE_PAYLOAD_INJECT_KIND: &str = "nexus.audit_memory.store_payload_trace";
+const WRITE_PAYLOAD_INJECT_KIND: &str = "nexus.semantic.memory.write_payload_trace";
+const FLOW_PAYLOAD_INJECT_KIND: &str = "nexus.semantic.memory.store_load_payload_flow_trace";
+const FLOW_RANDOM_TRIALS_PER_MODE: u32 = 128;
 
 #[derive(Debug, Clone)]
 struct WitnessInjectionPlan {
@@ -60,6 +62,44 @@ fn inject_variant_mode(kind: &str) -> Option<&str> {
     inject_variant_value(kind, "mode")
 }
 
+fn inject_variant_trial(kind: &str) -> Option<u32> {
+    inject_variant_value(kind, "trial").and_then(|trial| trial.parse().ok())
+}
+
+fn trial_word(trial: u32, salt: u32) -> u32 {
+    let mut x = trial
+        .wrapping_mul(0x9e37_79b9)
+        .wrapping_add(salt.wrapping_mul(0x85eb_ca6b))
+        .wrapping_add(0xc2b2_ae35);
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^= x >> 16;
+    x
+}
+
+fn panic_payload_to_string(p: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = p.downcast_ref::<&str>() {
+        return format!("panic: {s}");
+    }
+    if let Some(s) = p.downcast_ref::<String>() {
+        return format!("panic: {s}");
+    }
+    "panic: non-string payload".to_string()
+}
+
+fn catch_unwind_nonfatal<T, F>(f: F) -> std::thread::Result<T>
+where
+    F: FnOnce() -> T + std::panic::UnwindSafe,
+{
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_panic_info| {}));
+    let res = std::panic::catch_unwind(f);
+    std::panic::set_hook(prev_hook);
+    res
+}
+
 fn record_site(sites: &mut BTreeMap<String, Vec<u64>>, kind: &str, step: u64) {
     let steps = sites.entry(kind.to_string()).or_default();
     if steps.last().copied() != Some(step) {
@@ -99,12 +139,27 @@ fn collect_observed_injection_sites(trace: &UniformTrace) -> BTreeMap<String, Ve
                 .iter()
                 .any(|record| matches!(record, MemoryRecord::StoreRecord(_, _)))
             {
-                record_site(&mut sites, STORE_PAYLOAD_INJECT_KIND, flat_step);
+                record_site(&mut sites, WRITE_PAYLOAD_INJECT_KIND, flat_step);
+                record_site(&mut sites, FLOW_PAYLOAD_INJECT_KIND, flat_step);
             }
             flat_step = flat_step.saturating_add(1);
         }
     }
     sites
+}
+
+fn low_byte_bias(value: u32, delta: u8) -> u32 {
+    (value & !0xff) | (((value & 0xff) as u8).wrapping_add(delta) as u32)
+}
+
+fn low_byte_xor(value: u32, mask: u8) -> u32 {
+    (value & !0xff) | ((((value & 0xff) as u8) ^ mask) as u32)
+}
+
+fn low_byte_blend(value: u32, prev_value: u32, trial: u32) -> u32 {
+    let mix_seed = trial_word(trial, 3) as u8;
+    let mix = ((prev_value & 0xff) as u8).wrapping_add((mix_seed & 0x1f) << 1);
+    (value & !0xff) | mix as u32
 }
 
 fn execute_final_regs(words: &[u32]) -> Result<[u32; 32], String> {
@@ -137,7 +192,7 @@ fn apply_injection_to_trace(
         return false;
     };
     let base_kind = base_inject_kind(kind);
-    if base_kind != STORE_PAYLOAD_INJECT_KIND {
+    if base_kind != WRITE_PAYLOAD_INJECT_KIND && base_kind != FLOW_PAYLOAD_INJECT_KIND {
         return false;
     }
 
@@ -197,25 +252,50 @@ fn apply_injection_to_trace(
             for record in records {
                 let mut next_record = record;
                 if let MemoryRecord::StoreRecord((size, address, value, prev_value), timestamp) = record {
-                    let next_value = match inject_variant_mode(kind) {
-                        Some("noop_prefix") => record,
-                        Some("payload_add1") => {
-                            MemoryRecord::StoreRecord((size, address, value.wrapping_add(1), prev_value), timestamp)
-                        }
-                        Some("payload_prev_alias") => {
-                            MemoryRecord::StoreRecord((size, address, prev_value, prev_value), timestamp)
-                        }
-                        _ => MemoryRecord::StoreRecord((size, address, value ^ 1, prev_value), timestamp),
-                    };
-                    applied = !matches!(inject_variant_mode(kind), Some("noop_prefix"));
-                    if applied {
-                        let propagated_value = match next_value {
-                            MemoryRecord::StoreRecord((_, _, next, _), _) => next,
-                            _ => value,
+                    let trial = inject_variant_trial(kind).unwrap_or(0);
+                    let weak_delta = ((trial_word(trial, 0) % 251) + 1) as u8;
+                    let weak_mask = 1u8 << (trial_word(trial, 1) % 8);
+                    let strong_delta = ((trial_word(trial, 2) % 255) + 1) as u8;
+                    let strong_bit = 1u32 << (trial_word(trial, 4) % 8);
+                    let strong_prev = low_byte_bias(prev_value, strong_delta);
+                    let strong_add = value.wrapping_add(strong_delta as u32);
+                    let (next_value, next_prev_value, propagated_value, next_applied) =
+                        match (base_kind, inject_variant_mode(kind)) {
+                            (FLOW_PAYLOAD_INJECT_KIND, Some("weak_flow_load_bias")) => (
+                                value,
+                                low_byte_bias(prev_value, weak_delta),
+                                low_byte_bias(value, weak_delta),
+                                true,
+                            ),
+                            (FLOW_PAYLOAD_INJECT_KIND, Some("weak_flow_load_xor")) => (
+                                value,
+                                low_byte_xor(prev_value, weak_mask),
+                                low_byte_xor(value, weak_mask),
+                                true,
+                            ),
+                            (FLOW_PAYLOAD_INJECT_KIND, Some("weak_flow_prev_blend")) => (
+                                value,
+                                low_byte_blend(prev_value, value, trial),
+                                low_byte_blend(value, prev_value, trial),
+                                true,
+                            ),
+                            (_, Some("payload_add_delta")) => (
+                                strong_add,
+                                prev_value,
+                                strong_add,
+                                true,
+                            ),
+                            (_, Some("payload_prev_bias")) => (strong_prev, strong_prev, strong_prev, true),
+                            (_, Some("payload_flip_bit")) => (value ^ strong_bit, prev_value, value ^ strong_bit, true),
+                            _ => (value, prev_value, value, false),
                         };
+                    let next_store =
+                        MemoryRecord::StoreRecord((size, address, next_value, next_prev_value), timestamp);
+                    applied = next_applied;
+                    if applied {
                         propagated_load = Some((address, size as u8, propagated_value));
                     }
-                    next_record = next_value;
+                    next_record = next_store;
                 }
                 rewritten.insert(next_record);
             }
@@ -247,11 +327,16 @@ pub fn run_backend_once(
         apply_injection_to_trace(&mut trace, inject_kind, inject_step, &observed_injection_sites);
 
     let derived = NexusTrace::from_words_and_uniform_trace(words, &trace);
-    let backend_error = match nexus_vm_prover::prove(&trace, &view) {
-        Ok(proof) => nexus_vm_prover::verify(proof, &view)
-            .err()
-            .map(|e| format!("nexus verify failed: {e}")),
-        Err(e) => Some(format!("nexus prove failed: {e}")),
+    let backend_error = match catch_unwind_nonfatal(std::panic::AssertUnwindSafe(|| {
+        match nexus_vm_prover::prove(&trace, &view) {
+            Ok(proof) => nexus_vm_prover::verify(proof, &view)
+                .err()
+                .map(|e| format!("nexus verify failed: {e}")),
+            Err(e) => Some(format!("nexus prove failed: {e}")),
+        }
+    })) {
+        Ok(err) => err,
+        Err(payload) => Some(panic_payload_to_string(&*payload)),
     };
 
     Ok(RunResponse {
@@ -304,18 +389,30 @@ impl NexusBackend {
 
     fn variant_specs() -> Vec<String> {
         let mut specs = Vec::new();
-        for rank in 0..7000u32 {
-            specs.push(format!("mode=noop_prefix,rank={rank}"));
+        for trial in 0..FLOW_RANDOM_TRIALS_PER_MODE {
+            specs.push(format!("mode=weak_flow_load_bias,trial={trial}"));
         }
-        specs.push("mode=payload_lowbit_flip".to_string());
-        specs.push("mode=payload_add1".to_string());
-        specs.push("mode=payload_prev_alias".to_string());
+        for trial in 0..FLOW_RANDOM_TRIALS_PER_MODE {
+            specs.push(format!("mode=weak_flow_load_xor,trial={trial}"));
+        }
+        for trial in 0..FLOW_RANDOM_TRIALS_PER_MODE {
+            specs.push(format!("mode=weak_flow_prev_blend,trial={trial}"));
+        }
+        for trial in 0..FLOW_RANDOM_TRIALS_PER_MODE {
+            specs.push(format!("mode=payload_flip_bit,trial={trial}"));
+        }
+        for trial in 0..FLOW_RANDOM_TRIALS_PER_MODE {
+            specs.push(format!("mode=payload_add_delta,trial={trial}"));
+        }
+        for trial in 0..FLOW_RANDOM_TRIALS_PER_MODE {
+            specs.push(format!("mode=payload_prev_bias,trial={trial}"));
+        }
         specs
     }
 
     fn inject_kinds_for_base(inject_kind: &str) -> Vec<String> {
         match inject_kind {
-            STORE_PAYLOAD_INJECT_KIND => Self::variant_specs()
+            FLOW_PAYLOAD_INJECT_KIND => Self::variant_specs()
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
@@ -326,10 +423,13 @@ impl NexusBackend {
     fn semantic_candidate_from_hit(&self, hit: &BucketHit) -> Vec<SemanticInjectionCandidate> {
         let anchor = Self::step_from_hit(hit);
         let (semantic_class, inject_kind) = match hit.bucket_id.as_str() {
-            "nexus.sem.memory.write_payload_consistency"
-            | "nexus.sem.memory.store_load_payload_flow" => (
+            "nexus.sem.memory.store_load_payload_flow" => (
                 "nexus.semantic.memory.write_payload_flow_consistency",
-                STORE_PAYLOAD_INJECT_KIND,
+                FLOW_PAYLOAD_INJECT_KIND,
+            ),
+            "nexus.sem.memory.write_payload_consistency" => (
+                "nexus.semantic.memory.write_payload_flow_consistency",
+                WRITE_PAYLOAD_INJECT_KIND,
             ),
             _ => return Vec::new(),
         };

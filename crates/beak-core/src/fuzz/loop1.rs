@@ -350,7 +350,8 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
 
         let underconstrained_candidate = stats.underconstrained_candidate;
         let mismatch = !stats.mismatch_regs.is_empty();
-        let has_exception = stats.timed_out || stats.backend_error.is_some() || stats.oracle_error.is_some();
+        let has_exception = !stats.injected_phase
+            && (stats.timed_out || stats.backend_error.is_some() || stats.oracle_error.is_some());
         let is_bug = mismatch || has_exception || underconstrained_candidate;
         if is_bug {
             let words = decode_words_from_input(input, 2048);
