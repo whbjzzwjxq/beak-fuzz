@@ -1,137 +1,155 @@
-use std::num::NonZeroUsize;
+use libafl_bolts::rands::Rand;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 
-use libafl_bolts::rands::Rand;
+const NUM_ARMS: usize = 8;
 
-fn nz(n: usize) -> NonZeroUsize {
-    NonZeroUsize::new(n.max(1)).unwrap()
+static ARM_COUNTS: [AtomicUsize; NUM_ARMS] = [
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+];
+
+static ITER_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+static BANDIT: LazyLock<Mutex<LinUcb>> =
+    LazyLock::new(|| Mutex::new(LinUcb::new(NUM_ARMS, 7, 1.0)));
+
+pub struct LinUcbArm {
+    a_inv: Vec<f64>, // d × d
+    b: Vec<f64>,     // d
 }
 
-#[derive(Debug, Clone)]
-struct BanditArmStats {
-    pulls: u64,
-    total_reward: f64,
+pub struct LinUcb {
+    arms: Vec<LinUcbArm>,
+    d: usize,
+    alpha: f64,
 }
 
-impl BanditArmStats {
-    fn new() -> Self {
-        Self { pulls: 0, total_reward: 0.0 }
-    }
+impl LinUcbArm {
+    fn new(d: usize) -> Self {
+        let mut a_inv = vec![0.0; d * d];
 
-    fn mean_reward(&self) -> f64 {
-        if self.pulls == 0 {
-            0.0
-        } else {
-            self.total_reward / (self.pulls as f64)
+        for i in 0..d {
+            a_inv[i * d + i] = 1.0; // identity
         }
-    }
-}
 
-#[derive(Debug, Clone)]
-struct Bandit {
-    arms: Vec<BanditArmStats>,
-    /// Exploration probability (epsilon-greedy). Keep small; UCB is the main driver.
-    epsilon: f64,
-    /// UCB exploration constant.
-    ucb_c: f64,
-}
-
-impl Bandit {
-    fn new(num_arms: usize) -> Self {
         Self {
-            arms: (0..num_arms).map(|_| BanditArmStats::new()).collect(),
-            epsilon: 0.05,
-            ucb_c: 1.5,
+            a_inv,
+            b: vec![0.0; d],
         }
     }
+}
 
-    fn reset(&mut self, num_arms: usize) {
-        *self = Self::new(num_arms);
+impl LinUcb {
+    pub fn new(num_arms: usize, d: usize, alpha: f64) -> Self {
+        let arms = (0..num_arms).map(|_| LinUcbArm::new(d)).collect();
+        Self { arms, d, alpha }
     }
 
-    fn select_arm<R: Rand>(&self, rand: &mut R) -> usize {
-        let n = self.arms.len();
-        if n == 0 {
-            return 0;
+    pub fn select_arm<R: Rand>(&self, rand: &mut R, x: &[f64]) -> usize {
+        assert_eq!(x.len(), self.d);
+
+        const EPSILON: f64 = 0.1;
+
+        let r = (rand.next() as f64) / (u64::MAX as f64);
+
+        if r < EPSILON {
+            return (rand.next() as usize) % self.arms.len();
         }
 
-        // First, pull each arm at least once.
-        let unpulled: Vec<usize> = self
-            .arms
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| if s.pulls == 0 { Some(i) } else { None })
-            .collect();
-        if !unpulled.is_empty() {
-            let idx = rand.below(nz(unpulled.len()));
-            return unpulled[idx];
-        }
-
-        // Epsilon-greedy exploration.
-        // libafl_bolts::Rand doesn't expose f64 directly; approximate with u32.
-        if self.epsilon > 0.0 {
-            let roll = rand.below(nz(10_000));
-            let threshold = (self.epsilon * 10_000.0) as usize;
-            if roll < threshold {
-                return rand.below(nz(n));
-            }
-        }
-
-        // UCB1 selection.
-        let total_pulls: u64 = self.arms.iter().map(|a| a.pulls).sum();
-        let log_total = (total_pulls.max(1) as f64).ln();
-
-        let mut best_i = 0usize;
+        let mut best_arm = 0;
         let mut best_score = f64::NEG_INFINITY;
+
         for (i, arm) in self.arms.iter().enumerate() {
-            let mean = arm.mean_reward();
-            let bonus = self.ucb_c * (log_total / (arm.pulls as f64)).sqrt();
-            let score = mean + bonus;
+
+            // θ = A_inv * b
+            let theta = mat_vec_mul(&arm.a_inv, &arm.b, self.d);
+
+            let exploit = dot(&theta, x);
+
+            // exploration
+            let tmp = mat_vec_mul(&arm.a_inv, x, self.d);
+            let explore = dot(x, &tmp).sqrt();
+
+            let score = exploit + self.alpha * explore;
+
             if score > best_score {
                 best_score = score;
-                best_i = i;
+                best_arm = i;
             }
         }
-        best_i
+
+        best_arm
     }
 
-    fn update(&mut self, arm_idx: usize, reward: f64) {
-        if self.arms.is_empty() {
-            return;
+    pub fn update(&mut self, arm_id: usize, x: &[f64], reward: f64) {
+        let arm = &mut self.arms[arm_id];
+        let d = self.d;
+
+        // A_inv * x
+        let a_inv_x = mat_vec_mul(&arm.a_inv, x, d);
+
+        // x^T * A_inv * x
+        let denom = 1.0 + dot(x, &a_inv_x);
+
+        // Sherman–Morrison update
+        for i in 0..d {
+            for j in 0..d {
+                arm.a_inv[i * d + j] -= (a_inv_x[i] * a_inv_x[j]) / denom;
+            }
         }
-        let i = arm_idx.min(self.arms.len() - 1);
-        self.arms[i].pulls = self.arms[i].pulls.saturating_add(1);
-        self.arms[i].total_reward += reward;
+
+        // update b
+        for i in 0..d {
+            arm.b[i] += reward * x[i];
+        }
     }
 }
 
-static BANDIT: LazyLock<Mutex<Bandit>> = LazyLock::new(|| Mutex::new(Bandit::new(1)));
+pub fn select_arm<R: Rand>(rand: &mut R, ctx: &[f64]) -> usize {
+    let bandit = BANDIT.lock().unwrap();
 
-/// Last mutation arm used for the most recent execution.
-///
-/// This is written by the mutator and consumed by the feedback.
-static LAST_ARM: LazyLock<Mutex<Option<usize>>> = LazyLock::new(|| Mutex::new(None));
+    let arm = bandit.select_arm(rand, ctx);
 
-pub fn init(num_arms: usize) {
-    let mut b = BANDIT.lock().unwrap();
-    b.reset(num_arms.max(1));
+    ARM_COUNTS[arm].fetch_add(1, Ordering::Relaxed);
+
+    arm
 }
 
-pub fn select_arm<R: Rand>(rand: &mut R) -> usize {
-    let b = BANDIT.lock().unwrap();
-    b.select_arm(rand)
+pub fn update(arm: usize, ctx: &[f64], reward: f64) {
+    let mut bandit = BANDIT.lock().unwrap();
+    bandit.update(arm, ctx, reward);
 }
 
-pub fn update(arm_idx: usize, reward: f64) {
-    let mut b = BANDIT.lock().unwrap();
-    b.update(arm_idx, reward);
+pub fn diagnostic_tick() {
+    let iter = ITER_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    if iter % 100 == 0 {
+        let counts: Vec<usize> =
+            ARM_COUNTS.iter().map(|c| c.load(Ordering::Relaxed)).collect();
+
+        println!("Bandit arm distribution: {:?}", counts);
+    }
 }
 
-pub fn set_last_arm(arm_idx: usize) {
-    *LAST_ARM.lock().unwrap() = Some(arm_idx);
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
-pub fn take_last_arm() -> Option<usize> {
-    LAST_ARM.lock().unwrap().take()
-}
+fn mat_vec_mul(a: &[f64], x: &[f64], d: usize) -> Vec<f64> {
+    let mut out = vec![0.0; d];
 
+    for i in 0..d {
+        for j in 0..d {
+            out[i] += a[i * d + j] * x[j];
+        }
+    }
+
+    out
+}

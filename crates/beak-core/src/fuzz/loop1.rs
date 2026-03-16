@@ -16,10 +16,11 @@ use crate::rv32im::instruction::RV32IMInstruction;
 use crate::rv32im::oracle::{OracleConfig, RISCVOracle};
 use crate::trace::{sorted_signatures_from_hits, BucketHit};
 
-use super::bandit;
-use super::mutators::{SeedMutator, SEED_MUTATOR_NUM_ARMS};
+use crate::fuzz::mutators::SeedMutator;
 
 pub const DEFAULT_RNG_SEED: u64 = 2026;
+
+pub const CONTEXT_DIM: usize = 7;
 
 type LoopState =
     StdState<InMemoryCorpus<BytesInput>, BytesInput, StdRand, InMemoryCorpus<BytesInput>>;
@@ -306,15 +307,22 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
         }
 
         let sig = stats.bucket_hits_sig.clone();
-        let is_new_combo = !sig.is_empty() && self.seen.insert(sig.clone());
+        let is_new_combo = self.seen.insert(sig.clone());
 
-        // Bandit reward: new combo gets +1, plus weighted per-bucket novelty.
-        const PER_BUCKET_REWARD: f64 = 0.25;
-        let reward = (if is_new_combo { 1.0 } else { 0.0 })
-            + (new_bucket_id_count as f64) * PER_BUCKET_REWARD;
-        if let Some(arm_idx) = bandit::take_last_arm() {
-            bandit::update(arm_idx, reward);
-        }
+        // Final reward
+        let reward =
+            (if is_new_combo { 10.0 } else { 0.0 })
+          + (new_bucket_id_count as f64) * 5.0
+          + (stats.bucket_hit_count as f64) * 0.002
+          + 0.05;
+
+        println!(
+            "reward={} combo={} new_buckets={} hits={}",
+            reward,
+            is_new_combo,
+            new_bucket_id_count,
+            stats.bucket_hit_count
+        );
 
         if !is_new_combo {
             return Ok(false);
@@ -437,9 +445,6 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     if state.corpus().count() == 0 {
         return Err(format!("No usable initial seeds loaded from {}", cfg.seeds_jsonl.display()));
     }
-
-    // Initialize the bandit controller for mutator arm selection.
-    bandit::init(SEED_MUTATOR_NUM_ARMS);
 
     let scheduler = QueueScheduler::new();
     let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);

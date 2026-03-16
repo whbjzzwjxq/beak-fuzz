@@ -94,12 +94,6 @@ fn pick_from_slice_i32(state: &mut LoopState, xs: &[i32]) -> i32 {
     xs[idx]
 }
 
-/// Custom mutator implementing the requested strategies on 32-bit word-aligned inputs.
-pub struct SeedMutator {
-    max_instructions: usize,
-    name: std::borrow::Cow<'static, str>,
-}
-
 pub const SEED_MUTATOR_NUM_ARMS: usize = 8;
 
 impl SeedMutator {
@@ -107,6 +101,8 @@ impl SeedMutator {
         Self {
             max_instructions,
             name: "SeedMutator".into(),
+            last_arm: None,
+            last_ctx: Vec::new(),
         }
     }
 
@@ -345,8 +341,14 @@ impl Mutator<BytesInput, LoopState> for SeedMutator {
         }
 
         let used = collect_used_operands(&words);
-        let arm = bandit::select_arm(state.rand_mut());
-        bandit::set_last_arm(arm);
+        let context = extract_context(&words);
+        let ctx: Vec<f64> = context.iter().map(|v| *v as f64).collect();
+        let arm = bandit::select_arm(state.rand_mut(), &ctx);
+
+        self.last_arm = Some(arm);
+        self.last_ctx = ctx.clone();
+
+        bandit::diagnostic_tick();
         match arm {
             0 => Self::splice_two(state, &mut words),
             1 => Self::mutate_registers(state, &mut words, &used.regs),
@@ -365,11 +367,73 @@ impl Mutator<BytesInput, LoopState> for SeedMutator {
     }
 
     fn post_exec(
-        &mut self,
-        _state: &mut LoopState,
-        _new_corpus_id: Option<CorpusId>,
+    &mut self,
+    _state: &mut LoopState,
+    new_corpus_id: Option<CorpusId>,
     ) -> Result<(), Error> {
+
+        let reward = if new_corpus_id.is_some() { 1.0 } else { 0.0 };
+
+        if let Some(arm) = self.last_arm {
+            bandit::update(arm, &self.last_ctx, reward);
+        }
+
         Ok(())
     }
 }
 
+pub fn extract_context(words: &[u32]) -> Vec<f64> {
+
+    let mut branches = 0;
+    let mut mem = 0;
+    let mut alu = 0;
+    let mut system = 0;
+
+    let mut opcode_counts = [0u32; 128];
+    let mut regs = [false; 32];
+
+    for w in words {
+
+        let opcode = (w & 0x7f) as usize;
+        opcode_counts[opcode] += 1;
+
+        match opcode {
+            0x63 | 0x6f | 0x67 => branches += 1,
+            0x03 | 0x23 => mem += 1,
+            0x33 | 0x13 => alu += 1,
+            0x73 => system += 1,
+            _ => {}
+        }
+
+        let rs1 = ((w >> 15) & 0x1f) as usize;
+        let rs2 = ((w >> 20) & 0x1f) as usize;
+
+        regs[rs1] = true;
+        regs[rs2] = true;
+    }
+
+    let n = words.len() as f64;
+
+    let unique_opcodes =
+        opcode_counts.iter().filter(|&&c| c > 0).count() as f64;
+
+    let reg_diversity =
+        regs.iter().filter(|&&r| r).count() as f64 / 32.0;
+
+    vec![
+        n / 32.0,
+        branches as f64 / n,
+        mem as f64 / n,
+        alu as f64 / n,
+        system as f64 / n,
+        unique_opcodes / n,
+        reg_diversity,
+    ]
+}
+
+pub struct SeedMutator {
+    max_instructions: usize,
+    name: std::borrow::Cow<'static, str>,
+    last_arm: Option<usize>,
+    last_ctx: Vec<f64>,
+}
