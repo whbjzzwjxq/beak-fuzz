@@ -242,6 +242,47 @@ jolt-run: jolt-build
 jolt-fuzz: jolt-run
 	@echo "Jolt full repro finished for $(JOLT_COMMIT)"
 
+# --- RL Fuzzing targets ---
+RL_POLICY ?= bandit
+RL_ITERS ?= 1000
+RL_METRICS_INTERVAL ?= 10
+RL_SOCKET ?= /tmp/beak-rl.sock
+
+jolt-rl-build:
+	$(_require_jolt_commit)
+	@mkdir -p "$(JOLT_PROJECT_DIR)"
+	cd "$(JOLT_PROJECT_DIR)" && CARGO_TARGET_DIR="$$PWD/target" cargo build --release --bin beak-fuzz-rl
+
+jolt-rl-run: jolt-rl-build
+	$(_require_jolt_commit)
+	@mkdir -p "$(JOLT_OUT_DIR)"
+	cd "$(JOLT_PROJECT_DIR)" && CARGO_TARGET_DIR="$$PWD/target" cargo run --release -q --bin beak-fuzz-rl -- \
+		--policy "$(RL_POLICY)" \
+		--iters "$(RL_ITERS)" \
+		--metrics-interval "$(RL_METRICS_INTERVAL)" \
+		--seeds-jsonl "$(JOLT_SEEDS)" \
+		--timeout-ms "$(JOLT_TIMEOUT_MS)" \
+		--initial-limit "$(JOLT_INITIAL_LIMIT)" \
+		$(JOLT_ARGS)
+
+jolt-rl-bandit:
+	$(MAKE) jolt-rl-run RL_POLICY=bandit
+
+jolt-rl-linucb:
+	$(MAKE) jolt-rl-run RL_POLICY=linucb
+
+jolt-rl-external:
+	./scripts/run_with_rl.sh --iters "$(RL_ITERS)" --metrics-interval "$(RL_METRICS_INTERVAL)" \
+		--seeds-jsonl "$(JOLT_SEEDS)" --timeout-ms "$(JOLT_TIMEOUT_MS)" --initial-limit "$(JOLT_INITIAL_LIMIT)"
+
+jolt-rl-compare:
+	@echo "=== Running Bandit baseline ==="
+	$(MAKE) jolt-rl-run RL_POLICY=bandit JOLT_ARGS="--output-prefix bandit-run1"
+	@echo "=== Running LinUCB ==="
+	$(MAKE) jolt-rl-run RL_POLICY=linucb JOLT_ARGS="--output-prefix linucb-run1"
+	@echo "=== Generating comparison plots ==="
+	PYTHONPATH=beak-py python3 -m rl.visualize --metrics-dir storage/fuzzing_seeds --output-dir output/figures
+
 nexus-install:
 	$(_require_nexus_commit)
 	@mkdir -p "$(NEXUS_PROJECT_DIR)"

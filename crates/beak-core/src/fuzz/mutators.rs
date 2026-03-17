@@ -1,4 +1,5 @@
 use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
 
 use libafl::prelude::*;
 use libafl_bolts::Named;
@@ -7,6 +8,7 @@ use libafl_bolts::rands::Rand;
 use crate::rv32im::instruction::RV32IMInstruction;
 
 use super::bandit;
+use super::policy::{FuzzerState, PolicyProvider, SeedFeatures};
 
 type LoopState = StdState<InMemoryCorpus<BytesInput>, BytesInput, libafl_bolts::rands::StdRand, InMemoryCorpus<BytesInput>>;
 
@@ -98,6 +100,9 @@ fn pick_from_slice_i32(state: &mut LoopState, xs: &[i32]) -> i32 {
 pub struct SeedMutator {
     max_instructions: usize,
     name: std::borrow::Cow<'static, str>,
+    /// If set, use this policy for arm selection; otherwise fall back to legacy bandit module.
+    policy: Option<Arc<Mutex<dyn PolicyProvider>>>,
+    fuzzer_state: Option<Arc<Mutex<FuzzerState>>>,
 }
 
 pub const SEED_MUTATOR_NUM_ARMS: usize = 8;
@@ -107,6 +112,21 @@ impl SeedMutator {
         Self {
             max_instructions,
             name: "SeedMutator".into(),
+            policy: None,
+            fuzzer_state: None,
+        }
+    }
+
+    pub fn with_policy(
+        max_instructions: usize,
+        policy: Arc<Mutex<dyn PolicyProvider>>,
+        fuzzer_state: Arc<Mutex<FuzzerState>>,
+    ) -> Self {
+        Self {
+            max_instructions,
+            name: "SeedMutator".into(),
+            policy: Some(policy),
+            fuzzer_state: Some(fuzzer_state),
         }
     }
 
@@ -345,8 +365,24 @@ impl Mutator<BytesInput, LoopState> for SeedMutator {
         }
 
         let used = collect_used_operands(&words);
-        let arm = bandit::select_arm(state.rand_mut());
-        bandit::set_last_arm(arm);
+
+        let arm = if let (Some(policy), Some(fs)) = (&self.policy, &self.fuzzer_state) {
+            // Update seed features in FuzzerState before querying policy.
+            {
+                let mut fs_guard = fs.lock().unwrap();
+                fs_guard.seed_features = SeedFeatures::from_words(&words);
+            }
+            let random_seed = state.rand_mut().below(nz(u32::MAX as usize)) as u64;
+            let fs_snapshot = fs.lock().unwrap().clone();
+            let selected = policy.lock().unwrap().select_mutator(&fs_snapshot, random_seed);
+            bandit::set_last_arm(selected);
+            selected
+        } else {
+            let selected = bandit::select_arm(state.rand_mut());
+            bandit::set_last_arm(selected);
+            selected
+        };
+
         match arm {
             0 => Self::splice_two(state, &mut words),
             1 => Self::mutate_registers(state, &mut words, &used.regs),

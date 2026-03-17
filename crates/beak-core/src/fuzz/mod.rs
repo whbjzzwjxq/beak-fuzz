@@ -5,3 +5,7 @@ pub mod loop1;
 pub mod loop2;
 pub mod mutators;
 pub mod bandit;
+pub mod policy;
+pub mod linucb;
+pub mod external_policy;
+pub mod rl_scheduler;

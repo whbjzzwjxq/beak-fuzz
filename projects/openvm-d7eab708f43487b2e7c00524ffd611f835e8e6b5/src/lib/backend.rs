@@ -1,4 +1,5 @@
 use beak_core::fuzz::benchmark::{BackendEval, BenchmarkBackend};
+use beak_core::fuzz::loop1::LoopBackend;
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::Trace;
 
@@ -459,6 +460,24 @@ impl BenchmarkBackend for OpenVmBackend {
         }
 
         self.eval.clone()
+    }
+}
+
+impl LoopBackend for OpenVmBackend {
+    fn is_usable_seed(&self, words: &[u32]) -> bool {
+        <Self as BenchmarkBackend>::is_usable_seed(self, words)
+    }
+
+    fn prepare_for_run(&mut self, rng_seed: u64) {
+        <Self as BenchmarkBackend>::prepare_for_run(self, rng_seed);
+    }
+
+    fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
+        <Self as BenchmarkBackend>::prove_and_read_final_regs(self, words)
+    }
+
+    fn collect_eval(&mut self) -> BackendEval {
+        <Self as BenchmarkBackend>::collect_eval(self)
     }
 }
 

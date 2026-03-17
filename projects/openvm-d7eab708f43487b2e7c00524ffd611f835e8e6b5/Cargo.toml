@@ -9,6 +9,10 @@ publish = false
 path = "src/lib/mod.rs"
 
 [[bin]]
+name = "beak-fuzz-rl"
+path = "src/bin/fuzz_rl.rs"
+
+[[bin]]
 name = "beak-trace"
 path = "src/bin/trace.rs"
 

@@ -1,12 +1,13 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use libafl::prelude::*;
-use libafl_bolts::rands::StdRand;
+use libafl_bolts::rands::{Rand, StdRand};
 use libafl_bolts::tuples::tuple_list;
 use libafl_bolts::Named;
 use crate::fuzz::jsonl::{BugRecord, CorpusRecord, JsonlWriter, RunRecord};
@@ -17,6 +18,9 @@ use crate::trace::{sorted_signatures_from_hits, BucketHit};
 
 use super::bandit;
 use super::mutators::{SeedMutator, SEED_MUTATOR_NUM_ARMS};
+use super::policy::{
+    FuzzerState, MetricsRecord, PolicyProvider, PolicyType, RewardWindow,
+};
 
 pub const DEFAULT_RNG_SEED: u64 = 2026;
 
@@ -44,6 +48,15 @@ pub struct Loop1Config {
     pub precheck_oracle_max_steps: u32,
 
     pub stack_size_bytes: usize,
+
+    /// Policy type for mutator selection / seed scheduling.
+    pub policy_type: PolicyType,
+    /// Unix socket path for external RL policy.
+    pub rl_socket_path: Option<PathBuf>,
+    /// Timeout in ms for external RL policy requests.
+    pub rl_fallback_timeout_ms: u64,
+    /// Emit metrics every N iterations (0 = disabled).
+    pub metrics_interval: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -136,7 +149,7 @@ fn eval_once<B: LoopBackend>(
         Err(p) => Some(panic_payload_to_string(p.as_ref())),
         _ => None,
     };
-    let backend_regs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let backend_regs = catch_unwind_nonfatal(std::panic::AssertUnwindSafe(|| {
         backend.prove_and_read_final_regs(words)
     }));
     let panic_backend_error = match backend_regs.as_ref() {
@@ -303,6 +316,18 @@ struct BucketNoveltyFeedback {
     cfg: Loop1Config,
     name: std::borrow::Cow<'static, str>,
     written_bug_keys: HashSet<String>,
+    seen_bug_sigs: HashSet<String>,
+    /// Shared policy for updating after each evaluation.
+    policy: Option<Arc<Mutex<dyn PolicyProvider>>>,
+    /// Shared mutable fuzzer state, kept in sync after each evaluation.
+    fuzzer_state: Option<Arc<Mutex<FuzzerState>>>,
+    reward_window: RewardWindow,
+    iteration_counter: u64,
+    last_novel_iteration: u64,
+    cumulative_reward: f64,
+    bug_count: usize,
+    metrics_writer: Option<JsonlWriter>,
+    start_time: Instant,
 }
 
 impl BucketNoveltyFeedback {
@@ -316,7 +341,32 @@ impl BucketNoveltyFeedback {
             cfg,
             name: "BucketNoveltyFeedback".into(),
             written_bug_keys: HashSet::new(),
+            seen_bug_sigs: HashSet::new(),
+            policy: None,
+            fuzzer_state: None,
+            reward_window: RewardWindow::new(SEED_MUTATOR_NUM_ARMS, 100),
+            iteration_counter: 0,
+            last_novel_iteration: 0,
+            cumulative_reward: 0.0,
+            bug_count: 0,
+            metrics_writer: None,
+            start_time: Instant::now(),
         }
+    }
+
+    fn with_policy(
+        mut self,
+        policy: Arc<Mutex<dyn PolicyProvider>>,
+        fuzzer_state: Arc<Mutex<FuzzerState>>,
+    ) -> Self {
+        self.policy = Some(policy);
+        self.fuzzer_state = Some(fuzzer_state);
+        self
+    }
+
+    fn with_metrics_writer(mut self, writer: JsonlWriter) -> Self {
+        self.metrics_writer = Some(writer);
+        self
     }
 }
 
@@ -412,12 +462,79 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
         let sig = stats.bucket_hits_sig.clone();
         let is_new_combo = !sig.is_empty() && self.seen.insert(sig.clone());
 
-        // Bandit reward: new combo gets +1, plus weighted per-bucket novelty.
-        const PER_BUCKET_REWARD: f64 = 0.25;
-        let reward = (if is_new_combo { 1.0 } else { 0.0 })
-            + (new_bucket_id_count as f64) * PER_BUCKET_REWARD;
+        let mismatch = !stats.mismatch_regs.is_empty();
+        let is_bug_here = mismatch || has_exception || underconstrained_candidate;
+
+        let reward =
+            (if is_new_combo { 10.0 } else { 0.0 })
+            + (new_bucket_id_count as f64) * 5.0
+            + (stats.bucket_hits.len() as f64) * 0.002
+            + 0.05;
+
+        self.iteration_counter += 1;
+        self.cumulative_reward += reward;
+        if is_bug_here {
+            self.bug_count += 1;
+        }
+        if is_new_combo {
+            self.last_novel_iteration = self.iteration_counter;
+        }
+
         if let Some(arm_idx) = bandit::take_last_arm() {
-            bandit::update(arm_idx, reward);
+            self.reward_window.push(arm_idx, reward);
+
+            if let Some(policy) = &self.policy {
+                let fs = self.fuzzer_state.as_ref().map(|f| f.lock().unwrap().clone())
+                    .unwrap_or_default();
+                policy.lock().unwrap().update_mutator(arm_idx, reward, &fs);
+            } else {
+                bandit::update(arm_idx, reward);
+            }
+        }
+
+        // Update shared FuzzerState.
+        if let Some(fs_arc) = &self.fuzzer_state {
+            let mut fs = fs_arc.lock().unwrap();
+            fs.corpus_size = self.seen.len();
+            fs.unique_bucket_ids = self.seen_bucket_ids.len();
+            fs.unique_signatures = self.seen.len();
+            fs.iteration = self.iteration_counter;
+            fs.time_since_last_novel = self.iteration_counter.saturating_sub(self.last_novel_iteration);
+            fs.recent_arm_rewards = self.reward_window.means();
+            fs.cumulative_reward = self.cumulative_reward;
+            fs.bug_count = self.bug_count;
+        }
+
+        // Emit metrics periodically.
+        if self.cfg.metrics_interval > 0
+            && self.iteration_counter % (self.cfg.metrics_interval as u64) == 0
+        {
+            if let Some(mw) = &self.metrics_writer {
+                let policy_name = self.policy.as_ref()
+                    .map(|p| p.lock().unwrap().name().to_string())
+                    .unwrap_or_else(|| "bandit".to_string());
+                let arm_pulls = self.policy.as_ref()
+                    .map(|p| p.lock().unwrap().arm_pulls())
+                    .unwrap_or_default();
+                let arm_means = self.policy.as_ref()
+                    .map(|p| p.lock().unwrap().arm_mean_rewards())
+                    .unwrap_or_default();
+                let rec = MetricsRecord {
+                    iteration: self.iteration_counter,
+                    wall_time_sec: self.start_time.elapsed().as_secs_f64(),
+                    corpus_size: self.seen.len(),
+                    unique_bucket_ids: self.seen_bucket_ids.len(),
+                    unique_signatures: self.seen.len(),
+                    bug_count: self.bug_count,
+                    policy_type: policy_name,
+                    arm_pulls,
+                    arm_rewards_mean: arm_means,
+                    recent_reward_100: self.reward_window.overall_recent_mean(),
+                    time_since_last_novel: self.iteration_counter.saturating_sub(self.last_novel_iteration),
+                    cumulative_reward: self.cumulative_reward,
+                };
+                let _ = mw.append_json_line(&rec);
+            }
         }
 
         let words = decode_words_from_input(input, 2048);
@@ -551,19 +668,63 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     let bug_writer = JsonlWriter::open_append(&bugs_path)?;
     let run_writer = JsonlWriter::open_append(&runs_path)?;
 
+    // --- Policy setup ---
+    let policy: Arc<Mutex<dyn PolicyProvider>> = match cfg.policy_type {
+        PolicyType::Random => {
+            Arc::new(Mutex::new(super::policy::RandomPolicy::new(SEED_MUTATOR_NUM_ARMS)))
+        }
+        PolicyType::Bandit => {
+            Arc::new(Mutex::new(super::bandit::BanditPolicy::new(SEED_MUTATOR_NUM_ARMS)))
+        }
+        PolicyType::LinUCB => {
+            let feature_dim = 15.min(FuzzerState::default().to_feature_vec().len());
+            Arc::new(Mutex::new(super::linucb::LinUCBPolicy::new(
+                SEED_MUTATOR_NUM_ARMS,
+                feature_dim,
+                1.5,
+            )))
+        }
+        PolicyType::External => {
+            let sock = cfg.rl_socket_path.clone()
+                .unwrap_or_else(|| PathBuf::from("/tmp/beak-rl.sock"));
+            Arc::new(Mutex::new(super::external_policy::ExternalPolicy::new(
+                sock,
+                cfg.rl_fallback_timeout_ms.max(50),
+                SEED_MUTATOR_NUM_ARMS,
+            )))
+        }
+    };
+    let fuzzer_state_shared: Arc<Mutex<FuzzerState>> = Arc::new(Mutex::new(FuzzerState::default()));
+
+    eprintln!("[LOOP1] policy={}", cfg.policy_type);
+
+    // Optional metrics writer.
+    let metrics_writer = if cfg.metrics_interval > 0 {
+        let metrics_path = cfg.out_dir.join(format!("{prefix}-metrics.jsonl"));
+        Some(JsonlWriter::open_append(&metrics_path)?)
+    } else {
+        None
+    };
+
     // --- libAFL setup ---
     let rand = StdRand::with_seed(cfg.rng_seed);
     let corpus = InMemoryCorpus::<BytesInput>::new();
     let solutions = InMemoryCorpus::<BytesInput>::new();
 
-    let mut feedback =
-        BucketNoveltyFeedback::new(corpus_writer.clone(), bug_writer.clone(), run_writer.clone(), cfg.clone());
+    let feedback = BucketNoveltyFeedback::new(
+        corpus_writer.clone(), bug_writer.clone(), run_writer.clone(), cfg.clone(),
+    )
+    .with_policy(Arc::clone(&policy), Arc::clone(&fuzzer_state_shared));
+    let mut feedback = if let Some(mw) = metrics_writer {
+        feedback.with_metrics_writer(mw)
+    } else {
+        feedback
+    };
     let mut objective = NeverObjective::new();
     let mut state: LoopState =
         StdState::new(rand, corpus, solutions, &mut feedback, &mut objective)
             .map_err(|e| format!("create state failed: {e}"))?;
 
-    // Seed corpus with the initial JSONL.
     for (input, _meta) in load_initial_seeds(&cfg.seeds_jsonl, cfg.max_instructions, &|words| {
         backend.is_usable_seed(words)
     })
@@ -579,7 +740,7 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
         return Err(format!("No usable initial seeds loaded from {}", cfg.seeds_jsonl.display()));
     }
 
-    // Initialize the bandit controller for mutator arm selection.
+    // Initialize legacy bandit as well (for backward compat in feedback path).
     bandit::init(SEED_MUTATOR_NUM_ARMS);
 
     let scheduler = QueueScheduler::new();
@@ -735,7 +896,11 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     )
     .map_err(|e| format!("create executor failed: {e}"))?;
 
-    let mut stages = tuple_list!(StdMutationalStage::new(SeedMutator::new(cfg.max_instructions)));
+    let mut mutator = SeedMutator::with_policy(
+        cfg.max_instructions,
+        Arc::clone(&policy),
+        Arc::clone(&fuzzer_state_shared),
+    );
 
     let initial_count = state.corpus().count();
     for idx in 0..initial_count {
@@ -752,10 +917,22 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
         let _ = fuzzer.evaluate_input(&mut state, &mut executor, &mut mgr, &input);
     }
 
+    // 1 iter = 1 mutation + 1 execution (not libAFL's default 1-128 per fuzz_one).
     for i in 0..cfg.iters {
-        fuzzer
-            .fuzz_one(&mut stages, &mut executor, &mut state, &mut mgr)
-            .map_err(|e| format!("fuzz_one failed: {e}"))?;
+        let corpus_count = state.corpus().count();
+        if corpus_count == 0 {
+            break;
+        }
+        let pick = state.rand_mut().below(NonZeroUsize::new(corpus_count).unwrap());
+        let id = CorpusId::from(pick);
+        let mut input = {
+            let Ok(tc_cell) = state.corpus().get(id) else { continue };
+            let tc = tc_cell.borrow();
+            tc.input().as_ref().cloned().unwrap_or_else(|| BytesInput::new(vec![]))
+        };
+        let _ = mutator.mutate(&mut state, &mut input);
+
+        let _ = fuzzer.evaluate_input(&mut state, &mut executor, &mut mgr, &input);
         let s = LAST_RUN.lock().unwrap().clone();
         let kind = if s.underconstrained_candidate {
             "underconstrained_candidate"

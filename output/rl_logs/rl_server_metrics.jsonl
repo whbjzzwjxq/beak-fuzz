@@ -1,0 +1,4 @@
+{"request_count": 100, "elapsed_sec": 980.853755235672, "mutator_step": 50, "mutator_updates": 1, "entropy": 1.2073795687683742e-06, "last_reward": 0.05}
+{"request_count": 200, "elapsed_sec": 1003.1582472324371, "mutator_step": 100, "mutator_updates": 3, "entropy": 7.436998065990519e-14, "last_reward": 0.078}
+{"request_count": 300, "elapsed_sec": 1026.1264281272888, "mutator_step": 150, "mutator_updates": 4, "entropy": 5.628556380877928e-15, "last_reward": 0.082}
+{"request_count": 400, "elapsed_sec": 1048.5128381252289, "mutator_step": 200, "mutator_updates": 6, "entropy": 8.511685271996387e-20, "last_reward": 0.07600000000000001}
