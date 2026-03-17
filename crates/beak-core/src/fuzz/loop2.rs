@@ -12,7 +12,9 @@ use crate::fuzz::loop1::{Loop1Config, Loop1Outputs, LoopBackend};
 use crate::fuzz::seed::FuzzingSeed;
 use crate::rv32im::instruction::RV32IMInstruction;
 use crate::rv32im::oracle::RISCVOracle;
-use crate::trace::{sorted_signatures_from_hits, BucketHit};
+use crate::trace::{
+    BucketHit, sorted_signatures_from_hits, sorted_signatures_from_signals,
+};
 
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BOLD_RED: &str = "\x1b[1;31m";
@@ -22,6 +24,7 @@ const ANSI_BOLD_GREEN: &str = "\x1b[1;32m";
 #[derive(Debug, Clone, Default)]
 struct DirectRunStats {
     bucket_hits_sig: String,
+    signal_sig: String,
     micro_op_count: usize,
     bucket_hits: Vec<BucketHit>,
     mismatch_regs: Vec<(u32, u32, u32)>,
@@ -179,7 +182,9 @@ fn run_single_eval<B: LoopBackend>(cfg: &Loop1Config, backend: &mut B, words: &[
     let backend_error = eval.backend_error.clone().or(panic_backend_error);
     let oracle_error = panic_oracle_error.map(|e| format!("oracle {e}"));
     let bucket_sigs = sorted_signatures_from_hits(&eval.bucket_hits);
+    let signal_sigs = sorted_signatures_from_signals(&eval.trace_signals);
     let sig = canonical_bucket_sig(&bucket_sigs);
+    let signal_sig = canonical_bucket_sig(&signal_sigs);
     let backend_timed_out = backend_error
         .as_deref()
         .map(|e| e.contains("timed out"))
@@ -188,6 +193,7 @@ fn run_single_eval<B: LoopBackend>(cfg: &Loop1Config, backend: &mut B, words: &[
 
     DirectRunStats {
         bucket_hits_sig: sig,
+        signal_sig,
         micro_op_count: eval.micro_op_count,
         bucket_hits: eval.bucket_hits,
         mismatch_regs: mismatches,
@@ -320,6 +326,7 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
                 timed_out: stats.timed_out,
                 mismatch,
                 bucket_hits_sig: stats.bucket_hits_sig.clone(),
+                signal_sig: stats.signal_sig.clone(),
                 instructions: words.clone(),
                 metadata: serde_json::Value::Object(metadata.clone()),
             };
@@ -350,6 +357,7 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
                     timeout_ms: cfg.timeout_ms,
                     timed_out: stats.timed_out,
                     bucket_hits_sig: stats.bucket_hits_sig.clone(),
+                    signal_sig: stats.signal_sig.clone(),
                     micro_op_count: stats.micro_op_count,
                     backend_error: stats.backend_error.clone(),
                     oracle_error: stats.oracle_error.clone(),

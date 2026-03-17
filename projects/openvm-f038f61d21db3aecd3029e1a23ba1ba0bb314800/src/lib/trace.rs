@@ -1,9 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use beak_core::trace::{BucketHit, Trace};
+use beak_core::trace::observations::{
+    ArithmeticSpecialCaseObservation, AuipcPcLimbObservation, BoundaryOriginObservation,
+    ImmediateLimbObservation, MemoryAddressSpaceObservation, MemoryImmediateSignObservation,
+    VolatileBoundaryObservation, XorMultiplicityObservation,
+};
+use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic_matchers};
 use serde_json::Value;
 
-use crate::chip_row::OpenVMChipRow;
+use crate::chip_row::{OpenVMChipRow, OpenVMChipRowKind, OpenVMChipRowPayload, Rs2Source};
 use crate::insn::OpenVMInsn;
 use crate::interaction::OpenVMInteraction;
 
@@ -13,8 +18,8 @@ pub struct OpenVMTrace {
     chip_rows: Vec<OpenVMChipRow>,
     interactions: Vec<OpenVMInteraction>,
 
-    /// Bucket hits derived from this trace (e.g. via match_hit); empty until implemented.
     bucket_hits: Vec<BucketHit>,
+    trace_signals: Vec<TraceSignal>,
 
     // ---- Global seq -> vec index -------------------------------------------
     insn_by_seq: Vec<Option<usize>>,
@@ -32,6 +37,280 @@ pub struct OpenVMTrace {
     // ---- row_id / bus_kind -> interaction indices (no cloning) --------------
     interactions_by_row_id: HashMap<String, Vec<usize>>,
     interactions_by_bus: HashMap<crate::interaction::OpenVMInteractionKind, Vec<usize>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenVmMemoryObservationProfile {
+    None,
+    ImmediateSign,
+    AddressSpace,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OpenVmObservationProfile {
+    emit_alu_immediate_limb_semantic: bool,
+    emit_xor_multiplicity_semantic: bool,
+    emit_auipc_pc_limb_semantic: bool,
+    memory_semantic: OpenVmMemoryObservationProfile,
+    emit_boundary_origin_semantic: bool,
+    emit_volatile_boundary_semantic: bool,
+    emit_arithmetic_special_case_semantic: bool,
+}
+
+fn kind_snake(kind: OpenVMChipRowKind) -> String {
+    match serde_json::to_value(kind) {
+        Ok(Value::String(s)) => s,
+        _ => format!("{kind:?}").to_lowercase(),
+    }
+}
+
+fn le_u32_from_bytes(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() < 4 {
+        return None;
+    }
+    let mut arr = [0u8; 4];
+    arr.copy_from_slice(&bytes[..4]);
+    Some(u32::from_le_bytes(arr))
+}
+
+fn rs2_imm_value(rs2: &Rs2Source) -> Option<i32> {
+    match rs2 {
+        Rs2Source::Imm { value } => Some(*value),
+        Rs2Source::Reg { .. } => None,
+    }
+}
+
+fn record_signal(
+    signals: &mut Vec<TraceSignal>,
+    seen: &mut HashSet<TraceSignal>,
+    signal: TraceSignal,
+) {
+    if seen.insert(signal) {
+        signals.push(signal);
+    }
+}
+
+fn derive_semantic_feedback(
+    trace: &OpenVMTrace,
+    profile: OpenVmObservationProfile,
+) -> (Vec<BucketHit>, Vec<TraceSignal>) {
+    let mut signals = Vec::new();
+    let mut seen_signals = HashSet::new();
+    let mut immediate_limb = Vec::new();
+    let mut xor_multiplicity = Vec::new();
+    let mut auipc_pc_limb = Vec::new();
+    let mut memory_immediate_sign = Vec::new();
+    let mut memory_address_space = Vec::new();
+    let mut boundary_origin = Vec::new();
+    let mut volatile_boundary = Vec::new();
+    let mut arithmetic_special_case = Vec::new();
+
+    let mut saw_system_terminate = false;
+    let mut saw_missing_row_timestamp = false;
+    let mut saw_memory_access = false;
+
+    for row in trace.chip_rows() {
+        let base = row.base();
+        let kind = kind_snake(row.kind);
+        if base.timestamp.is_none() {
+            saw_missing_row_timestamp = true;
+        }
+        if base.chip_name.contains("Volatile") {
+            record_signal(
+                &mut signals,
+                &mut seen_signals,
+                TraceSignal::ObservedVolatileBoundaryRange,
+            );
+            if profile.emit_volatile_boundary_semantic {
+                volatile_boundary.push(VolatileBoundaryObservation {
+                    step_idx: base.step_idx,
+                    op_idx: base.op_idx,
+                    kind: kind.clone(),
+                    chip_name: base.chip_name.clone(),
+                });
+            }
+        }
+
+        match &row.payload {
+            OpenVMChipRowPayload::BaseAlu { rs2, a, b, c, .. } => {
+                if profile.emit_alu_immediate_limb_semantic {
+                    if let Some(imm) = rs2_imm_value(rs2) {
+                        immediate_limb.push(ImmediateLimbObservation {
+                            step_idx: base.step_idx,
+                            op_idx: base.op_idx,
+                            kind: kind.clone(),
+                            chip_name: base.chip_name.clone(),
+                            imm,
+                        });
+                    }
+                }
+                if profile.emit_xor_multiplicity_semantic {
+                    if let (Some(out), Some(lhs), Some(rhs)) =
+                        (le_u32_from_bytes(a), le_u32_from_bytes(b), le_u32_from_bytes(c))
+                    {
+                        if out == (lhs ^ rhs) && (lhs & rhs) != 0 {
+                            xor_multiplicity.push(XorMultiplicityObservation {
+                                step_idx: base.step_idx,
+                                op_idx: base.op_idx,
+                                kind: kind.clone(),
+                                chip_name: base.chip_name.clone(),
+                                lhs,
+                                rhs,
+                            });
+                        }
+                    }
+                }
+            }
+            OpenVMChipRowPayload::DivRem { b, c, .. } => {
+                if profile.emit_arithmetic_special_case_semantic {
+                    if let (Some(rs1), Some(rs2)) = (le_u32_from_bytes(b), le_u32_from_bytes(c)) {
+                        if rs2 == 0 || (rs1 == 0x8000_0000 && rs2 == 0xFFFF_FFFF) {
+                            arithmetic_special_case.push(ArithmeticSpecialCaseObservation {
+                                step_idx: base.step_idx,
+                                op_idx: base.op_idx,
+                                rs1,
+                                rs2,
+                            });
+                        }
+                    }
+                }
+            }
+            OpenVMChipRowPayload::Auipc { imm, from_pc, .. } => {
+                if profile.emit_auipc_pc_limb_semantic {
+                    auipc_pc_limb.push(AuipcPcLimbObservation {
+                        step_idx: base.step_idx,
+                        op_idx: base.op_idx,
+                        kind: kind.clone(),
+                        chip_name: base.chip_name.clone(),
+                        from_pc: *from_pc,
+                        imm: *imm,
+                    });
+                }
+            }
+            OpenVMChipRowPayload::LoadStore {
+                imm,
+                imm_sign,
+                mem_as,
+                is_store,
+                is_load,
+                ..
+            } => {
+                saw_memory_access = true;
+                if *is_load {
+                    record_signal(&mut signals, &mut seen_signals, TraceSignal::HasLoad);
+                    record_signal(&mut signals, &mut seen_signals, TraceSignal::HasLoadStore);
+                }
+                if *is_store {
+                    record_signal(&mut signals, &mut seen_signals, TraceSignal::HasStore);
+                    record_signal(&mut signals, &mut seen_signals, TraceSignal::HasLoadStore);
+                }
+                match profile.memory_semantic {
+                    OpenVmMemoryObservationProfile::ImmediateSign => {
+                        memory_immediate_sign.push(MemoryImmediateSignObservation {
+                            step_idx: base.step_idx,
+                            op_idx: base.op_idx,
+                            kind: kind.clone(),
+                            chip_name: base.chip_name.clone(),
+                            imm: *imm,
+                            imm_sign: *imm_sign,
+                        });
+                    }
+                    OpenVmMemoryObservationProfile::AddressSpace => {
+                        memory_address_space.push(MemoryAddressSpaceObservation {
+                            step_idx: base.step_idx,
+                            op_idx: base.op_idx,
+                            kind: kind.clone(),
+                            chip_name: base.chip_name.clone(),
+                            mem_as: *mem_as,
+                        });
+                    }
+                    OpenVmMemoryObservationProfile::None => {}
+                }
+            }
+            OpenVMChipRowPayload::LoadSignExtend { imm, imm_sign, mem_as, .. } => {
+                saw_memory_access = true;
+                record_signal(&mut signals, &mut seen_signals, TraceSignal::HasLoad);
+                record_signal(&mut signals, &mut seen_signals, TraceSignal::HasLoadStore);
+                match profile.memory_semantic {
+                    OpenVmMemoryObservationProfile::ImmediateSign => {
+                        memory_immediate_sign.push(MemoryImmediateSignObservation {
+                            step_idx: base.step_idx,
+                            op_idx: base.op_idx,
+                            kind: kind.clone(),
+                            chip_name: base.chip_name.clone(),
+                            imm: *imm,
+                            imm_sign: *imm_sign,
+                        });
+                    }
+                    OpenVmMemoryObservationProfile::AddressSpace => {
+                        memory_address_space.push(MemoryAddressSpaceObservation {
+                            step_idx: base.step_idx,
+                            op_idx: base.op_idx,
+                            kind: kind.clone(),
+                            chip_name: base.chip_name.clone(),
+                            mem_as: *mem_as,
+                        });
+                    }
+                    OpenVmMemoryObservationProfile::None => {}
+                }
+            }
+            OpenVMChipRowPayload::Connector {
+                from_timestamp,
+                to_timestamp,
+                is_terminate,
+                ..
+            } => {
+                if *is_terminate {
+                    saw_system_terminate = true;
+                    record_signal(&mut signals, &mut seen_signals, TraceSignal::HasEcall);
+                }
+                if profile.emit_boundary_origin_semantic && matches!(from_timestamp, Some(0)) {
+                    boundary_origin.push(BoundaryOriginObservation {
+                        step_idx: base.step_idx,
+                        op_idx: base.op_idx,
+                        kind: kind.clone(),
+                        chip_name: base.chip_name.clone(),
+                        from_timestamp: *from_timestamp,
+                        to_timestamp: *to_timestamp,
+                        is_terminate: *is_terminate,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if profile.emit_boundary_origin_semantic
+        && saw_system_terminate
+        && saw_missing_row_timestamp
+        && !saw_memory_access
+    {
+        boundary_origin.push(BoundaryOriginObservation {
+            step_idx: 0,
+            op_idx: 0,
+            kind: "connector_fallback".to_string(),
+            chip_name: "SystemConnector".to_string(),
+            from_timestamp: Some(0),
+            to_timestamp: None,
+            is_terminate: true,
+        });
+    }
+
+    let mut bucket_hits = Vec::new();
+    bucket_hits.extend(semantic_matchers::match_immediate_limb_semantic_hits(&immediate_limb));
+    bucket_hits.extend(semantic_matchers::match_xor_multiplicity_semantic_hits(&xor_multiplicity));
+    bucket_hits.extend(semantic_matchers::match_auipc_pc_limb_semantic_hits(&auipc_pc_limb));
+    bucket_hits
+        .extend(semantic_matchers::match_memory_immediate_sign_semantic_hits(&memory_immediate_sign));
+    bucket_hits
+        .extend(semantic_matchers::match_memory_address_space_semantic_hits(&memory_address_space));
+    bucket_hits.extend(semantic_matchers::match_boundary_origin_semantic_hits(&boundary_origin));
+    bucket_hits
+        .extend(semantic_matchers::match_volatile_boundary_semantic_hits(&volatile_boundary));
+    bucket_hits.extend(
+        semantic_matchers::match_arithmetic_special_case_semantic_hits(&arithmetic_special_case),
+    );
+    (bucket_hits, signals)
 }
 
 impl OpenVMTrace {
@@ -157,6 +436,7 @@ impl OpenVMTrace {
             chip_rows,
             interactions,
             bucket_hits: Vec::new(),
+            trace_signals: Vec::new(),
             insn_by_seq,
             chip_row_by_seq,
             interaction_by_seq,
@@ -167,9 +447,20 @@ impl OpenVMTrace {
             interactions_by_bus,
         };
 
-        // Derive trace feedback buckets (per-trace multi-hot).
-        let hits = crate::bucket::match_bucket_hits(&out);
-        out.bucket_hits = hits;
+        let (bucket_hits, trace_signals) = derive_semantic_feedback(
+            &out,
+            OpenVmObservationProfile {
+                emit_alu_immediate_limb_semantic: true,
+                emit_xor_multiplicity_semantic: false,
+                emit_auipc_pc_limb_semantic: true,
+                memory_semantic: OpenVmMemoryObservationProfile::AddressSpace,
+                emit_boundary_origin_semantic: true,
+                emit_volatile_boundary_semantic: true,
+                emit_arithmetic_special_case_semantic: false,
+            },
+        );
+        out.bucket_hits = bucket_hits;
+        out.trace_signals = trace_signals;
         out
     }
 
@@ -294,5 +585,9 @@ impl OpenVMTrace {
 impl Trace for OpenVMTrace {
     fn bucket_hits(&self) -> &[BucketHit] {
         &self.bucket_hits
+    }
+
+    fn trace_signals(&self) -> &[TraceSignal] {
+        &self.trace_signals
     }
 }

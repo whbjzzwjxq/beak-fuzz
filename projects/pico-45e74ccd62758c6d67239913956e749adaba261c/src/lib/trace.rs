@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::trace::{BucketHit, Trace};
+use beak_core::trace::observations::{SequenceInsnObservation, SequenceSemanticMatcherProfile};
+use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic_matchers};
 
 use crate::chip_row::{PicoChipRow, PicoChipRowBase, PicoChipRowKind, PicoChipRowPayload};
 use crate::insn::PicoInsn;
@@ -16,6 +17,7 @@ pub struct PicoTrace {
     chip_rows: Vec<PicoChipRow>,
     interactions: Vec<PicoInteraction>,
     bucket_hits: Vec<BucketHit>,
+    trace_signals: Vec<TraceSignal>,
 
     insn_by_step: Vec<Option<usize>>,
     chip_rows_by_step: Vec<Vec<usize>>,
@@ -165,12 +167,35 @@ impl PicoTrace {
             chip_rows,
             interactions,
             bucket_hits: Vec::new(),
+            trace_signals: Vec::new(),
             insn_by_step,
             chip_rows_by_step,
             interactions_by_step,
             interactions_by_row_id,
         };
-        out.bucket_hits = crate::bucket::match_bucket_hits(&out);
+        let insns = out
+            .instructions()
+            .iter()
+            .map(|insn| SequenceInsnObservation {
+                step_idx: insn.step_idx,
+                word: insn.word,
+                mnemonic: insn.mnemonic.clone(),
+                rs1: insn.rs1,
+                imm: insn.imm,
+            })
+            .collect::<Vec<_>>();
+        out.trace_signals = semantic_matchers::sequence_trace_signals(&insns);
+        out.bucket_hits = semantic_matchers::match_sequence_semantic_hits(
+            SequenceSemanticMatcherProfile {
+                emit_padding_interaction_send: false,
+                emit_boolean_on_store: false,
+                emit_boolean_on_load_after_store: true,
+                emit_kind_selector: false,
+                emit_digest_route: false,
+                emit_ecall_next_pc: false,
+            },
+            &insns,
+        );
         out
     }
 
@@ -221,5 +246,9 @@ impl PicoTrace {
 impl Trace for PicoTrace {
     fn bucket_hits(&self) -> &[BucketHit] {
         &self.bucket_hits
+    }
+
+    fn trace_signals(&self) -> &[TraceSignal] {
+        &self.trace_signals
     }
 }

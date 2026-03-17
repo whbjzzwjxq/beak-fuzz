@@ -6,11 +6,11 @@ zkVM integrations.
 
 Current semantic coverage:
 
-- `nexus.sem.memory.write_payload_consistency`
-  - generalized class: `nexus.semantic.memory.write_payload_flow_consistency`
+- `sem.memory.write_payload_consistency`
+  - generalized class: `semantic.memory.write_payload_flow_consistency`
   - injection family: `nexus.audit_memory.store_payload_trace`
-- `nexus.sem.memory.store_load_payload_flow`
-  - generalized class: `nexus.semantic.memory.write_payload_flow_consistency`
+- `sem.memory.store_load_payload_flow`
+  - generalized class: `semantic.memory.write_payload_flow_consistency`
   - injection family: `nexus.audit_memory.store_payload_trace`
 
 Minimal smoke checks:

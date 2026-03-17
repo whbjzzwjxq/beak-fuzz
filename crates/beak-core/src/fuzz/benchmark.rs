@@ -11,7 +11,9 @@ use crate::fuzz::jsonl::{BugRecord, CorpusRecord, JsonlWriter, RunRecord};
 use crate::fuzz::seed::FuzzingSeed;
 use crate::rv32im::instruction::RV32IMInstruction;
 use crate::rv32im::oracle::{OracleConfig, RISCVOracle};
-use crate::trace::{sorted_signatures_from_hits, BucketHit};
+use crate::trace::{
+    BucketHit, TraceSignal, sorted_signatures_from_hits, sorted_signatures_from_signals,
+};
 
 pub use crate::fuzz::loop1::{BackendEval, DEFAULT_RNG_SEED};
 
@@ -56,6 +58,7 @@ pub enum InjectionSchedule {
 #[derive(Debug, Clone)]
 pub struct SemanticInjectionCandidate {
     pub bucket_id: String,
+    pub trigger_signal_id: Option<String>,
     pub semantic_class: String,
     pub inject_kind: String,
     pub schedule: InjectionSchedule,
@@ -86,9 +89,11 @@ pub trait BenchmarkBackend {
 #[derive(Debug, Clone, Default)]
 struct EvalStats {
     bucket_hits_sig: String,
+    signal_sig: String,
     bucket_hits_detail_sig: String,
     micro_op_count: usize,
     bucket_hits: Vec<BucketHit>,
+    trace_signals: Vec<TraceSignal>,
     mismatch_regs: Vec<(u32, u32, u32)>,
     backend_error: Option<String>,
     oracle_error: Option<String>,
@@ -98,6 +103,7 @@ struct EvalStats {
     inject_kind: Option<String>,
     inject_step: Option<u64>,
     trigger_bucket_id: Option<String>,
+    trigger_signal_id: Option<String>,
     baseline_bucket_hits_sig: Option<String>,
     underconstrained_candidate: bool,
     semantic_injection_applied: bool,
@@ -291,7 +297,9 @@ fn eval_once<B: BenchmarkBackend>(
     let backend_error = eval.backend_error.clone().or(panic_backend_error);
     let oracle_error = panic_oracle_error.map(|e| format!("oracle {e}"));
     let bucket_sigs = sorted_signatures_from_hits(&eval.bucket_hits);
+    let signal_sigs = sorted_signatures_from_signals(&eval.trace_signals);
     let sig = canonical_bucket_sig(&bucket_sigs);
+    let signal_sig = canonical_bucket_sig(&signal_sigs);
     let detail_sig = canonical_bucket_detail_sig(&eval.bucket_hits);
     let backend_timed_out = backend_error
         .as_deref()
@@ -301,9 +309,11 @@ fn eval_once<B: BenchmarkBackend>(
 
     EvalStats {
         bucket_hits_sig: sig,
+        signal_sig,
         bucket_hits_detail_sig: detail_sig,
         micro_op_count: eval.micro_op_count,
         bucket_hits: eval.bucket_hits,
+        trace_signals: eval.trace_signals,
         mismatch_regs: mismatches,
         backend_error,
         oracle_error,
@@ -313,6 +323,7 @@ fn eval_once<B: BenchmarkBackend>(
         inject_kind: None,
         inject_step: None,
         trigger_bucket_id: None,
+        trigger_signal_id: None,
         baseline_bucket_hits_sig: None,
         underconstrained_candidate: false,
         semantic_injection_applied: eval.semantic_injection_applied,
@@ -367,6 +378,7 @@ fn write_run_record(
     metadata.insert("inject_kind".to_string(), json!(stats.inject_kind));
     metadata.insert("inject_step".to_string(), json!(stats.inject_step));
     metadata.insert("trigger_bucket_id".to_string(), json!(stats.trigger_bucket_id));
+    metadata.insert("trigger_signal_id".to_string(), json!(stats.trigger_signal_id));
     metadata.insert(
         "baseline_bucket_hits_sig".to_string(),
         json!(stats.baseline_bucket_hits_sig),
@@ -390,6 +402,7 @@ fn write_run_record(
         eval_id,
         timed_out: stats.timed_out,
         bucket_hits_sig: stats.bucket_hits_sig.clone(),
+        signal_sig: stats.signal_sig.clone(),
         micro_op_count: stats.micro_op_count,
         backend_error: stats.backend_error.clone(),
         oracle_error: stats.oracle_error.clone(),
@@ -421,6 +434,7 @@ fn write_corpus_record(
         timed_out: stats.timed_out,
         mismatch: !stats.mismatch_regs.is_empty(),
         bucket_hits_sig: stats.bucket_hits_sig.clone(),
+        signal_sig: stats.signal_sig.clone(),
         instructions: words.to_vec(),
         metadata: serde_json::Value::Object(metadata),
     };
@@ -448,6 +462,7 @@ fn write_bug_record(
     metadata.insert("inject_kind".to_string(), json!(stats.inject_kind));
     metadata.insert("inject_step".to_string(), json!(stats.inject_step));
     metadata.insert("trigger_bucket_id".to_string(), json!(stats.trigger_bucket_id));
+    metadata.insert("trigger_signal_id".to_string(), json!(stats.trigger_signal_id));
     metadata.insert(
         "baseline_bucket_hits_sig".to_string(),
         json!(stats.baseline_bucket_hits_sig),
@@ -468,6 +483,7 @@ fn write_bug_record(
         timeout_ms: cfg.timeout_ms,
         timed_out: stats.timed_out,
         bucket_hits_sig: stats.bucket_hits_sig.clone(),
+        signal_sig: stats.signal_sig.clone(),
         micro_op_count: stats.micro_op_count,
         backend_error: stats.backend_error.clone(),
         oracle_error: stats.oracle_error.clone(),
@@ -680,6 +696,7 @@ pub fn run_benchmark<B: BenchmarkBackend>(
                 injected.inject_kind = Some(candidate.inject_kind.clone());
                 injected.inject_step = Some(step);
                 injected.trigger_bucket_id = Some(candidate.bucket_id.clone());
+                injected.trigger_signal_id = candidate.trigger_signal_id.clone();
                 injected.baseline_bucket_hits_sig = Some(baseline.bucket_hits_sig.clone());
                 injected.underconstrained_candidate = injected.backend_error.is_none()
                     && injected.oracle_error.is_none()

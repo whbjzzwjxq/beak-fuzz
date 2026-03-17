@@ -4,7 +4,7 @@ use beak_core::fuzz::benchmark::{
     BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::trace::{BucketHit, Trace};
+use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic};
 use nexus_common::cpu::Registers;
 use nexus_common::memory::{MemoryRecord, MemoryRecords};
 use nexus_common::riscv::register::Register;
@@ -30,6 +30,7 @@ pub struct RunResponse {
     pub final_regs: Option<[u32; 32]>,
     pub micro_op_count: usize,
     pub bucket_hits: Vec<BucketHit>,
+    pub trace_signals: Vec<TraceSignal>,
     pub backend_error: Option<String>,
     pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pub injection_applied: bool,
@@ -40,11 +41,7 @@ fn base_inject_kind(kind: &str) -> &str {
 }
 
 fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
-    if variant.is_empty() {
-        kind.to_string()
-    } else {
-        format!("{kind}::{variant}")
-    }
+    if variant.is_empty() { kind.to_string() } else { format!("{kind}::{variant}") }
 }
 
 fn inject_variant_value<'a>(kind: &'a str, key: &str) -> Option<&'a str> {
@@ -173,11 +170,7 @@ fn execute_final_regs(words: &[u32]) -> Result<[u32; 32], String> {
 
     let mut out = [0u32; 32];
     for (idx, slot) in out.iter_mut().enumerate() {
-        *slot = emulator
-            .get_executor()
-            .cpu
-            .registers
-            .read(Register::from(idx as u8));
+        *slot = emulator.get_executor().cpu.registers.read(Register::from(idx as u8));
     }
     Ok(out)
 }
@@ -205,11 +198,7 @@ fn apply_injection_to_trace(
         return false;
     }
 
-    let target_step = if inject_step == u64::MAX {
-        None
-    } else {
-        Some(inject_step)
-    };
+    let target_step = if inject_step == u64::MAX { None } else { Some(inject_step) };
     let mut flat_step = 0u64;
     let mut applied_any = false;
     let mut propagated_load: Option<(u32, u8, u32)> = None;
@@ -233,7 +222,8 @@ fn apply_injection_to_trace(
                 }
                 step.memory_records = rewritten;
                 if propagated_here {
-                    if let Some(next_result) = load_result_from_value(step.raw_instruction, target_value)
+                    if let Some(next_result) =
+                        load_result_from_value(step.raw_instruction, target_value)
                     {
                         step.result = Some(next_result);
                     }
@@ -251,7 +241,9 @@ fn apply_injection_to_trace(
             let mut applied = false;
             for record in records {
                 let mut next_record = record;
-                if let MemoryRecord::StoreRecord((size, address, value, prev_value), timestamp) = record {
+                if let MemoryRecord::StoreRecord((size, address, value, prev_value), timestamp) =
+                    record
+                {
                     let trial = inject_variant_trial(kind).unwrap_or(0);
                     let weak_delta = ((trial_word(trial, 0) % 251) + 1) as u8;
                     let weak_mask = 1u8 << (trial_word(trial, 1) % 8);
@@ -279,18 +271,21 @@ fn apply_injection_to_trace(
                                 low_byte_blend(value, prev_value, trial),
                                 true,
                             ),
-                            (_, Some("payload_add_delta")) => (
-                                strong_add,
-                                prev_value,
-                                strong_add,
-                                true,
-                            ),
-                            (_, Some("payload_prev_bias")) => (strong_prev, strong_prev, strong_prev, true),
-                            (_, Some("payload_flip_bit")) => (value ^ strong_bit, prev_value, value ^ strong_bit, true),
+                            (_, Some("payload_add_delta")) => {
+                                (strong_add, prev_value, strong_add, true)
+                            }
+                            (_, Some("payload_prev_bias")) => {
+                                (strong_prev, strong_prev, strong_prev, true)
+                            }
+                            (_, Some("payload_flip_bit")) => {
+                                (value ^ strong_bit, prev_value, value ^ strong_bit, true)
+                            }
                             _ => (value, prev_value, value, false),
                         };
-                    let next_store =
-                        MemoryRecord::StoreRecord((size, address, next_value, next_prev_value), timestamp);
+                    let next_store = MemoryRecord::StoreRecord(
+                        (size, address, next_value, next_prev_value),
+                        timestamp,
+                    );
                     applied = next_applied;
                     if applied {
                         propagated_load = Some((address, size as u8, propagated_value));
@@ -343,6 +338,7 @@ pub fn run_backend_once(
         final_regs: Some(final_regs),
         micro_op_count: derived.step_count(),
         bucket_hits: derived.bucket_hits().to_vec(),
+        trace_signals: derived.trace_signals().to_vec(),
         backend_error,
         observed_injection_sites,
         injection_applied,
@@ -381,10 +377,7 @@ impl NexusBackend {
     }
 
     fn step_from_hit(hit: &BucketHit) -> u64 {
-        hit.details
-            .get("op_idx")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0)
+        hit.details.get("op_idx").and_then(|v| v.as_u64()).unwrap_or(0)
     }
 
     fn variant_specs() -> Vec<String> {
@@ -422,28 +415,30 @@ impl NexusBackend {
 
     fn semantic_candidate_from_hit(&self, hit: &BucketHit) -> Vec<SemanticInjectionCandidate> {
         let anchor = Self::step_from_hit(hit);
-        let (semantic_class, inject_kind) = match hit.bucket_id.as_str() {
-            "nexus.sem.memory.store_load_payload_flow" => (
-                "nexus.semantic.memory.write_payload_flow_consistency",
-                FLOW_PAYLOAD_INJECT_KIND,
-            ),
-            "nexus.sem.memory.write_payload_consistency" => (
-                "nexus.semantic.memory.write_payload_flow_consistency",
-                WRITE_PAYLOAD_INJECT_KIND,
-            ),
-            _ => return Vec::new(),
+        let bucket_id = hit.bucket_id.as_str();
+        let (semantic_class, inject_kind) = if bucket_id
+            == semantic::memory::STORE_LOAD_PAYLOAD_FLOW.id
+        {
+            (semantic::memory::STORE_LOAD_PAYLOAD_FLOW.semantic_class, FLOW_PAYLOAD_INJECT_KIND)
+        } else if bucket_id == semantic::memory::WRITE_PAYLOAD_CONSISTENCY.id {
+            (semantic::memory::WRITE_PAYLOAD_CONSISTENCY.semantic_class, WRITE_PAYLOAD_INJECT_KIND)
+        } else {
+            return Vec::new();
         };
 
         let schedule = self
             .last_observed_injection_sites
             .get(base_inject_kind(inject_kind))
-            .map(|steps| InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor)))
+            .map(|steps| {
+                InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor))
+            })
             .unwrap_or(InjectionSchedule::AroundAnchor(anchor));
 
         Self::inject_kinds_for_base(inject_kind)
             .into_iter()
             .map(|kind| SemanticInjectionCandidate {
                 bucket_id: hit.bucket_id.clone(),
+                trigger_signal_id: None,
                 semantic_class: semantic_class.to_string(),
                 inject_kind: kind,
                 schedule: schedule.clone(),
@@ -476,6 +471,7 @@ impl BenchmarkBackend for NexusBackend {
         self.eval.final_regs = resp.final_regs;
         self.eval.micro_op_count = resp.micro_op_count;
         self.eval.bucket_hits = resp.bucket_hits;
+        self.eval.trace_signals = resp.trace_signals;
         self.eval.backend_error = resp.backend_error;
         self.eval.semantic_injection_applied = resp.injection_applied;
         resp.final_regs.ok_or_else(|| "nexus backend returned no final_regs".to_string())
@@ -490,16 +486,11 @@ impl BenchmarkBackend for NexusBackend {
     }
 
     fn arm_semantic_injection(&mut self, kind: &str, step: u64) -> Result<(), String> {
-        self.pending_injection = Some(WitnessInjectionPlan {
-            kind: kind.to_string(),
-            step,
-        });
+        self.pending_injection = Some(WitnessInjectionPlan { kind: kind.to_string(), step });
         Ok(())
     }
 
     fn semantic_injection_candidates(&self, hits: &[BucketHit]) -> Vec<SemanticInjectionCandidate> {
-        hits.iter()
-            .flat_map(|hit| self.semantic_candidate_from_hit(hit))
-            .collect()
+        hits.iter().flat_map(|hit| self.semantic_candidate_from_hit(hit)).collect()
     }
 }

@@ -44,11 +44,11 @@ This commit has 8 relevant `o..` targets:
 
 Current semantic bucket -> injected bug family mapping supports:
 
-- `o1` via `openvm.interaction.bitwise.op_xor -> openvm.audit_o1.bitwise_mult_p_plus_1`
-- `o5` via `openvm.sem.alu.immediate_limb_consistency -> openvm.audit_o5.rs2_imm_limbs`
-- `o7` via `openvm.sem.control.auipc_pc_limb_consistency -> openvm.audit_o7.auipc_pc_limbs`
-- `o8` via `openvm.sem.memory.immediate_sign_consistency -> openvm.audit_o8.loadstore_imm_sign`
-- `o15` via `openvm.divrem.* -> openvm.audit_o15.divrem_special_case_on_invalid`
+- `o1` via `sem.lookup.xor_multiplicity_consistency -> openvm.audit_o1.bitwise_mult_p_plus_1`
+- `o5` via `sem.alu.immediate_limb_consistency -> openvm.audit_o5.rs2_imm_limbs`
+- `o7` via `sem.control.auipc_pc_limb_consistency -> openvm.audit_o7.auipc_pc_limbs`
+- `o8` via `sem.memory.immediate_sign_consistency -> openvm.audit_o8.loadstore_imm_sign`
+- `o15` via `sem.arithmetic.special_case_consistency -> openvm.audit_o15.divrem_special_case_on_invalid`
 
 So the answer to "all 336 `o..` targets?" is: **not yet**.
 

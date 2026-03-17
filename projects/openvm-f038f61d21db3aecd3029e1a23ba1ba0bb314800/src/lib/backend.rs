@@ -2,23 +2,22 @@ use beak_core::fuzz::benchmark::{
     BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::trace::Trace;
+use beak_core::trace::{Trace, TraceSignal, semantic};
 
 use crate::trace::OpenVMTrace;
-use crate::bucket_id::OpenVMBucketId;
 use openvm_circuit::arch::VmExecutor;
+use openvm_instructions::LocalOpcode;
+use openvm_instructions::SystemOpcode;
 use openvm_instructions::exe::VmExe;
 use openvm_instructions::instruction::Instruction;
 use openvm_instructions::program::Program;
 use openvm_instructions::riscv::RV32_REGISTER_AS;
-use openvm_instructions::LocalOpcode;
-use openvm_instructions::SystemOpcode;
 use openvm_rv32im_transpiler::{Rv32ITranspilerExtension, Rv32MTranspilerExtension};
 use openvm_sdk::config::{AppConfig, SdkVmConfig};
 use openvm_sdk::prover::AppProver;
-use openvm_sdk::{Sdk, StdIn, F};
-use p3_field::PrimeField32;
+use openvm_sdk::{F, Sdk, StdIn};
 use openvm_transpiler::transpiler::Transpiler;
+use p3_field::PrimeField32;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Write};
@@ -51,8 +50,7 @@ fn build_vm_config() -> SdkVmConfig {
     vm_config.system.config = sys_cfg;
     eprintln!(
         "[beak-vm-config] force_volatile={} continuation_enabled={}",
-        force_volatile,
-        vm_config.system.config.continuation_enabled
+        force_volatile, vm_config.system.config.continuation_enabled
     );
     vm_config
 }
@@ -93,6 +91,7 @@ pub struct WorkerResponse {
     pub final_regs: Option<[u32; 32]>,
     pub micro_op_count: usize,
     pub bucket_hits: Vec<beak_core::trace::BucketHit>,
+    pub trace_signals: Vec<TraceSignal>,
     pub backend_error: Option<String>,
     pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pub injection_applied: bool,
@@ -105,11 +104,7 @@ fn base_inject_kind(kind: &str) -> &str {
 }
 
 fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
-    if variant.is_empty() {
-        kind.to_string()
-    } else {
-        format!("{kind}::{variant}")
-    }
+    if variant.is_empty() { kind.to_string() } else { format!("{kind}::{variant}") }
 }
 
 pub fn run_backend_once(
@@ -123,11 +118,7 @@ pub fn run_backend_once(
     let mut eval = BackendEval::default();
     fuzzer_utils::configure_witness_injection(inject_kind, inject_step);
     if let Some(kind) = inject_kind {
-        eprintln!(
-            "[beak-inject-arm] kind={} step={}",
-            kind,
-            inject_step
-        );
+        eprintln!("[beak-inject-arm] kind={} step={}", kind, inject_step);
     }
     let _ = fuzzer_utils::take_json_logs();
 
@@ -153,9 +144,8 @@ pub fn run_backend_once(
         eval.backend_error = Some(msg.clone());
         msg
     })?);
-    let app_committed_exe = sdk
-        .commit_app_exe(app_pk.app_vm_pk.fri_params, exe.as_ref().clone())
-        .map_err(|e| {
+    let app_committed_exe =
+        sdk.commit_app_exe(app_pk.app_vm_pk.fri_params, exe.as_ref().clone()).map_err(|e| {
             let msg = format!("commit_app_exe failed: {e:?}");
             eval.backend_error = Some(msg.clone());
             msg
@@ -175,10 +165,7 @@ pub fn run_backend_once(
     let ms_trace_only = t2.elapsed().as_millis();
 
     let t3 = Instant::now();
-    let state = vm_result
-        .final_memory
-        .as_ref()
-        .ok_or_else(|| "no final state".to_string())?;
+    let state = vm_result.final_memory.as_ref().ok_or_else(|| "no final state".to_string())?;
     let mut regs = [0u32; 32];
     for i in 0..32u32 {
         let limbs = state.get_range::<4>(&(RV32_REGISTER_AS, i * 4));
@@ -191,25 +178,22 @@ pub fn run_backend_once(
     let t4 = Instant::now();
     let observed_injection_sites = fuzzer_utils::take_observed_witness_sites();
     let applied_injection_sites = fuzzer_utils::take_applied_witness_sites();
-    let injection_applied = inject_kind
-        .and_then(|kind| applied_injection_sites.get(base_inject_kind(kind)))
-        .map(|steps| {
-            if inject_step == u64::MAX {
-                !steps.is_empty()
-            } else {
-                steps.contains(&inject_step)
-            }
-        })
-        .unwrap_or(false);
+    let injection_applied =
+        inject_kind
+            .and_then(|kind| applied_injection_sites.get(base_inject_kind(kind)))
+            .map(|steps| {
+                if inject_step == u64::MAX {
+                    !steps.is_empty()
+                } else {
+                    steps.contains(&inject_step)
+                }
+            })
+            .unwrap_or(false);
     if let Some(kind) = inject_kind {
-        let observed = observed_injection_sites
-            .get(base_inject_kind(kind))
-            .cloned()
-            .unwrap_or_default();
-        let applied = applied_injection_sites
-            .get(base_inject_kind(kind))
-            .cloned()
-            .unwrap_or_default();
+        let observed =
+            observed_injection_sites.get(base_inject_kind(kind)).cloned().unwrap_or_default();
+        let applied =
+            applied_injection_sites.get(base_inject_kind(kind)).cloned().unwrap_or_default();
         eprintln!(
             "[beak-inject-observed] kind={} requested_step={} observed_steps={:?} applied_steps={:?} applied={}",
             kind, inject_step, observed, applied, injection_applied
@@ -227,6 +211,7 @@ pub fn run_backend_once(
             let hit_count = trace.bucket_hits().len();
             eval.micro_op_count = trace.instruction_count();
             eval.bucket_hits = trace.bucket_hits().to_vec();
+            eval.trace_signals = trace.trace_signals().to_vec();
             let ms_parse = t5.elapsed().as_millis();
             eprintln!(
                 "[openvm-backend-worker] iter={} logs_len={logs_len} insn_count={insn_count} chip_rows={row_count} bucket_hits={hit_count} build_exe_ms={ms_build_exe} instance_ms={ms_instance} trace_only_ms={ms_trace_only} read_regs_ms={ms_read_regs} take_logs_ms={ms_take_logs} parse_ms={ms_parse} total_ms={}",
@@ -264,9 +249,8 @@ pub fn run_backend_once(
         let app_prover = AppProver::new(app_pk.app_vm_pk.clone(), app_committed_exe.clone());
         let proof = app_prover.generate_app_proof_without_continuations(StdIn::default());
         if let Err(e) = sdk.verify_app_proof_without_continuations(&app_vk, &proof) {
-            eval.backend_error = Some(format!(
-                "verify_app_proof_without_continuations failed: {e:?}"
-            ));
+            eval.backend_error =
+                Some(format!("verify_app_proof_without_continuations failed: {e:?}"));
         }
     }
     let ms_prove_verify = t6.elapsed().as_millis();
@@ -280,6 +264,7 @@ pub fn run_backend_once(
         final_regs: eval.final_regs,
         micro_op_count: eval.micro_op_count,
         bucket_hits: eval.bucket_hits,
+        trace_signals: eval.trace_signals,
         backend_error: eval.backend_error,
         observed_injection_sites,
         injection_applied,
@@ -487,49 +472,55 @@ impl OpenVmBackend {
         hit: &beak_core::trace::BucketHit,
     ) -> Vec<SemanticInjectionCandidate> {
         let anchor = Self::step_from_hit(hit);
-        let (semantic_class, inject_kind, fallback_schedule, wildcard_variant) = match hit.bucket_id.as_str() {
-            "openvm.sem.alu.immediate_limb_consistency" => (
-                "openvm.semantic.alu.immediate_limb_consistency",
-                "openvm.audit_o5.rs2_imm_limbs",
-                InjectionSchedule::AroundAnchor(anchor),
-                true,
-            ),
-            "openvm.sem.memory.address_space_consistency" => (
-                "openvm.semantic.memory.address_space_consistency",
-                "openvm.audit_o51.loadstore_mem_as",
-                InjectionSchedule::AroundAnchor(anchor),
-                true,
-            ),
-            "openvm.sem.time.boundary_origin_consistency" => (
-                "openvm.semantic.time.boundary_origin_consistency",
-                "openvm.audit_o26.connector_start_ts",
-                InjectionSchedule::Exact(0),
-                true,
-            ),
-            "openvm.sem.memory.volatile_boundary_range" => (
-                "openvm.semantic.memory.volatile_boundary_range",
-                "openvm.audit_o25.volatile_addr_range",
-                InjectionSchedule::AroundAnchor(anchor),
-                true,
-            ),
-            "openvm.interaction.bitwise.op_xor" => (
-                "openvm.semantic.lookup.multiplicity_consistency",
-                "openvm.audit_o1.bitwise_mult_p_plus_1",
-                InjectionSchedule::Exact(0),
-                false,
-            ),
-            "openvm.sem.control.auipc_pc_limb_consistency" => (
-                "openvm.semantic.control.auipc_pc_limb_consistency",
-                "openvm.audit_o7.auipc_pc_limbs",
-                InjectionSchedule::AroundAnchor(anchor),
-                true,
-            ),
-            _ => return Vec::new(),
-        };
-        if hit.bucket_id == "openvm.sem.control.auipc_pc_limb_consistency"
-            && Self::detail_u64(hit, "from_pc")
-                .map(|from_pc| (from_pc >> 24) == 0)
-                .unwrap_or(false)
+        let bucket_id = hit.bucket_id.as_str();
+        let (semantic_class, inject_kind, fallback_schedule, wildcard_variant) =
+            if bucket_id == semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id {
+                (
+                    semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.semantic_class,
+                    "openvm.audit_o5.rs2_imm_limbs",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::memory::ADDRESS_SPACE_CONSISTENCY.id {
+                (
+                    semantic::memory::ADDRESS_SPACE_CONSISTENCY.semantic_class,
+                    "openvm.audit_o51.loadstore_mem_as",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id {
+                (
+                    semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.semantic_class,
+                    "openvm.audit_o26.connector_start_ts",
+                    InjectionSchedule::Exact(0),
+                    true,
+                )
+            } else if bucket_id == semantic::memory::VOLATILE_BOUNDARY_RANGE.id {
+                (
+                    semantic::memory::VOLATILE_BOUNDARY_RANGE.semantic_class,
+                    "openvm.audit_o25.volatile_addr_range",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id {
+                (
+                    semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.semantic_class,
+                    "openvm.audit_o1.bitwise_mult_p_plus_1",
+                    InjectionSchedule::Exact(0),
+                    false,
+                )
+            } else if bucket_id == semantic::control::AUIPC_PC_LIMB_CONSISTENCY.id {
+                (
+                    semantic::control::AUIPC_PC_LIMB_CONSISTENCY.semantic_class,
+                    "openvm.audit_o7.auipc_pc_limbs",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else {
+                return Vec::new();
+            };
+        if hit.bucket_id == semantic::control::AUIPC_PC_LIMB_CONSISTENCY.id
+            && Self::detail_u64(hit, "from_pc").map(|from_pc| (from_pc >> 24) == 0).unwrap_or(false)
         {
             // For this snapshot family, low-PC AUIPC rows collapse to a unique base-256
             // decomposition, so witness-search variants consistently degrade into OODs
@@ -539,31 +530,39 @@ impl OpenVmBackend {
         let schedule = self
             .last_observed_injection_sites
             .get(base_inject_kind(inject_kind))
-            .map(|steps| InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor)))
+            .map(|steps| {
+                InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor))
+            })
             .unwrap_or(fallback_schedule);
         let inject_kinds = Self::inject_kinds_for_base(inject_kind);
         let mut candidates: Vec<_> = inject_kinds
             .iter()
             .map(|kind| SemanticInjectionCandidate {
                 bucket_id: hit.bucket_id.clone(),
+                trigger_signal_id: None,
                 semantic_class: semantic_class.to_string(),
                 inject_kind: kind.clone(),
                 schedule: schedule.clone(),
             })
             .collect();
         if inject_kind == "openvm.audit_o5.rs2_imm_limbs" {
-            candidates.extend(inject_kinds.iter().filter(|kind| {
-                kind.contains("mode=wide_limb") && kind.contains("slot=0")
-            }).map(|kind| SemanticInjectionCandidate {
-                bucket_id: hit.bucket_id.clone(),
-                semantic_class: semantic_class.to_string(),
-                inject_kind: kind.clone(),
-                schedule: InjectionSchedule::Exact(u64::MAX),
-            }));
+            candidates.extend(
+                inject_kinds
+                    .iter()
+                    .filter(|kind| kind.contains("mode=wide_limb") && kind.contains("slot=0"))
+                    .map(|kind| SemanticInjectionCandidate {
+                        bucket_id: hit.bucket_id.clone(),
+                        trigger_signal_id: None,
+                        semantic_class: semantic_class.to_string(),
+                        inject_kind: kind.clone(),
+                        schedule: InjectionSchedule::Exact(u64::MAX),
+                    }),
+            );
         }
         if wildcard_variant && inject_kinds.len() == 1 {
             candidates.push(SemanticInjectionCandidate {
                 bucket_id: hit.bucket_id.clone(),
+                trigger_signal_id: None,
                 semantic_class: semantic_class.to_string(),
                 inject_kind: inject_kind.to_string(),
                 schedule: InjectionSchedule::Exact(u64::MAX),
@@ -573,16 +572,24 @@ impl OpenVmBackend {
     }
 
     fn semantic_candidate_priority(candidate: &SemanticInjectionCandidate) -> u8 {
-        match candidate.bucket_id.as_str() {
-            "openvm.sem.memory.address_space_consistency" => 0,
-            "openvm.sem.memory.volatile_boundary_range" => 0,
-            "openvm.synthetic.observed.volatile_boundary_range" => 0,
+        let bucket_id = candidate.bucket_id.as_str();
+        if bucket_id == semantic::memory::ADDRESS_SPACE_CONSISTENCY.id
+            || bucket_id == semantic::memory::VOLATILE_BOUNDARY_RANGE.id
+            || candidate.trigger_signal_id.as_deref()
+                == Some(TraceSignal::ObservedVolatileBoundaryRange.id())
+        {
+            0
+        } else if bucket_id == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id {
             // Prefer explicit bitwise-lookup semantics over generic connector fallback.
-            "openvm.interaction.bitwise.op_xor" => 1,
-            "openvm.sem.time.boundary_origin_consistency" => 2,
-            "openvm.sem.control.auipc_pc_limb_consistency" => 3,
-            "openvm.sem.alu.immediate_limb_consistency" => 4,
-            _ => 5,
+            1
+        } else if bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id {
+            2
+        } else if bucket_id == semantic::control::AUIPC_PC_LIMB_CONSISTENCY.id {
+            3
+        } else if bucket_id == semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id {
+            4
+        } else {
+            5
         }
     }
 
@@ -600,10 +607,8 @@ impl OpenVmBackend {
             .spawn()
             .map_err(|e| format!("spawn backend worker failed: {e}"))?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "capture backend worker stdin failed".to_string())?;
+        let stdin =
+            child.stdin.take().ok_or_else(|| "capture backend worker stdin failed".to_string())?;
         let stdout = child
             .stdout
             .take()
@@ -645,12 +650,7 @@ impl OpenVmBackend {
             }
         });
 
-        self.worker = Some(WorkerProcess {
-            child,
-            stdin,
-            responses_rx: rx,
-            reader_thread,
-        });
+        self.worker = Some(WorkerProcess { child, stdin, responses_rx: rx, reader_thread });
         Ok(())
     }
 
@@ -702,21 +702,16 @@ impl BenchmarkBackend for OpenVmBackend {
         };
 
         {
-            let worker = self
-                .worker
-                .as_mut()
-                .ok_or_else(|| "backend worker unavailable".to_string())?;
-            let mut payload =
-                serde_json::to_vec(&req).map_err(|e| format!("serialize worker request failed: {e}"))?;
+            let worker =
+                self.worker.as_mut().ok_or_else(|| "backend worker unavailable".to_string())?;
+            let mut payload = serde_json::to_vec(&req)
+                .map_err(|e| format!("serialize worker request failed: {e}"))?;
             payload.push(b'\n');
             worker
                 .stdin
                 .write_all(&payload)
                 .map_err(|e| format!("write worker request failed: {e}"))?;
-            worker
-                .stdin
-                .flush()
-                .map_err(|e| format!("flush worker request failed: {e}"))?;
+            worker.stdin.flush().map_err(|e| format!("flush worker request failed: {e}"))?;
         }
 
         let started = Instant::now();
@@ -734,10 +729,8 @@ impl BenchmarkBackend for OpenVmBackend {
 
             let remaining = timeout - elapsed;
             let recv = {
-                let worker = self
-                    .worker
-                    .as_ref()
-                    .ok_or_else(|| "backend worker unavailable".to_string())?;
+                let worker =
+                    self.worker.as_ref().ok_or_else(|| "backend worker unavailable".to_string())?;
                 worker.responses_rx.recv_timeout(remaining)
             };
             match recv {
@@ -771,6 +764,7 @@ impl BenchmarkBackend for OpenVmBackend {
 
         self.eval.micro_op_count = worker_resp.micro_op_count;
         self.eval.bucket_hits = worker_resp.bucket_hits;
+        self.eval.trace_signals = worker_resp.trace_signals;
         self.eval.backend_error = worker_resp.backend_error.clone();
         self.eval.final_regs = worker_resp.final_regs;
         self.eval.semantic_injection_applied = worker_resp.injection_applied;
@@ -785,39 +779,6 @@ impl BenchmarkBackend for OpenVmBackend {
     }
 
     fn collect_eval(&mut self) -> BackendEval {
-        // Input-level buckets help guide seed evolution, even when the backend rejects or
-        // does not fully model certain instruction classes.
-        let details = HashMap::new();
-        let mut saw_ecall = false;
-        let mut saw_loadstore = false;
-        for &w in &self.last_words {
-            let opcode = w & 0x7f;
-            if opcode == 0x03 || opcode == 0x23 {
-                saw_loadstore = true;
-            }
-            if opcode != 0x73 {
-                continue;
-            }
-            if let Ok(insn) = RV32IMInstruction::from_word(w) {
-                match insn.mnemonic.as_str() {
-                    "ecall" | "ebreak" => saw_ecall = true,
-                    _ => {}
-                }
-            }
-        }
-        if saw_ecall {
-            self.eval.bucket_hits.push(beak_core::trace::BucketHit::new(
-                OpenVMBucketId::InputHasEcall.as_ref().to_string(),
-                details.clone(),
-            ));
-        }
-        if saw_loadstore {
-            self.eval.bucket_hits.push(beak_core::trace::BucketHit::new(
-                OpenVMBucketId::InputHasLoadStore.as_ref().to_string(),
-                details.clone(),
-            ));
-        }
-
         self.eval.clone()
     }
 
@@ -826,10 +787,7 @@ impl BenchmarkBackend for OpenVmBackend {
     }
 
     fn arm_semantic_injection(&mut self, kind: &str, step: u64) -> Result<(), String> {
-        self.pending_injection = Some(WitnessInjectionPlan {
-            kind: kind.to_string(),
-            step,
-        });
+        self.pending_injection = Some(WitnessInjectionPlan { kind: kind.to_string(), step });
         Ok(())
     }
 
@@ -837,17 +795,14 @@ impl BenchmarkBackend for OpenVmBackend {
         &self,
         hits: &[beak_core::trace::BucketHit],
     ) -> Vec<SemanticInjectionCandidate> {
-        let mut candidates: Vec<_> = hits
-            .iter()
-            .flat_map(|hit| self.semantic_candidate_from_hit(hit))
-            .collect();
+        let mut candidates: Vec<_> =
+            hits.iter().flat_map(|hit| self.semantic_candidate_from_hit(hit)).collect();
         let has_o25_candidate = candidates.iter().any(|candidate| {
-            candidate.semantic_class == "openvm.semantic.memory.volatile_boundary_range"
+            candidate.semantic_class == semantic::memory::VOLATILE_BOUNDARY_RANGE.semantic_class
         });
         if !has_o25_candidate {
-            if let Some(steps) = self
-                .last_observed_injection_sites
-                .get("openvm.audit_o25.volatile_addr_range")
+            if let Some(steps) =
+                self.last_observed_injection_sites.get("openvm.audit_o25.volatile_addr_range")
             {
                 let schedule =
                     InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, 0));
@@ -855,10 +810,13 @@ impl BenchmarkBackend for OpenVmBackend {
                     Self::inject_kinds_for_base("openvm.audit_o25.volatile_addr_range")
                         .into_iter()
                         .map(|inject_kind| SemanticInjectionCandidate {
-                            bucket_id: "openvm.synthetic.observed.volatile_boundary_range"
+                            bucket_id: semantic::memory::VOLATILE_BOUNDARY_RANGE.id.to_string(),
+                            trigger_signal_id: Some(
+                                TraceSignal::ObservedVolatileBoundaryRange.id().to_string(),
+                            ),
+                            semantic_class: semantic::memory::VOLATILE_BOUNDARY_RANGE
+                                .semantic_class
                                 .to_string(),
-                            semantic_class:
-                                "openvm.semantic.memory.volatile_boundary_range".to_string(),
                             inject_kind,
                             schedule: schedule.clone(),
                         }),

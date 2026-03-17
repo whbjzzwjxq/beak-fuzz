@@ -1,0 +1,195 @@
+{
+  "artifacts": {
+    "bugs": "/home/work/workflow/beak-workflow/beak/storage/fuzzing_seeds/benchmark-nexus-636ccb36-seed2026-1773396389-bugs.jsonl",
+    "corpus": "/home/work/workflow/beak-workflow/beak/storage/fuzzing_seeds/benchmark-nexus-636ccb36-seed2026-1773396389-corpus.jsonl",
+    "runs": "/home/work/workflow/beak-workflow/beak/storage/fuzzing_seeds/benchmark-nexus-636ccb36-seed2026-1773396389-runs.jsonl"
+  },
+  "baseline": {
+    "backend_error": null,
+    "bucket_hits_sig": "sem.memory.store_load_payload_flow;sem.memory.write_payload_consistency",
+    "timed_out": false
+  },
+  "bug_counts_by_kind": {
+    "underconstrained_candidate": 384
+  },
+  "bug_counts_by_mode": {
+    "payload_add_delta": 128,
+    "payload_flip_bit": 128,
+    "payload_prev_bias": 128
+  },
+  "case": "nexus.store_load_flow",
+  "command": [
+    "/home/work/workflow/beak-workflow/beak/projects/nexus-636ccb360d0f4ae657ae4bb64e1e275ccec8826/target/release/beak-fuzz",
+    "--bin",
+    "00100093 00112023 00012183",
+    "--timeout-ms",
+    "5000",
+    "--semantic-window-before",
+    "16",
+    "--semantic-window-after",
+    "64",
+    "--semantic-step-stride",
+    "1",
+    "--semantic-max-trials-per-bucket",
+    "12",
+    "--oracle-precheck-max-steps",
+    "0"
+  ],
+  "early_semantic_runs": [
+    {
+      "backend_error": "panic: assertion `left == right` failed: memory access value mismatch at address 0x0, prev_timestamp = 2\n  left: 1\n right: 25",
+      "eval_id": 2,
+      "inject_kind": "nexus.semantic.memory.store_load_payload_flow_trace::mode=weak_flow_load_bias,trial=0",
+      "inject_step": 1,
+      "is_bug": false,
+      "mode": "weak_flow_load_bias",
+      "semantic_injection_applied": true,
+      "underconstrained_candidate": false
+    },
+    {
+      "backend_error": "panic: assertion `left == right` failed: memory access value mismatch at address 0x0, prev_timestamp = 2\n  left: 1\n right: 228",
+      "eval_id": 3,
+      "inject_kind": "nexus.semantic.memory.store_load_payload_flow_trace::mode=weak_flow_load_bias,trial=1",
+      "inject_step": 1,
+      "is_bug": false,
+      "mode": "weak_flow_load_bias",
+      "semantic_injection_applied": true,
+      "underconstrained_candidate": false
+    },
+    {
+      "backend_error": "panic: assertion `left == right` failed: memory access value mismatch at address 0x0, prev_timestamp = 2\n  left: 1\n right: 35",
+      "eval_id": 4,
+      "inject_kind": "nexus.semantic.memory.store_load_payload_flow_trace::mode=weak_flow_load_bias,trial=2",
+      "inject_step": 1,
+      "is_bug": false,
+      "mode": "weak_flow_load_bias",
+      "semantic_injection_applied": true,
+      "underconstrained_candidate": false
+    },
+    {
+      "backend_error": "panic: assertion `left == right` failed: memory access value mismatch at address 0x0, prev_timestamp = 2\n  left: 1\n right: 168",
+      "eval_id": 5,
+      "inject_kind": "nexus.semantic.memory.store_load_payload_flow_trace::mode=weak_flow_load_bias,trial=3",
+      "inject_step": 1,
+      "is_bug": false,
+      "mode": "weak_flow_load_bias",
+      "semantic_injection_applied": true,
+      "underconstrained_candidate": false
+    },
+    {
+      "backend_error": "panic: assertion `left == right` failed: memory access value mismatch at address 0x0, prev_timestamp = 2\n  left: 1\n right: 152",
+      "eval_id": 6,
+      "inject_kind": "nexus.semantic.memory.store_load_payload_flow_trace::mode=weak_flow_load_bias,trial=4",
+      "inject_step": 1,
+      "is_bug": false,
+      "mode": "weak_flow_load_bias",
+      "semantic_injection_applied": true,
+      "underconstrained_candidate": false
+    },
+    {
+      "backend_error": "panic: assertion `left == right` failed: memory access value mismatch at address 0x0, prev_timestamp = 2\n  left: 1\n right: 109",
+      "eval_id": 7,
+      "inject_kind": "nexus.semantic.memory.store_load_payload_flow_trace::mode=weak_flow_load_bias,trial=5",
+      "inject_step": 1,
+      "is_bug": false,
+      "mode": "weak_flow_load_bias",
+      "semantic_injection_applied": true,
+      "underconstrained_candidate": false
+    },
+    {
+      "backend_error": "panic: assertion `left == right` failed: memory access value mismatch at address 0x0, prev_timestamp = 2\n  left: 1\n right: 154",
+      "eval_id": 8,
+      "inject_kind": "nexus.semantic.memory.store_load_payload_flow_trace::mode=weak_flow_load_bias,trial=6",
+      "inject_step": 1,
+      "is_bug": false,
+      "mode": "weak_flow_load_bias",
+      "semantic_injection_applied": true,
+      "underconstrained_candidate": false
+    },
+    {
+      "backend_error": "panic: assertion `left == right` failed: memory access value mismatch at address 0x0, prev_timestamp = 2\n  left: 1\n right: 58",
+      "eval_id": 9,
+      "inject_kind": "nexus.semantic.memory.store_load_payload_flow_trace::mode=weak_flow_load_bias,trial=7",
+      "inject_step": 1,
+      "is_bug": false,
+      "mode": "weak_flow_load_bias",
+      "semantic_injection_applied": true,
+      "underconstrained_candidate": false
+    },
+    {
+      "backend_error": "panic: assertion `left == right` failed: memory access value mismatch at address 0x0, prev_timestamp = 2\n  left: 1\n right: 36",
+      "eval_id": 10,
+      "inject_kind": "nexus.semantic.memory.store_load_payload_flow_trace::mode=weak_flow_load_bias,trial=8",
+      "inject_step": 1,
+      "is_bug": false,
+      "mode": "weak_flow_load_bias",
+      "semantic_injection_applied": true,
+      "underconstrained_candidate": false
+    },
+    {
+      "backend_error": "panic: assertion `left == right` failed: memory access value mismatch at address 0x0, prev_timestamp = 2\n  left: 1\n right: 62",
+      "eval_id": 11,
+      "inject_kind": "nexus.semantic.memory.store_load_payload_flow_trace::mode=weak_flow_load_bias,trial=9",
+      "inject_step": 1,
+      "is_bug": false,
+      "mode": "weak_flow_load_bias",
+      "semantic_injection_applied": true,
+      "underconstrained_candidate": false
+    },
+    {
+      "backend_error": "panic: assertion `left == right` failed: memory access value mismatch at address 0x0, prev_timestamp = 2\n  left: 1\n right: 89",
+      "eval_id": 12,
+      "inject_kind": "nexus.semantic.memory.store_load_payload_flow_trace::mode=weak_flow_load_bias,trial=10",
+      "inject_step": 1,
+      "is_bug": false,
+      "mode": "weak_flow_load_bias",
+      "semantic_injection_applied": true,
+      "underconstrained_candidate": false
+    },
+    {
+      "backend_error": "panic: assertion `left == right` failed: memory access value mismatch at address 0x0, prev_timestamp = 2\n  left: 1\n right: 189",
+      "eval_id": 13,
+      "inject_kind": "nexus.semantic.memory.store_load_payload_flow_trace::mode=weak_flow_load_bias,trial=11",
+      "inject_step": 1,
+      "is_bug": false,
+      "mode": "weak_flow_load_bias",
+      "semantic_injection_applied": true,
+      "underconstrained_candidate": false
+    }
+  ],
+  "exit_code": 0,
+  "first_applied": {
+    "eval_id": 2,
+    "inject_kind": "nexus.semantic.memory.store_load_payload_flow_trace::mode=weak_flow_load_bias,trial=0",
+    "inject_step": 1,
+    "mode": "weak_flow_load_bias"
+  },
+  "first_bug": {
+    "eval_id": 386,
+    "inject_kind": "nexus.semantic.memory.store_load_payload_flow_trace::mode=payload_flip_bit,trial=0",
+    "inject_step": 1,
+    "kind": "run",
+    "mode": "payload_flip_bit"
+  },
+  "first_underconstrained": {
+    "eval_id": 386,
+    "inject_kind": "nexus.semantic.memory.store_load_payload_flow_trace::mode=payload_flip_bit,trial=0",
+    "inject_step": 1,
+    "mode": "payload_flip_bit"
+  },
+  "last_semantic": {
+    "eval_id": 770,
+    "inject_kind": "nexus.semantic.memory.write_payload_trace",
+    "mode": null
+  },
+  "project_dir": "/home/work/workflow/beak-workflow/beak/projects/nexus-636ccb360d0f4ae657ae4bb64e1e275ccec8826",
+  "runtime_sec": 22.502,
+  "semantic_applied_attempts": 768,
+  "semantic_attempts": 769,
+  "semantic_bug_records": 384,
+  "words": [
+    "00100093",
+    "00112023",
+    "00012183"
+  ]
+}

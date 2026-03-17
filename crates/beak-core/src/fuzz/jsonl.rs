@@ -16,6 +16,7 @@ pub struct CorpusRecord {
     pub mismatch: bool,
     /// Canonical bucket signature for this run (backend-defined or derived from bucket hit signatures).
     pub bucket_hits_sig: String,
+    pub signal_sig: String,
     pub instructions: Vec<u32>,
     pub metadata: serde_json::Value,
 }
@@ -28,6 +29,7 @@ pub struct BugRecord {
     pub timed_out: bool,
     /// Canonical bucket signature for this run (backend-defined or derived from bucket hit signatures).
     pub bucket_hits_sig: String,
+    pub signal_sig: String,
     /// Backend-defined trace size metric (see `BackendEval::micro_op_count`).
     pub micro_op_count: usize,
     pub backend_error: Option<String>,
@@ -47,6 +49,7 @@ pub struct RunRecord {
     pub eval_id: u64,
     pub timed_out: bool,
     pub bucket_hits_sig: String,
+    pub signal_sig: String,
     pub micro_op_count: usize,
     pub backend_error: Option<String>,
     pub oracle_error: Option<String>,

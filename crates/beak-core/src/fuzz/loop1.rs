@@ -13,7 +13,9 @@ use crate::fuzz::jsonl::{BugRecord, CorpusRecord, JsonlWriter, RunRecord};
 use crate::fuzz::seed::FuzzingSeed;
 use crate::rv32im::instruction::RV32IMInstruction;
 use crate::rv32im::oracle::{OracleConfig, RISCVOracle};
-use crate::trace::{sorted_signatures_from_hits, BucketHit};
+use crate::trace::{
+    BucketHit, TraceSignal, sorted_signatures_from_hits, sorted_signatures_from_signals,
+};
 
 use super::bandit;
 use super::mutators::{SeedMutator, SEED_MUTATOR_NUM_ARMS};
@@ -61,6 +63,7 @@ pub struct BackendEval {
     /// as a proxy until full micro-op accounting is wired up.
     pub micro_op_count: usize,
     pub bucket_hits: Vec<BucketHit>,
+    pub trace_signals: Vec<TraceSignal>,
     pub final_regs: Option<[u32; 32]>,
     pub backend_error: Option<String>,
     pub semantic_injection_applied: bool,
@@ -102,6 +105,7 @@ pub trait LoopBackend {
 struct RunStats {
     eval_id: u64,
     bucket_hits_sig: String,
+    signal_sig: String,
     /// Copied from `BackendEval::micro_op_count` for logging/bug records.
     micro_op_count: usize,
     bucket_hits: Vec<BucketHit>,
@@ -157,7 +161,9 @@ fn eval_once<B: LoopBackend>(
     let backend_error = eval.backend_error.clone().or(panic_backend_error);
     let oracle_error = panic_oracle_error.map(|e| format!("oracle {e}"));
     let bucket_sigs = sorted_signatures_from_hits(&eval.bucket_hits);
+    let signal_sigs = sorted_signatures_from_signals(&eval.trace_signals);
     let sig = canonical_bucket_sig(&bucket_sigs);
+    let signal_sig = canonical_bucket_sig(&signal_sigs);
     let backend_timed_out = backend_error
         .as_deref()
         .map(|e| e.contains("timed out"))
@@ -167,6 +173,7 @@ fn eval_once<B: LoopBackend>(
     RunStats {
         eval_id: 0,
         bucket_hits_sig: sig,
+        signal_sig,
         micro_op_count: eval.micro_op_count,
         bucket_hits: eval.bucket_hits,
         mismatch_regs: mismatches,
@@ -388,6 +395,7 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
                     timeout_ms: self.cfg.timeout_ms,
                     timed_out: stats.timed_out,
                     bucket_hits_sig: stats.bucket_hits_sig.clone(),
+                    signal_sig: stats.signal_sig.clone(),
                     micro_op_count: stats.micro_op_count,
                     backend_error: stats.backend_error.clone(),
                     oracle_error: stats.oracle_error.clone(),
@@ -428,6 +436,7 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
             eval_id: stats.eval_id,
             timed_out: stats.timed_out,
             bucket_hits_sig: stats.bucket_hits_sig.clone(),
+            signal_sig: stats.signal_sig.clone(),
             micro_op_count: stats.micro_op_count,
             backend_error: stats.backend_error.clone(),
             oracle_error: stats.oracle_error.clone(),
@@ -460,6 +469,7 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
             timed_out: stats.timed_out,
             mismatch: !stats.mismatch_regs.is_empty(),
             bucket_hits_sig: sig,
+            signal_sig: stats.signal_sig.clone(),
             instructions: words,
             metadata: serde_json::json!({
                 "kind": "interesting",

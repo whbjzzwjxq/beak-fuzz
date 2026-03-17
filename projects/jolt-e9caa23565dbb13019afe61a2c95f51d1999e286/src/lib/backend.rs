@@ -8,13 +8,13 @@ use beak_core::fuzz::benchmark::{
     BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::trace::{BucketHit, Trace};
+use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic};
 use common::constants::RAM_START_ADDRESS;
 use common::rv_trace::{CircuitFlags, MemoryConfig, RVTraceRow};
 use jolt::jolt_core::jolt::instruction::virtual_advice::ADVICEInstruction;
-use jolt::jolt_core::jolt::vm::rv32i_vm::{C, M};
 use jolt::jolt_core::jolt::vm::JoltTraceStep;
-use jolt::{host, F, Jolt, PCS, ProofTranscript, RV32I, RV32IJoltVM};
+use jolt::jolt_core::jolt::vm::rv32i_vm::{C, M};
+use jolt::{F, Jolt, PCS, ProofTranscript, RV32I, RV32IJoltVM, host};
 use serde::{Deserialize, Serialize};
 
 use crate::trace::JoltTrace;
@@ -36,6 +36,7 @@ pub struct RunResponse {
     pub final_regs: Option<[u32; 32]>,
     pub micro_op_count: usize,
     pub bucket_hits: Vec<BucketHit>,
+    pub trace_signals: Vec<TraceSignal>,
     pub backend_error: Option<String>,
     pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pub injection_applied: bool,
@@ -54,11 +55,7 @@ fn base_inject_kind(kind: &str) -> &str {
 }
 
 fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
-    if variant.is_empty() {
-        kind.to_string()
-    } else {
-        format!("{kind}::{variant}")
-    }
+    if variant.is_empty() { kind.to_string() } else { format!("{kind}::{variant}") }
 }
 
 fn inject_variant_value<'a>(kind: &'a str, key: &str) -> Option<&'a str> {
@@ -116,19 +113,11 @@ fn encode_sb(rs2: u32, rs1: u32, imm12: i32) -> u32 {
     let imm = (imm12 as u32) & 0x0fff;
     let imm_lo = imm & 0x1f;
     let imm_hi = (imm >> 5) & 0x7f;
-    (imm_hi << 25)
-        | ((rs2 & 0x1f) << 20)
-        | ((rs1 & 0x1f) << 15)
-        | (imm_lo << 7)
-        | 0x23
+    (imm_hi << 25) | ((rs2 & 0x1f) << 20) | ((rs1 & 0x1f) << 15) | (imm_lo << 7) | 0x23
 }
 
 fn align_up(value: u64, align: u64) -> u64 {
-    if align == 0 || value % align == 0 {
-        value
-    } else {
-        value + (align - value % align)
-    }
+    if align == 0 || value % align == 0 { value } else { value + (align - value % align) }
 }
 
 fn push_u32(out: &mut Vec<u8>, value: u32) {
@@ -216,16 +205,7 @@ fn build_elf_bytes(words: &[u32]) -> Vec<u8> {
         text_bytes.len() as u64,
         4,
     );
-    append_section_header(
-        &mut elf,
-        7,
-        3,
-        0,
-        0,
-        shstrtab_offset,
-        shstrtab.len() as u64,
-        1,
-    );
+    append_section_header(&mut elf, 7, 3, 0, 0, shstrtab_offset, shstrtab.len() as u64, 1);
     elf
 }
 
@@ -252,10 +232,8 @@ impl TempElfFile {
             .duration_since(UNIX_EPOCH)
             .map_err(|e| format!("jolt temp elf clock error: {e}"))?
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "beak-jolt-inline-{}-{ts}-{nonce}.elf",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir()
+            .join(format!("beak-jolt-inline-{}-{ts}-{nonce}.elf", std::process::id()));
         fs::write(&path, bytes).map_err(|e| format!("write temp elf failed: {e}"))?;
         Ok(Self { path })
     }
@@ -277,13 +255,7 @@ fn execute_trace(words: &[u32]) -> Result<JoltExecution, String> {
     program.elf = Some(temp_elf.path.clone());
     let (bytecode, memory_init) = program.decode();
     let (io_device, trace) = program.trace(&[]);
-    Ok(JoltExecution {
-        final_regs,
-        trace,
-        io_device,
-        bytecode,
-        memory_init,
-    })
+    Ok(JoltExecution { final_regs, trace, io_device, bytecode, memory_init })
 }
 
 fn is_real_lui_step(step: &JoltTraceStep<RV32I>) -> bool {
@@ -324,11 +296,7 @@ fn apply_injection_to_trace(
         return false;
     }
 
-    let target_step = if inject_step == u64::MAX {
-        None
-    } else {
-        Some(inject_step)
-    };
+    let target_step = if inject_step == u64::MAX { None } else { Some(inject_step) };
 
     for (idx, step_row) in trace.iter_mut().enumerate() {
         if !is_real_lui_step(step_row) {
@@ -419,14 +387,19 @@ pub fn run_backend_once(
     let final_regs = exec.final_regs;
     let micro_op_count = exec.trace.len();
     let observed_injection_sites = collect_observed_injection_sites(&exec.trace);
-    let injection_applied =
-        apply_injection_to_trace(&mut exec.trace, inject_kind, inject_step, &observed_injection_sites);
+    let injection_applied = apply_injection_to_trace(
+        &mut exec.trace,
+        inject_kind,
+        inject_step,
+        &observed_injection_sites,
+    );
     let backend_error = prove_and_verify(exec)?;
 
     Ok(RunResponse {
         final_regs: Some(final_regs),
         micro_op_count,
         bucket_hits: derived.bucket_hits().to_vec(),
+        trace_signals: derived.trace_signals().to_vec(),
         backend_error,
         observed_injection_sites,
         injection_applied,
@@ -465,10 +438,7 @@ impl JoltBackend {
     }
 
     fn step_from_hit(hit: &BucketHit) -> u64 {
-        hit.details
-            .get("op_idx")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0)
+        hit.details.get("op_idx").and_then(|v| v.as_u64()).unwrap_or(0)
     }
 
     fn variant_specs() -> Vec<String> {
@@ -494,24 +464,29 @@ impl JoltBackend {
 
     fn semantic_candidate_from_hit(&self, hit: &BucketHit) -> Vec<SemanticInjectionCandidate> {
         let anchor = Self::step_from_hit(hit);
-        let (semantic_class, inject_kind) = match hit.bucket_id.as_str() {
-            "jolt.sem.decode.upper_immediate_materialization" => (
-                "jolt.semantic.decode.upper_immediate_materialization",
-                UPPER_IMMEDIATE_INJECT_KIND,
-            ),
-            _ => return Vec::new(),
-        };
+        let (semantic_class, inject_kind) =
+            if hit.bucket_id == semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.id {
+                (
+                    semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.semantic_class,
+                    UPPER_IMMEDIATE_INJECT_KIND,
+                )
+            } else {
+                return Vec::new();
+            };
 
         let schedule = self
             .last_observed_injection_sites
             .get(base_inject_kind(inject_kind))
-            .map(|steps| InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor)))
+            .map(|steps| {
+                InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor))
+            })
             .unwrap_or(InjectionSchedule::AroundAnchor(anchor));
 
         Self::inject_kinds_for_base(inject_kind)
             .into_iter()
             .map(|kind| SemanticInjectionCandidate {
                 bucket_id: hit.bucket_id.clone(),
+                trigger_signal_id: None,
                 semantic_class: semantic_class.to_string(),
                 inject_kind: kind,
                 schedule: schedule.clone(),
@@ -544,6 +519,7 @@ impl BenchmarkBackend for JoltBackend {
         self.eval.final_regs = resp.final_regs;
         self.eval.micro_op_count = resp.micro_op_count;
         self.eval.bucket_hits = resp.bucket_hits;
+        self.eval.trace_signals = resp.trace_signals;
         self.eval.backend_error = resp.backend_error;
         self.eval.semantic_injection_applied = resp.injection_applied;
         resp.final_regs.ok_or_else(|| "jolt backend returned no final_regs".to_string())
@@ -558,16 +534,11 @@ impl BenchmarkBackend for JoltBackend {
     }
 
     fn arm_semantic_injection(&mut self, kind: &str, step: u64) -> Result<(), String> {
-        self.pending_injection = Some(WitnessInjectionPlan {
-            kind: kind.to_string(),
-            step,
-        });
+        self.pending_injection = Some(WitnessInjectionPlan { kind: kind.to_string(), step });
         Ok(())
     }
 
     fn semantic_injection_candidates(&self, hits: &[BucketHit]) -> Vec<SemanticInjectionCandidate> {
-        hits.iter()
-            .flat_map(|hit| self.semantic_candidate_from_hit(hit))
-            .collect()
+        hits.iter().flat_map(|hit| self.semantic_candidate_from_hit(hit)).collect()
     }
 }

@@ -322,6 +322,7 @@ fn run_worker_loop() {
                         final_regs: None,
                         micro_op_count: 0,
                         bucket_hits: Vec::new(),
+                        trace_signals: Vec::new(),
                         backend_error: Some(e),
                         observed_injection_sites: std::collections::BTreeMap::new(),
                         injection_applied: false,
@@ -331,6 +332,7 @@ fn run_worker_loop() {
                         final_regs: None,
                         micro_op_count: 0,
                         bucket_hits: Vec::new(),
+                        trace_signals: Vec::new(),
                         backend_error: Some(format!(
                             "worker panic in run_backend_once: {}",
                             panic_payload_to_string(p.as_ref())

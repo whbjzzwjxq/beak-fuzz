@@ -1,8 +1,6 @@
-use std::collections::HashMap;
-
-use beak_core::trace::{BucketHit, Trace};
+use beak_core::trace::observations::UpperImmediateInsnObservation;
+use beak_core::trace::{BucketHit, Trace, semantic_matchers};
 use common::constants::RAM_START_ADDRESS;
-use serde_json::json;
 
 pub struct JoltTrace {
     bucket_hits: Vec<BucketHit>,
@@ -15,28 +13,19 @@ fn is_upper_immediate_materialization(word: u32) -> bool {
 
 impl JoltTrace {
     pub fn from_words(words: &[u32]) -> Result<Self, String> {
-        let mut bucket_hits = Vec::new();
-        for (idx, word) in words.iter().enumerate() {
-            let pc = RAM_START_ADDRESS + (idx as u64) * 4;
-            if is_upper_immediate_materialization(*word) {
-                let mut details = HashMap::new();
-                details.insert("op_idx".to_string(), json!(idx as u64));
-                details.insert("pc".to_string(), json!(pc));
-                details.insert("raw_word".to_string(), json!(word));
-                details.insert("rd".to_string(), json!((word >> 7) & 0x1f));
-                details.insert("u_imm20".to_string(), json!((word >> 12) & 0x000f_ffff));
-                details.insert("semantic_family".to_string(), json!("upper_immediate"));
-                bucket_hits.push(BucketHit::new(
-                    "jolt.sem.decode.upper_immediate_materialization".to_string(),
-                    details,
-                ));
-            }
-        }
+        let observations = words
+            .iter()
+            .enumerate()
+            .filter(|(_, word)| is_upper_immediate_materialization(**word))
+            .map(|(idx, word)| UpperImmediateInsnObservation {
+                op_idx: idx as u64,
+                pc: RAM_START_ADDRESS + (idx as u64) * 4,
+                raw_word: *word,
+            })
+            .collect::<Vec<_>>();
+        let bucket_hits = semantic_matchers::match_upper_immediate_semantic_hits(&observations);
 
-        Ok(Self {
-            bucket_hits,
-            instruction_count: words.len(),
-        })
+        Ok(Self { bucket_hits, instruction_count: words.len() })
     }
 
     pub fn instruction_count(&self) -> usize {

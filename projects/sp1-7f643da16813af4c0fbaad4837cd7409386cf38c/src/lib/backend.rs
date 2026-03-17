@@ -9,15 +9,15 @@ use beak_core::fuzz::benchmark::{
     BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::trace::{BucketHit, Trace};
+use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic};
 use serde::{Deserialize, Serialize};
-use sp1_prover::SP1Prover;
 use sp1_core_executor::{
-    events::MemoryRecordEnum, ExecutionRecord, Executor, ExecutorMode, Opcode, Register,
+    ExecutionRecord, Executor, ExecutorMode, Opcode, Register, events::MemoryRecordEnum,
 };
+use sp1_prover::SP1Prover;
 use sp1_stark::{MachineProver, SP1CoreOpts, StarkGenericConfig};
 
-use crate::trace::{build_sp1_program, Sp1Trace};
+use crate::trace::{Sp1Trace, build_sp1_program};
 
 #[derive(Debug, Clone)]
 struct WitnessInjectionPlan {
@@ -44,6 +44,7 @@ pub struct WorkerResponse {
     pub final_regs: Option<[u32; 32]>,
     pub micro_op_count: usize,
     pub bucket_hits: Vec<BucketHit>,
+    pub trace_signals: Vec<TraceSignal>,
     pub backend_error: Option<String>,
     pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pub injection_applied: bool,
@@ -56,6 +57,7 @@ struct RealRunnerResponse {
     final_regs: Option<[u32; 32]>,
     micro_op_count: usize,
     bucket_hits: Vec<BucketHit>,
+    trace_signals: Vec<TraceSignal>,
     prove_ok: bool,
     verify_ok: bool,
     error: Option<String>,
@@ -73,11 +75,7 @@ fn base_inject_kind(kind: &str) -> &str {
 }
 
 fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
-    if variant.is_empty() {
-        kind.to_string()
-    } else {
-        format!("{kind}::{variant}")
-    }
+    if variant.is_empty() { kind.to_string() } else { format!("{kind}::{variant}") }
 }
 
 fn inject_variant_value<'a>(kind: &'a str, key: &str) -> Option<&'a str> {
@@ -244,14 +242,16 @@ fn run_sp1_real_backend(
     let program = build_sp1_program(words)?;
     let mut executor = Executor::new(program, SP1CoreOpts::default());
     executor.executor_mode = ExecutorMode::Trace;
-    executor
-        .run()
-        .map_err(|e| format!("sp1 executor run failed: {e}"))?;
+    executor.run().map_err(|e| format!("sp1 executor run failed: {e}"))?;
 
     let mut records = std::mem::take(&mut executor.records);
     let observed_injection_sites = collect_observed_injection_sites(&records);
-    let injection_applied =
-        apply_injection_to_records(&mut records, inject_kind, inject_step, &observed_injection_sites);
+    let injection_applied = apply_injection_to_records(
+        &mut records,
+        inject_kind,
+        inject_step,
+        &observed_injection_sites,
+    );
     let trace = Sp1Trace::from_execution_records(words, &records)?;
     let (prove_ok, verify_ok, prove_verify_error) =
         run_sp1_prove_verify_with_prover(&prover, &executor.program, &records);
@@ -265,6 +265,7 @@ fn run_sp1_real_backend(
         final_regs: Some(regs),
         micro_op_count: trace.instruction_count(),
         bucket_hits: trace.bucket_hits().to_vec(),
+        trace_signals: trace.trace_signals().to_vec(),
         prove_ok,
         verify_ok,
         error: prove_verify_error,
@@ -285,26 +286,20 @@ fn run_sp1_prove_verify_with_prover(
         shard.public_values.shard = (idx + 1) as u32;
     }
 
-    let proof = match prover
-        .core_prover
-        .prove(&pk, prove_records, &mut prove_challenger, SP1CoreOpts::default())
-    {
+    let proof = match prover.core_prover.prove(
+        &pk,
+        prove_records,
+        &mut prove_challenger,
+        SP1CoreOpts::default(),
+    ) {
         Ok(p) => p,
         Err(e) => {
-            return (
-                false,
-                false,
-                Some(format!("sp1 core prove failed: {e}")),
-            );
+            return (false, false, Some(format!("sp1 core prove failed: {e}")));
         }
     };
 
     let mut verify_challenger = prover.core_prover.config().challenger();
-    if let Err(e) = prover
-        .core_prover
-        .machine()
-        .verify(&vk, &proof, &mut verify_challenger)
-    {
+    if let Err(e) = prover.core_prover.machine().verify(&vk, &proof, &mut verify_challenger) {
         return (true, false, Some(format!("sp1 core verify failed: {e}")));
     }
 
@@ -353,6 +348,7 @@ pub fn run_backend_once(
         final_regs: resp.final_regs,
         micro_op_count: resp.micro_op_count,
         bucket_hits: resp.bucket_hits,
+        trace_signals: resp.trace_signals,
         backend_error,
         observed_injection_sites: resp.observed_injection_sites,
         injection_applied: resp.injection_applied,
@@ -450,37 +446,47 @@ impl Sp1Backend {
     }
 
     fn semantic_candidate_priority(candidate: &SemanticInjectionCandidate) -> u8 {
-        match candidate.bucket_id.as_str() {
-            "sp1.sem.control.ecall_next_pc" => 0,
-            "sp1.sem.memory.kind_selector_consistency" => 1,
-            _ => 2,
+        let bucket_id = candidate.bucket_id.as_str();
+        if bucket_id == semantic::control::ECALL_NEXT_PC.id {
+            0
+        } else if bucket_id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id {
+            1
+        } else {
+            2
         }
     }
 
     fn semantic_candidate_from_hit(&self, hit: &BucketHit) -> Vec<SemanticInjectionCandidate> {
         let anchor = Self::step_from_hit(hit);
-        let (semantic_class, inject_kind, fallback_schedule) = match hit.bucket_id.as_str() {
-            "sp1.sem.memory.kind_selector_consistency" => (
-                "sp1.semantic.memory.kind_selector_consistency",
-                S27_INJECT_KIND,
-                InjectionSchedule::AroundAnchor(anchor),
-            ),
-            "sp1.sem.control.ecall_next_pc" => (
-                "sp1.semantic.control.ecall_next_pc",
-                S28_INJECT_KIND,
-                InjectionSchedule::AroundAnchor(anchor),
-            ),
-            _ => return Vec::new(),
-        };
+        let bucket_id = hit.bucket_id.as_str();
+        let (semantic_class, inject_kind, fallback_schedule) =
+            if bucket_id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id {
+                (
+                    semantic::memory::KIND_SELECTOR_CONSISTENCY.semantic_class,
+                    S27_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::control::ECALL_NEXT_PC.id {
+                (
+                    semantic::control::ECALL_NEXT_PC.semantic_class,
+                    S28_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else {
+                return Vec::new();
+            };
         let schedule = self
             .last_observed_injection_sites
             .get(base_inject_kind(inject_kind))
-            .map(|steps| InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor)))
+            .map(|steps| {
+                InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor))
+            })
             .unwrap_or(fallback_schedule);
         Self::inject_kinds_for_base(inject_kind)
             .into_iter()
             .map(|kind| SemanticInjectionCandidate {
                 bucket_id: hit.bucket_id.clone(),
+                trigger_signal_id: None,
                 semantic_class: semantic_class.to_string(),
                 inject_kind: kind,
                 schedule: schedule.clone(),
@@ -502,10 +508,8 @@ impl Sp1Backend {
             .spawn()
             .map_err(|e| format!("spawn backend worker failed: {e}"))?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "capture backend worker stdin failed".to_string())?;
+        let stdin =
+            child.stdin.take().ok_or_else(|| "capture backend worker stdin failed".to_string())?;
         let stdout = child
             .stdout
             .take()
@@ -546,12 +550,7 @@ impl Sp1Backend {
             }
         });
 
-        self.worker = Some(WorkerProcess {
-            child,
-            stdin,
-            responses_rx: rx,
-            reader_thread,
-        });
+        self.worker = Some(WorkerProcess { child, stdin, responses_rx: rx, reader_thread });
         Ok(())
     }
 
@@ -559,18 +558,12 @@ impl Sp1Backend {
         if let Some(mut worker) = self.worker.take() {
             let worker_pid = worker.child.id();
             // Best-effort reap for nested runner children that may outlive the worker.
-            let _ = Command::new("pkill")
-                .arg("-KILL")
-                .arg("-P")
-                .arg(worker_pid.to_string())
-                .status();
+            let _ =
+                Command::new("pkill").arg("-KILL").arg("-P").arg(worker_pid.to_string()).status();
             let _ = worker.child.kill();
             let _ = worker.child.wait();
-            let _ = Command::new("pkill")
-                .arg("-KILL")
-                .arg("-P")
-                .arg(worker_pid.to_string())
-                .status();
+            let _ =
+                Command::new("pkill").arg("-KILL").arg("-P").arg(worker_pid.to_string()).status();
             drop(worker.stdin);
             let _ = worker.reader_thread.join();
         }
@@ -612,21 +605,16 @@ impl BenchmarkBackend for Sp1Backend {
         };
 
         {
-            let worker = self
-                .worker
-                .as_mut()
-                .ok_or_else(|| "backend worker unavailable".to_string())?;
-            let mut payload =
-                serde_json::to_vec(&req).map_err(|e| format!("serialize worker request failed: {e}"))?;
+            let worker =
+                self.worker.as_mut().ok_or_else(|| "backend worker unavailable".to_string())?;
+            let mut payload = serde_json::to_vec(&req)
+                .map_err(|e| format!("serialize worker request failed: {e}"))?;
             payload.push(b'\n');
             worker
                 .stdin
                 .write_all(&payload)
                 .map_err(|e| format!("write worker request failed: {e}"))?;
-            worker
-                .stdin
-                .flush()
-                .map_err(|e| format!("flush worker request failed: {e}"))?;
+            worker.stdin.flush().map_err(|e| format!("flush worker request failed: {e}"))?;
         }
 
         let started = Instant::now();
@@ -643,10 +631,8 @@ impl BenchmarkBackend for Sp1Backend {
             }
             let remaining = timeout - elapsed;
             let recv = {
-                let worker = self
-                    .worker
-                    .as_ref()
-                    .ok_or_else(|| "backend worker unavailable".to_string())?;
+                let worker =
+                    self.worker.as_ref().ok_or_else(|| "backend worker unavailable".to_string())?;
                 worker.responses_rx.recv_timeout(remaining)
             };
             match recv {
@@ -680,6 +666,7 @@ impl BenchmarkBackend for Sp1Backend {
         self.eval = BackendEval {
             micro_op_count: resp.micro_op_count,
             bucket_hits: resp.bucket_hits,
+            trace_signals: resp.trace_signals,
             final_regs: resp.final_regs,
             backend_error: resp.backend_error.clone(),
             semantic_injection_applied: resp.injection_applied,
@@ -689,8 +676,7 @@ impl BenchmarkBackend for Sp1Backend {
         if let Some(err) = resp.backend_error {
             return Err(err);
         }
-        resp.final_regs
-            .ok_or_else(|| "sp1 backend did not return final regs".to_string())
+        resp.final_regs.ok_or_else(|| "sp1 backend did not return final regs".to_string())
     }
 
     fn collect_eval(&mut self) -> BackendEval {
@@ -702,17 +688,13 @@ impl BenchmarkBackend for Sp1Backend {
     }
 
     fn arm_semantic_injection(&mut self, kind: &str, step: u64) -> Result<(), String> {
-        self.pending_injection = Some(WitnessInjectionPlan {
-            kind: kind.to_string(),
-            step,
-        });
+        self.pending_injection = Some(WitnessInjectionPlan { kind: kind.to_string(), step });
         Ok(())
     }
 
     fn semantic_injection_candidates(&self, hits: &[BucketHit]) -> Vec<SemanticInjectionCandidate> {
-        let mut candidates: Vec<_> = hits.iter()
-            .flat_map(|hit| self.semantic_candidate_from_hit(hit))
-            .collect();
+        let mut candidates: Vec<_> =
+            hits.iter().flat_map(|hit| self.semantic_candidate_from_hit(hit)).collect();
         candidates.sort_by_key(Self::semantic_candidate_priority);
         candidates
     }

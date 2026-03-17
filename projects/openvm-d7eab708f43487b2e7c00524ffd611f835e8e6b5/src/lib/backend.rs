@@ -1,9 +1,8 @@
 use beak_core::fuzz::benchmark::{BackendEval, BenchmarkBackend};
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::trace::Trace;
+use beak_core::trace::{Trace, TraceSignal};
 
 use crate::trace::OpenVMTrace;
-use crate::bucket_id::OpenVMBucketId;
 use openvm_instructions::exe::VmExe;
 use openvm_instructions::instruction::Instruction;
 use openvm_instructions::program::Program;
@@ -72,6 +71,7 @@ pub struct WorkerResponse {
     pub final_regs: Option<[u32; 32]>,
     pub micro_op_count: usize,
     pub bucket_hits: Vec<beak_core::trace::BucketHit>,
+    pub trace_signals: Vec<TraceSignal>,
     pub backend_error: Option<String>,
 }
 
@@ -185,6 +185,7 @@ pub fn run_backend_once(
             let hit_count = trace.bucket_hits().len();
             eval.micro_op_count = trace.instruction_count();
             eval.bucket_hits = trace.bucket_hits().to_vec();
+            eval.trace_signals = trace.trace_signals().to_vec();
             let ms_parse = t5.elapsed().as_millis();
             eprintln!(
                 "[openvm-backend-worker] iter={} logs_len={logs_len} insn_count={insn_count} chip_rows={row_count} bucket_hits={hit_count} build_exe_ms={ms_build_exe} instance_ms={ms_instance} trace_only_ms={ms_trace_only} read_regs_ms={ms_read_regs} take_logs_ms={ms_take_logs} parse_ms={ms_parse} total_ms={}",
@@ -208,6 +209,7 @@ pub fn run_backend_once(
         final_regs: eval.final_regs,
         micro_op_count: eval.micro_op_count,
         bucket_hits: eval.bucket_hits,
+        trace_signals: eval.trace_signals,
         backend_error: eval.backend_error,
     })
 }
@@ -423,6 +425,7 @@ impl BenchmarkBackend for OpenVmBackend {
 
         self.eval.micro_op_count = worker_resp.micro_op_count;
         self.eval.bucket_hits = worker_resp.bucket_hits;
+        self.eval.trace_signals = worker_resp.trace_signals;
         self.eval.backend_error = worker_resp.backend_error.clone();
         self.eval.final_regs = worker_resp.final_regs;
 
@@ -435,29 +438,6 @@ impl BenchmarkBackend for OpenVmBackend {
     }
 
     fn collect_eval(&mut self) -> BackendEval {
-        // Input-level buckets help guide seed evolution, even when the backend rejects or
-        // does not fully model certain instruction classes.
-        let details = HashMap::new();
-        let mut saw_ecall = false;
-        for &w in &self.last_words {
-            let opcode = w & 0x7f;
-            if opcode != 0x73 {
-                continue;
-            }
-            if let Ok(insn) = RV32IMInstruction::from_word(w) {
-                match insn.mnemonic.as_str() {
-                    "ecall" | "ebreak" => saw_ecall = true,
-                    _ => {}
-                }
-            }
-        }
-        if saw_ecall {
-            self.eval.bucket_hits.push(beak_core::trace::BucketHit::new(
-                OpenVMBucketId::InputHasEcall.as_ref().to_string(),
-                details.clone(),
-            ));
-        }
-
         self.eval.clone()
     }
 }
