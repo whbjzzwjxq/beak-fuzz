@@ -1,6 +1,6 @@
-use rrs_lib::HartState;
 use rrs_lib::instruction_executor::{InstructionException, InstructionExecutor};
 use rrs_lib::memories::{MemorySpace, VecMemory};
+use rrs_lib::HartState;
 
 const MAX_INSTRUCTIONS: u32 = 1000;
 
@@ -43,11 +43,7 @@ pub struct OracleConfig {
 
 impl Default for OracleConfig {
     fn default() -> Self {
-        Self {
-            memory_model: OracleMemoryModel::SharedCodeData,
-            code_base: 0,
-            data_size_bytes: 0,
-        }
+        Self { memory_model: OracleMemoryModel::SharedCodeData, code_base: 0, data_size_bytes: 0 }
     }
 }
 
@@ -68,14 +64,14 @@ impl RISCVOracle {
     /// Execute with configurable memory model and an explicit max-step bound.
     /// Returns registers plus execution metadata so callers can reject likely-infinite loops
     /// before invoking expensive backends.
-    pub fn execute_with_step_limit(words: &[u32], cfg: OracleConfig, max_steps: u32) -> OracleExecution {
+    pub fn execute_with_step_limit(
+        words: &[u32],
+        cfg: OracleConfig,
+        max_steps: u32,
+    ) -> OracleExecution {
         let mut regs = [0u32; 32];
         if words.is_empty() {
-            return OracleExecution {
-                regs,
-                steps: 0,
-                hit_step_limit: false,
-            };
+            return OracleExecution { regs, steps: 0, hit_step_limit: false };
         }
 
         let code_len_bytes = (words.len() * 4) as u32;
@@ -115,10 +111,7 @@ impl RISCVOracle {
             }
         }
 
-        let mut executor = InstructionExecutor {
-            hart_state: &mut hart,
-            mem: &mut mem_space,
-        };
+        let mut executor = InstructionExecutor { hart_state: &mut hart, mem: &mut mem_space };
 
         let mut steps = 0u32;
         while steps < max_steps {
@@ -138,10 +131,6 @@ impl RISCVOracle {
             regs[i] = hart.registers[i];
         }
         regs[0] = 0; // x0 is always 0
-        OracleExecution {
-            regs,
-            steps,
-            hit_step_limit: steps >= max_steps,
-        }
+        OracleExecution { regs, steps, hit_step_limit: steps >= max_steps }
     }
 }

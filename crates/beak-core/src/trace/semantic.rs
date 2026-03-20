@@ -41,6 +41,12 @@ pub mod alu {
 pub mod arithmetic {
     use super::{SemanticBucket, SemanticBucketCategory};
 
+    pub const DIVISION_REMAINDER_BOUND: SemanticBucket = SemanticBucket::new(
+        "sem.arithmetic.division_remainder_bound",
+        "semantic.arithmetic.division_remainder_bound",
+        SemanticBucketCategory::Arithmetic,
+    );
+
     pub const SPECIAL_CASE_CONSISTENCY: SemanticBucket = SemanticBucket::new(
         "sem.arithmetic.special_case_consistency",
         "semantic.arithmetic.special_case_consistency",
@@ -62,14 +68,38 @@ pub mod control {
         "semantic.control.ecall_next_pc",
         SemanticBucketCategory::Control,
     );
+
+    pub const ECALL_ARGUMENT_DECOMPOSITION: SemanticBucket = SemanticBucket::new(
+        "sem.control.ecall_argument_decomposition",
+        "semantic.control.ecall_argument_decomposition",
+        SemanticBucketCategory::Control,
+    );
 }
 
 pub mod decode {
     use super::{SemanticBucket, SemanticBucketCategory};
 
+    pub const OPERAND_INDEX_ROUTING: SemanticBucket = SemanticBucket::new(
+        "sem.decode.operand_index_routing",
+        "semantic.decode.operand_index_routing",
+        SemanticBucketCategory::Decode,
+    );
+
+    pub const RD_BIT_DECOMPOSITION: SemanticBucket = SemanticBucket::new(
+        "sem.decode.rd_bit_decomposition",
+        "semantic.decode.rd_bit_decomposition",
+        SemanticBucketCategory::Decode,
+    );
+
     pub const UPPER_IMMEDIATE_MATERIALIZATION: SemanticBucket = SemanticBucket::new(
         "sem.decode.upper_immediate_materialization",
         "semantic.decode.upper_immediate_materialization",
+        SemanticBucketCategory::Decode,
+    );
+
+    pub const ZERO_REGISTER_IMMUTABILITY: SemanticBucket = SemanticBucket::new(
+        "sem.decode.zero_register_immutability",
+        "semantic.decode.zero_register_immutability",
         SemanticBucketCategory::Decode,
     );
 }
@@ -168,10 +198,15 @@ pub mod time {
 
 pub const ALL_BUCKETS: &[SemanticBucket] = &[
     alu::IMMEDIATE_LIMB_CONSISTENCY,
+    arithmetic::DIVISION_REMAINDER_BOUND,
     arithmetic::SPECIAL_CASE_CONSISTENCY,
     control::AUIPC_PC_LIMB_CONSISTENCY,
+    control::ECALL_ARGUMENT_DECOMPOSITION,
     control::ECALL_NEXT_PC,
+    decode::OPERAND_INDEX_ROUTING,
+    decode::RD_BIT_DECOMPOSITION,
     decode::UPPER_IMMEDIATE_MATERIALIZATION,
+    decode::ZERO_REGISTER_IMMUTABILITY,
     interaction::DIGEST_KIND_ROUTE,
     lookup::BOOLEAN_MULTIPLICITY,
     lookup::XOR_MULTIPLICITY_CONSISTENCY,

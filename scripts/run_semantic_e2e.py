@@ -29,6 +29,17 @@ class Case:
 
 
 CASES: dict[str, Case] = {
+    "openvm-336.o5": Case(
+        name="openvm-336.o5",
+        project_dir="projects/openvm-336f1a475e5aa3513c4c5a266399f4128c119bba",
+        words=("01400313", "14001073", "14002573", "00000393", "00754533"),
+        timeout_ms=15000,
+        semantic_window_before=16,
+        semantic_window_after=64,
+        semantic_step_stride=1,
+        semantic_max_trials=64,
+        oracle_precheck_max_steps=400,
+    ),
     "nexus.store_load_flow": Case(
         name="nexus.store_load_flow",
         project_dir="projects/nexus-636ccb360d0f4ae657ae4bb64e1e275ccec8826",
@@ -38,6 +49,50 @@ CASES: dict[str, Case] = {
         semantic_window_after=64,
         semantic_step_stride=1,
         semantic_max_trials=12,
+        oracle_precheck_max_steps=0,
+    ),
+    "risc0.regzero": Case(
+        name="risc0.regzero",
+        project_dir="projects/risc0-c0db0713671c8ec467b3efc26b22a0b0591897ff",
+        words=("00100893", "00000513", "000105b7", "00400613", "00000073", "000002b3"),
+        timeout_ms=5000,
+        semantic_window_before=4,
+        semantic_window_after=12,
+        semantic_step_stride=1,
+        semantic_max_trials=16,
+        oracle_precheck_max_steps=0,
+    ),
+    "risc0.regzero_explicit_x0_write": Case(
+        name="risc0.regzero_explicit_x0_write",
+        project_dir="projects/risc0-c0db0713671c8ec467b3efc26b22a0b0591897ff",
+        words=("00100893", "00000513", "000105b7", "00400613", "00000073", "00100013", "000002b3"),
+        timeout_ms=5000,
+        semantic_window_before=4,
+        semantic_window_after=12,
+        semantic_step_stride=1,
+        semantic_max_trials=16,
+        oracle_precheck_max_steps=0,
+    ),
+    "risc0.divrem": Case(
+        name="risc0.divrem",
+        project_dir="projects/risc0-c0db0713671c8ec467b3efc26b22a0b0591897ff",
+        words=("00700113", "00500193", "023150b3"),
+        timeout_ms=5000,
+        semantic_window_before=4,
+        semantic_window_after=12,
+        semantic_step_stride=1,
+        semantic_max_trials=16,
+        oracle_precheck_max_steps=0,
+    ),
+    "risc0.ecall_len_decomp": Case(
+        name="risc0.ecall_len_decomp",
+        project_dir="projects/risc0-c0db0713671c8ec467b3efc26b22a0b0591897ff",
+        words=("00100893", "00000513", "005005b7", "00400613", "00000073"),
+        timeout_ms=5000,
+        semantic_window_before=4,
+        semantic_window_after=12,
+        semantic_step_stride=1,
+        semantic_max_trials=16,
         oracle_precheck_max_steps=0,
     ),
 }
@@ -57,7 +112,7 @@ class Config:
 
 
 def project_prefix(project_dir: Path) -> tuple[str, str]:
-    m = re.search(r"(openvm|sp1|pico|nexus|jolt)-([0-9a-f]{8,40})$", project_dir.name)
+    m = re.search(r"(openvm|sp1|pico|nexus|jolt|risc0)-([0-9a-f]{8,40})$", project_dir.name)
     if not m:
         raise SystemExit(f"cannot derive benchmark prefix from {project_dir}")
     return m.group(1), m.group(2)[:8]

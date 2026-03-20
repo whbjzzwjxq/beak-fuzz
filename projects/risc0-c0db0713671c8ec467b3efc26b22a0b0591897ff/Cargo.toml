@@ -1,0 +1,26 @@
+[package]
+name = "beak-risc0-c0db0713"
+version = "0.1.0"
+edition = "2021"
+description = "RISC0-specific beak binaries (commit c0db0713 / v2.0.2)"
+publish = false
+
+[lib]
+path = "src/lib/mod.rs"
+
+[[bin]]
+name = "beak-fuzz"
+path = "src/bin/fuzz.rs"
+
+[[bin]]
+name = "beak-trace"
+path = "src/bin/trace.rs"
+
+[dependencies]
+anyhow = "1.0"
+beak-core = { path = "../../crates/beak-core" }
+clap = "4.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+risc0-binfmt = { path = "../../beak-py/out/risc0-c0db0713671c8ec467b3efc26b22a0b0591897ff/risc0-src/risc0/binfmt" }
+risc0-circuit-rv32im = { path = "../../beak-py/out/risc0-c0db0713671c8ec467b3efc26b22a0b0591897ff/risc0-src/risc0/circuit/rv32im", features = ["prove"] }

@@ -238,6 +238,7 @@ Sessionx.vim
 .netrwhist
 *~
 # Auto-generated tag files
+risc0-src/
 tags
 # Persistent undo
 [._]*.un~

@@ -27,9 +27,12 @@ target
 # Fuzzing seed
 storage/fuzzing_seeds/loop1-*.jsonl
 storage/fuzzing_seeds/loop2-direct-*.jsonl
+storage/fuzzing_seeds/e2e-*-summary.json
 storage/fuzzing_seeds/.tmp-inline-*.jsonl
 storage/fuzzing_seeds/.campaign-*.log
 storage/fuzzing_seeds/.profile-*.log
+storage/fuzzing_seeds/*-candidates.jsonl
+storage/fuzzing_seeds/*-meaningful.jsonl
 storage/fuzzing_seeds/benchmark-*-bugs.jsonl
 storage/fuzzing_seeds/benchmark-*-corpus.jsonl
 storage/fuzzing_seeds/benchmark-*-runs.jsonl

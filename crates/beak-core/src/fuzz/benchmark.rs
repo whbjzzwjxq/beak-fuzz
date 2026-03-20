@@ -12,7 +12,7 @@ use crate::fuzz::seed::FuzzingSeed;
 use crate::rv32im::instruction::RV32IMInstruction;
 use crate::rv32im::oracle::{OracleConfig, RISCVOracle};
 use crate::trace::{
-    BucketHit, TraceSignal, sorted_signatures_from_hits, sorted_signatures_from_signals,
+    sorted_signatures_from_hits, sorted_signatures_from_signals, BucketHit, TraceSignal,
 };
 
 pub use crate::fuzz::loop1::{BackendEval, DEFAULT_RNG_SEED};
@@ -81,7 +81,10 @@ pub trait BenchmarkBackend {
         Ok(())
     }
 
-    fn semantic_injection_candidates(&self, _hits: &[BucketHit]) -> Vec<SemanticInjectionCandidate> {
+    fn semantic_injection_candidates(
+        &self,
+        _hits: &[BucketHit],
+    ) -> Vec<SemanticInjectionCandidate> {
         Vec::new()
     }
 }
@@ -109,11 +112,8 @@ struct EvalStats {
     semantic_injection_applied: bool,
 }
 
-fn now_ts_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_secs()
+fn now_ts_millis() -> u128 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_millis()
 }
 
 fn decode_words_from_input(input: &BytesInput, max_instructions: usize) -> Vec<u32> {
@@ -228,7 +228,9 @@ fn canonical_json_value(value: &serde_json::Value) -> String {
         serde_json::Value::Null => "null".to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string()),
+        serde_json::Value::String(s) => {
+            serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+        }
         serde_json::Value::Array(items) => {
             let mut out = String::from("[");
             for (idx, item) in items.iter().enumerate() {
@@ -268,8 +270,9 @@ fn eval_once<B: BenchmarkBackend>(
     let start = Instant::now();
     backend.prepare_for_run(cfg.rng_seed);
 
-    let oracle_regs =
-        catch_unwind_nonfatal(std::panic::AssertUnwindSafe(|| RISCVOracle::execute_with_config(words, cfg.oracle)));
+    let oracle_regs = catch_unwind_nonfatal(std::panic::AssertUnwindSafe(|| {
+        RISCVOracle::execute_with_config(words, cfg.oracle)
+    }));
     let panic_oracle_error = match oracle_regs.as_ref() {
         Err(p) => Some(panic_payload_to_string(p.as_ref())),
         _ => None,
@@ -301,10 +304,8 @@ fn eval_once<B: BenchmarkBackend>(
     let sig = canonical_bucket_sig(&bucket_sigs);
     let signal_sig = canonical_bucket_sig(&signal_sigs);
     let detail_sig = canonical_bucket_detail_sig(&eval.bucket_hits);
-    let backend_timed_out = backend_error
-        .as_deref()
-        .map(|e| e.contains("timed out"))
-        .unwrap_or(false);
+    let backend_timed_out =
+        backend_error.as_deref().map(|e| e.contains("timed out")).unwrap_or(false);
     let timed_out = start.elapsed() > timeout || backend_timed_out;
 
     EvalStats {
@@ -338,8 +339,8 @@ fn metadata_object(seed_meta: &serde_json::Value) -> serde_json::Map<String, ser
 }
 
 fn bug_kind(stats: &EvalStats) -> Option<&'static str> {
-    let semantic_injected =
-        stats.phase == "semantic_search" && stats.semantic_injection_applied;
+    let semantic_injected = stats.phase == "semantic_search" && stats.semantic_injection_applied;
+    let baseline_mismatch = is_baseline_mismatch(stats);
     if stats.phase == "semantic_search" && !stats.semantic_injection_applied {
         return None;
     }
@@ -347,7 +348,7 @@ fn bug_kind(stats: &EvalStats) -> Option<&'static str> {
         && (stats.backend_error.is_some() || stats.oracle_error.is_some() || stats.timed_out)
     {
         Some("exception")
-    } else if !stats.mismatch_regs.is_empty() {
+    } else if baseline_mismatch {
         Some("mismatch")
     } else if stats.underconstrained_candidate {
         Some("underconstrained_candidate")
@@ -358,6 +359,10 @@ fn bug_kind(stats: &EvalStats) -> Option<&'static str> {
 
 fn semantic_search_solved(stats: &EvalStats) -> bool {
     stats.phase == "semantic_search" && stats.underconstrained_candidate
+}
+
+fn is_baseline_mismatch(stats: &EvalStats) -> bool {
+    stats.phase == "baseline" && !stats.mismatch_regs.is_empty()
 }
 
 fn write_run_record(
@@ -379,18 +384,11 @@ fn write_run_record(
     metadata.insert("inject_step".to_string(), json!(stats.inject_step));
     metadata.insert("trigger_bucket_id".to_string(), json!(stats.trigger_bucket_id));
     metadata.insert("trigger_signal_id".to_string(), json!(stats.trigger_signal_id));
-    metadata.insert(
-        "baseline_bucket_hits_sig".to_string(),
-        json!(stats.baseline_bucket_hits_sig),
-    );
-    metadata.insert(
-        "underconstrained_candidate".to_string(),
-        json!(stats.underconstrained_candidate),
-    );
-    metadata.insert(
-        "semantic_injection_applied".to_string(),
-        json!(stats.semantic_injection_applied),
-    );
+    metadata.insert("baseline_bucket_hits_sig".to_string(), json!(stats.baseline_bucket_hits_sig));
+    metadata
+        .insert("underconstrained_candidate".to_string(), json!(stats.underconstrained_candidate));
+    metadata
+        .insert("semantic_injection_applied".to_string(), json!(stats.semantic_injection_applied));
     metadata.insert("attempt_index".to_string(), json!(attempt_index));
     metadata.insert("kind".to_string(), json!("run"));
     metadata.insert("is_bug".to_string(), json!(bug_kind(stats).is_some()));
@@ -432,7 +430,7 @@ fn write_corpus_record(
         rng_seed: cfg.rng_seed,
         timeout_ms: cfg.timeout_ms,
         timed_out: stats.timed_out,
-        mismatch: !stats.mismatch_regs.is_empty(),
+        mismatch: is_baseline_mismatch(stats),
         bucket_hits_sig: stats.bucket_hits_sig.clone(),
         signal_sig: stats.signal_sig.clone(),
         instructions: words.to_vec(),
@@ -463,18 +461,11 @@ fn write_bug_record(
     metadata.insert("inject_step".to_string(), json!(stats.inject_step));
     metadata.insert("trigger_bucket_id".to_string(), json!(stats.trigger_bucket_id));
     metadata.insert("trigger_signal_id".to_string(), json!(stats.trigger_signal_id));
-    metadata.insert(
-        "baseline_bucket_hits_sig".to_string(),
-        json!(stats.baseline_bucket_hits_sig),
-    );
-    metadata.insert(
-        "underconstrained_candidate".to_string(),
-        json!(stats.underconstrained_candidate),
-    );
-    metadata.insert(
-        "semantic_injection_applied".to_string(),
-        json!(stats.semantic_injection_applied),
-    );
+    metadata.insert("baseline_bucket_hits_sig".to_string(), json!(stats.baseline_bucket_hits_sig));
+    metadata
+        .insert("underconstrained_candidate".to_string(), json!(stats.underconstrained_candidate));
+    metadata
+        .insert("semantic_injection_applied".to_string(), json!(stats.semantic_injection_applied));
     metadata.insert("attempt_index".to_string(), json!(attempt_index));
 
     let rec = BugRecord {
@@ -577,7 +568,10 @@ fn candidate_steps(cfg: &BenchmarkConfig, candidate: &SemanticInjectionCandidate
     }
 }
 
-pub fn run_benchmark_threaded<B, F>(cfg: BenchmarkConfig, build_backend: F) -> Result<BenchmarkOutputs, String>
+pub fn run_benchmark_threaded<B, F>(
+    cfg: BenchmarkConfig,
+    build_backend: F,
+) -> Result<BenchmarkOutputs, String>
 where
     B: BenchmarkBackend,
     F: FnOnce() -> B + Send + 'static,
@@ -591,9 +585,7 @@ where
             run_benchmark(cfg, backend)
         })
         .map_err(|e| format!("spawn benchmark thread failed: {e}"))?;
-    handle
-        .join()
-        .map_err(|_| "benchmark thread panicked".to_string())?
+    handle.join().map_err(|_| "benchmark thread panicked".to_string())?
 }
 
 pub fn run_benchmark<B: BenchmarkBackend>(
@@ -605,11 +597,12 @@ pub fn run_benchmark<B: BenchmarkBackend>(
 
     let base_prefix = cfg.output_prefix.clone().unwrap_or_else(|| {
         format!(
-            "benchmark-{}-{}-seed{}-{}",
+            "benchmark-{}-{}-seed{}-{}-pid{}",
             cfg.zkvm_tag,
             &cfg.zkvm_commit[..cfg.zkvm_commit.len().min(8)],
             cfg.rng_seed,
-            now_ts_secs()
+            now_ts_millis(),
+            std::process::id()
         )
     });
     let corpus_path = cfg.out_dir.join(format!("{base_prefix}-corpus.jsonl"));
@@ -624,18 +617,12 @@ pub fn run_benchmark<B: BenchmarkBackend>(
         backend.is_usable_seed(words)
     });
     if seeds.is_empty() {
-        return Err(format!(
-            "No usable initial seeds loaded from {}",
-            cfg.seeds_jsonl.display()
-        ));
+        return Err(format!("No usable initial seeds loaded from {}", cfg.seeds_jsonl.display()));
     }
 
     let timeout = Duration::from_millis(cfg.timeout_ms);
-    let take_n = if cfg.initial_limit == 0 {
-        seeds.len()
-    } else {
-        cfg.initial_limit.min(seeds.len())
-    };
+    let take_n =
+        if cfg.initial_limit == 0 { seeds.len() } else { cfg.initial_limit.min(seeds.len()) };
 
     let mut bug_count = 0usize;
     let mut eval_id: u64 = 0;
@@ -647,13 +634,26 @@ pub fn run_benchmark<B: BenchmarkBackend>(
         }
 
         if cfg.precheck_oracle_max_steps > 0 {
-            let pre = RISCVOracle::execute_with_step_limit(&words, cfg.oracle, cfg.precheck_oracle_max_steps);
+            let pre = RISCVOracle::execute_with_step_limit(
+                &words,
+                cfg.oracle,
+                cfg.precheck_oracle_max_steps,
+            );
             if pre.hit_step_limit {
                 let mut skipped = EvalStats::default();
                 skipped.phase = "baseline".to_string();
                 skipped.oracle_error = Some("oracle_precheck_step_limit".to_string());
                 eval_id = eval_id.saturating_add(1);
-                write_run_record(&cfg, &run_writer, eval_id, &words, seed_index, &seed_meta, &skipped, None)?;
+                write_run_record(
+                    &cfg,
+                    &run_writer,
+                    eval_id,
+                    &words,
+                    seed_index,
+                    &seed_meta,
+                    &skipped,
+                    None,
+                )?;
                 continue;
             }
         }
@@ -662,7 +662,16 @@ pub fn run_benchmark<B: BenchmarkBackend>(
         let baseline = eval_once(&cfg, timeout, &mut backend, &words);
         eval_id = eval_id.saturating_add(1);
         write_corpus_record(&cfg, &corpus_writer, &words, seed_index, &seed_meta, &baseline)?;
-        write_run_record(&cfg, &run_writer, eval_id, &words, seed_index, &seed_meta, &baseline, None)?;
+        write_run_record(
+            &cfg,
+            &run_writer,
+            eval_id,
+            &words,
+            seed_index,
+            &seed_meta,
+            &baseline,
+            None,
+        )?;
         if write_bug_record(&cfg, &bug_writer, &words, seed_index, &seed_meta, &baseline, None)? {
             bug_count = bug_count.saturating_add(1);
         }
@@ -700,7 +709,6 @@ pub fn run_benchmark<B: BenchmarkBackend>(
                 injected.baseline_bucket_hits_sig = Some(baseline.bucket_hits_sig.clone());
                 injected.underconstrained_candidate = injected.backend_error.is_none()
                     && injected.oracle_error.is_none()
-                    && injected.mismatch_regs.is_empty()
                     && !injected.timed_out
                     && injected.semantic_injection_applied;
 
@@ -753,16 +761,12 @@ pub fn run_benchmark<B: BenchmarkBackend>(
         eprintln!("[BENCHMARK][DONE] bug_records=0");
     }
 
-    Ok(BenchmarkOutputs {
-        corpus_path,
-        bugs_path,
-        runs_path: Some(runs_path),
-    })
+    Ok(BenchmarkOutputs { corpus_path, bugs_path, runs_path: Some(runs_path) })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{centered_steps, sweep_steps};
+    use super::{bug_kind, centered_steps, sweep_steps, EvalStats};
 
     #[test]
     fn centered_steps_expand_from_anchor() {
@@ -777,5 +781,33 @@ mod tests {
     #[test]
     fn sweep_steps_respects_stride() {
         assert_eq!(sweep_steps(3, 10, 3, 8), vec![3, 6, 9]);
+    }
+
+    #[test]
+    fn bug_kind_treats_only_baseline_mismatch_as_mismatch() {
+        let mut baseline = EvalStats::default();
+        baseline.phase = "baseline".to_string();
+        baseline.mismatch_regs = vec![(1, 2, 3)];
+        assert_eq!(bug_kind(&baseline), Some("mismatch"));
+
+        let mut injected = EvalStats::default();
+        injected.phase = "semantic_search".to_string();
+        injected.semantic_injection_applied = true;
+        injected.mismatch_regs = vec![(1, 2, 3)];
+        injected.underconstrained_candidate = true;
+        assert_eq!(bug_kind(&injected), Some("underconstrained_candidate"));
+    }
+
+    #[test]
+    fn underconstrained_candidate_does_not_depend_on_oracle_match() {
+        let mut injected = EvalStats::default();
+        injected.phase = "semantic_search".to_string();
+        injected.semantic_injection_applied = true;
+        injected.underconstrained_candidate = true;
+
+        assert_eq!(bug_kind(&injected), Some("underconstrained_candidate"));
+
+        injected.mismatch_regs = vec![(1, 2, 3)];
+        assert_eq!(bug_kind(&injected), Some("underconstrained_candidate"));
     }
 }

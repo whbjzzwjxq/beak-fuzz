@@ -71,9 +71,7 @@ impl JsonlWriter {
             .append(true)
             .open(path)
             .map_err(|e| format!("open {} failed: {e}", path.display()))?;
-        Ok(Self {
-            inner: Arc::new(Mutex::new(LineWriter::new(f))),
-        })
+        Ok(Self { inner: Arc::new(Mutex::new(LineWriter::new(f))) })
     }
 
     pub fn append_json_line<T: Serialize>(&self, value: &T) -> Result<(), String> {

@@ -1139,9 +1139,77 @@ def _patch_336f_loadstore_adapter_witness_injection(openvm_install_path: Path) -
 
         // BEAK-INSERT: guard.336f.loadstore.adapter.preprocess_o8
         let beak_witness_step = fuzzer_utils::next_witness_step();
+        let beak_variant =
+            fuzzer_utils::active_witness_variant("openvm.audit_o8.loadstore_imm_sign");
+        let spec = beak_variant
+            .as_deref()
+            .unwrap_or("mode=flip_sign,domain=any,guard=none");
+        let beak_variant_value = |key: &str| -> Option<&str> {
+            spec.split(',').find_map(|part| {
+                let (k, v) = part.split_once('=')?;
+                (k.trim() == key).then_some(v.trim())
+            })
+        };
+        let mode = beak_variant_value("mode").unwrap_or("flip_sign");
+        let domain = beak_variant_value("domain").unwrap_or("any");
+        let guard = beak_variant_value("guard").unwrap_or("none");
+        let local_opcode = Rv32LoadStoreOpcode::from_usize(
+            opcode.local_opcode_idx(Rv32LoadStoreOpcode::CLASS_OFFSET),
+        );
+        let opcode_shift_ok = |ptr: u32| match (local_opcode, ptr & 0x3) {
+            (LOADW, 0) | (STOREW, 0) => true,
+            (LOADH, 0) | (LOADH, 2) | (LOADHU, 0) | (LOADHU, 2) | (STOREH, 0) | (STOREH, 2) => true,
+            (LOADB, _) | (LOADBU, _) | (STOREB, _) => true,
+            _ => false,
+        };
+        let is_load = matches!(local_opcode, LOADW | LOADB | LOADH | LOADBU | LOADHU);
+        let is_store = matches!(local_opcode, STOREW | STOREH | STOREB);
+        let base_imm_extended = imm + imm_sign * 0xffff0000;
+        let orig_ptr = rs1_val.wrapping_add(base_imm_extended);
+        let mut beak_imm_sign = imm_sign;
+        if fuzzer_utils::should_inject_witness("openvm.audit_o8.loadstore_imm_sign", beak_witness_step) {
+            let candidate_sign = if imm_sign == 1 { 0 } else { 1 };
+            let candidate_ext = imm + candidate_sign * 0xffff0000;
+            let flipped_ptr = rs1_val.wrapping_add(candidate_ext);
+            let ptr_in_range = flipped_ptr < (1 << self.air.pointer_max_bits);
+            let domain_ok = match domain {
+                "load" => is_load,
+                "store" => is_store,
+                _ => true,
+            };
+            let guard_ok = match guard {
+                "alt_in_range" => ptr_in_range,
+                _ => true,
+            };
+            if mode == "flip_sign" && domain_ok && guard_ok && opcode_shift_ok(flipped_ptr) && ptr_in_range {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.audit_o8.loadstore_imm_sign step={} imm={} mode={} domain={} guard={} orig_ptr={} flipped_ptr={} flipped_sign={} variant={}",
+                    beak_witness_step,
+                    imm,
+                    mode,
+                    domain,
+                    guard,
+                    orig_ptr,
+                    flipped_ptr,
+                    candidate_sign,
+                    spec
+                );
+                beak_imm_sign = candidate_sign;
+            } else {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.audit_o8.loadstore_imm_sign step={} imm={} mode=skip_context domain={} guard={} orig_ptr={} variant={}",
+                    beak_witness_step,
+                    imm,
+                    domain,
+                    guard,
+                    orig_ptr,
+                    spec
+                );
+            }
+        }
         // BEAK-INSERT-END
 
-        let imm_extended = imm + imm_sign * 0xffff0000;
+        let imm_extended = imm + beak_imm_sign * 0xffff0000;
 """
     if "// BEAK-INSERT: guard.336f.loadstore.adapter.preprocess_o8" not in c and old in c:
         c = c.replace(old, new, 1)
@@ -1162,17 +1230,7 @@ def _patch_336f_loadstore_adapter_witness_injection(openvm_install_path: Path) -
             },
         ))
 """
-    new2 = r"""        let mut beak_imm_sign = imm_sign == 1;
-        if fuzzer_utils::should_inject_witness("openvm.audit_o8.loadstore_imm_sign", beak_witness_step) {
-            eprintln!(
-                "[beak-witness-inject] kind=openvm.audit_o8.loadstore_imm_sign step={} imm={}",
-                beak_witness_step,
-                imm
-            );
-            beak_imm_sign = !beak_imm_sign;
-        }
-
-        Ok((
+    new2 = r"""        Ok((
             (
                 [prev_data, read_record.1],
                 F::from_canonical_u32(shift_amount),
@@ -1182,14 +1240,14 @@ def _patch_336f_loadstore_adapter_witness_injection(openvm_install_path: Path) -
                 rs1_ptr: b,
                 read: read_record.0,
                 imm: c,
-                imm_sign: beak_imm_sign,
+                imm_sign: beak_imm_sign == 1,
                 shift_amount,
                 mem_ptr_limbs,
                 mem_as: e,
             },
         ))
 """
-    if "imm_sign: beak_imm_sign," not in c and old2 in c:
+    if "imm_sign: beak_imm_sign == 1," not in c and old2 in c:
         c = c.replace(old2, new2, 1)
     path.write_text(c)
 

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from sp1_fuzzer.settings import (
     SP1_AVAILABLE_COMMITS_OR_BRANCHES,
-    SP1_BENCHMARK_7F64_COMMIT,
+    SP1_AUDIT_V4_39AB_COMMIT,
     resolve_sp1_commit,
 )
 
@@ -18,7 +18,7 @@ def _build_parser() -> argparse.ArgumentParser:
     install.add_argument(
         "--commit-or-branch",
         type=str,
-        default=SP1_BENCHMARK_7F64_COMMIT,
+        default=SP1_AUDIT_V4_39AB_COMMIT,
         choices=SP1_AVAILABLE_COMMITS_OR_BRANCHES,
         help="SP1 commit/alias to install.",
     )
@@ -33,7 +33,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _install(args: argparse.Namespace) -> int:
     from sp1_fuzzer.utils_install import clone_and_checkout_sp1
-    from sp1_fuzzer.passes import pass1_infrastructure, pass2_bypass_checks, pass3_collection
+    from sp1_fuzzer.passes import (
+        pass1_infrastructure,
+        pass2_bypass_checks,
+        pass3_collection,
+        pass4_v4_is_memory,
+    )
 
     resolved = resolve_sp1_commit(args.commit_or_branch)
     dest = (args.out_root / f"sp1-{resolved}" / "sp1-src").expanduser().resolve()
@@ -47,6 +52,9 @@ def _install(args: argparse.Namespace) -> int:
 
     print("Applying Pass 3/3 (collection)...")
     pass3_collection.apply(sp1_install_path=dest, commit_or_branch=resolved)
+
+    print("Applying Pass 4/4 (v4 is_memory hook)...")
+    pass4_v4_is_memory.apply(sp1_install_path=dest, commit_or_branch=resolved)
 
     print("SP1 snapshot patched for witness injection and collection.")
     print(dest)

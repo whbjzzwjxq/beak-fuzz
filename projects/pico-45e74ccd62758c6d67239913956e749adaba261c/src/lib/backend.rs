@@ -477,6 +477,7 @@ impl PicoBackend {
     }
 }
 
+
 impl BenchmarkBackend for PicoBackend {
     fn is_usable_seed(&self, words: &[u32]) -> bool {
         if words.is_empty() || words.len() > self.max_instructions {

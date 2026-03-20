@@ -12,9 +12,7 @@ use crate::fuzz::loop1::{Loop1Config, Loop1Outputs, LoopBackend};
 use crate::fuzz::seed::FuzzingSeed;
 use crate::rv32im::instruction::RV32IMInstruction;
 use crate::rv32im::oracle::RISCVOracle;
-use crate::trace::{
-    BucketHit, sorted_signatures_from_hits, sorted_signatures_from_signals,
-};
+use crate::trace::{sorted_signatures_from_hits, sorted_signatures_from_signals, BucketHit};
 
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BOLD_RED: &str = "\x1b[1;31m";
@@ -35,9 +33,7 @@ struct DirectRunStats {
 
 fn ansi_enabled() -> bool {
     std::env::var_os("NO_COLOR").is_none()
-        && std::env::var("TERM")
-            .map(|term| term != "dumb")
-            .unwrap_or(true)
+        && std::env::var("TERM").map(|term| term != "dumb").unwrap_or(true)
 }
 
 fn colorize(text: &str, code: &str) -> String {
@@ -49,10 +45,7 @@ fn colorize(text: &str, code: &str) -> String {
 }
 
 fn now_ts_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_secs()
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs()
 }
 
 fn decode_words_from_input(input: &BytesInput, max_instructions: usize) -> Vec<u32> {
@@ -150,12 +143,17 @@ fn canonical_bucket_sig(sigs: &[String]) -> String {
     out.join(";")
 }
 
-fn run_single_eval<B: LoopBackend>(cfg: &Loop1Config, backend: &mut B, words: &[u32]) -> DirectRunStats {
+fn run_single_eval<B: LoopBackend>(
+    cfg: &Loop1Config,
+    backend: &mut B,
+    words: &[u32],
+) -> DirectRunStats {
     let start = Instant::now();
     backend.prepare_for_run(cfg.rng_seed);
 
-    let oracle_regs =
-        catch_unwind_nonfatal(std::panic::AssertUnwindSafe(|| RISCVOracle::execute_with_config(words, cfg.oracle)));
+    let oracle_regs = catch_unwind_nonfatal(std::panic::AssertUnwindSafe(|| {
+        RISCVOracle::execute_with_config(words, cfg.oracle)
+    }));
     let panic_oracle_error = match oracle_regs.as_ref() {
         Err(p) => Some(panic_payload_to_string(p.as_ref())),
         _ => None,
@@ -185,10 +183,8 @@ fn run_single_eval<B: LoopBackend>(cfg: &Loop1Config, backend: &mut B, words: &[
     let signal_sigs = sorted_signatures_from_signals(&eval.trace_signals);
     let sig = canonical_bucket_sig(&bucket_sigs);
     let signal_sig = canonical_bucket_sig(&signal_sigs);
-    let backend_timed_out = backend_error
-        .as_deref()
-        .map(|e| e.contains("timed out"))
-        .unwrap_or(false);
+    let backend_timed_out =
+        backend_error.as_deref().map(|e| e.contains("timed out")).unwrap_or(false);
     let timed_out = start.elapsed() > Duration::from_millis(cfg.timeout_ms) || backend_timed_out;
 
     DirectRunStats {
@@ -220,9 +216,7 @@ where
             run_direct_bucket_mutate(cfg, backend)
         })
         .map_err(|e| format!("spawn direct loop thread failed: {e}"))?;
-    handle
-        .join()
-        .map_err(|_| "direct loop thread panicked".to_string())?
+    handle.join().map_err(|_| "direct loop thread panicked".to_string())?
 }
 
 pub fn run_direct_bucket_mutate<B: LoopBackend>(
@@ -251,19 +245,13 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
         backend.is_usable_seed(words)
     });
     if seeds.is_empty() {
-        return Err(format!(
-            "No usable initial seeds loaded from {}",
-            cfg.seeds_jsonl.display()
-        ));
+        return Err(format!("No usable initial seeds loaded from {}", cfg.seeds_jsonl.display()));
     }
 
     let mut bug_count = 0usize;
     let mut resolved_direct_buckets: HashSet<String> = HashSet::new();
-    let take_n = if cfg.initial_limit == 0 {
-        seeds.len()
-    } else {
-        cfg.initial_limit.min(seeds.len())
-    };
+    let take_n =
+        if cfg.initial_limit == 0 { seeds.len() } else { cfg.initial_limit.min(seeds.len()) };
     for (seed_idx, (input, seed_meta)) in seeds.into_iter().take(take_n).enumerate() {
         let words = decode_words_from_input(&input, cfg.max_instructions);
         if words.is_empty() || !backend.is_usable_seed(&words) {
@@ -306,7 +294,7 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
         }
         backend.clear_direct_injection();
         for (phase_name, is_injected_phase, stats) in phases {
-            let mismatch = !stats.mismatch_regs.is_empty();
+            let baseline_mismatch = !is_injected_phase && !stats.mismatch_regs.is_empty();
             let mut metadata = match seed_meta.clone() {
                 serde_json::Value::Object(m) => m,
                 _ => serde_json::Map::new(),
@@ -324,7 +312,7 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
                 rng_seed: cfg.rng_seed,
                 timeout_ms: cfg.timeout_ms,
                 timed_out: stats.timed_out,
-                mismatch,
+                mismatch: baseline_mismatch,
                 bucket_hits_sig: stats.bucket_hits_sig.clone(),
                 signal_sig: stats.signal_sig.clone(),
                 instructions: words.clone(),
@@ -336,12 +324,12 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
                 && has_direct_injection_target
                 && stats.backend_error.is_none()
                 && stats.oracle_error.is_none();
-            let has_exception =
-                !is_injected_phase && (stats.backend_error.is_some() || stats.oracle_error.is_some());
-            if mismatch || has_exception || underconstrained_candidate {
+            let has_exception = !is_injected_phase
+                && (stats.backend_error.is_some() || stats.oracle_error.is_some());
+            if baseline_mismatch || has_exception || underconstrained_candidate {
                 let kind = if has_exception {
                     "exception"
-                } else if mismatch {
+                } else if baseline_mismatch {
                     "mismatch"
                 } else {
                     "underconstrained_candidate"
@@ -362,7 +350,11 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
                     backend_error: stats.backend_error.clone(),
                     oracle_error: stats.oracle_error.clone(),
                     bucket_hits: stats.bucket_hits.clone(),
-                    mismatch_regs: stats.mismatch_regs.clone(),
+                    mismatch_regs: if baseline_mismatch {
+                        stats.mismatch_regs.clone()
+                    } else {
+                        Vec::new()
+                    },
                     instructions: words.clone(),
                     metadata: serde_json::Value::Object(metadata),
                 };
@@ -391,9 +383,5 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
     };
     eprintln!("{summary}");
 
-    Ok(Loop1Outputs {
-        corpus_path,
-        bugs_path,
-        runs_path: None,
-    })
+    Ok(Loop1Outputs { corpus_path, bugs_path, runs_path: None })
 }

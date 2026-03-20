@@ -62,10 +62,7 @@ fn collect_bin_words(matches: &clap::ArgMatches) -> Vec<u32> {
 }
 
 fn write_inline_seed_jsonl(root: &Path, words: &[u32]) -> PathBuf {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let dir = root.join("storage/fuzzing_seeds");
     std::fs::create_dir_all(&dir).expect("create storage/fuzzing_seeds");
     let path = dir.join(format!(".tmp-inline-openvm-336f1a47-{ts}.jsonl"));
@@ -150,7 +147,7 @@ fn main() {
         .arg(
             Arg::new("oracle_memory_model")
                 .long("oracle-memory-model")
-                .default_value("split-code-data")
+                .default_value("shared-code-data")
                 .help("Oracle memory model: shared-code-data | split-code-data."),
         )
         .arg(
@@ -189,16 +186,10 @@ fn main() {
 
     let timeout_ms: u64 =
         matches.get_one::<String>("timeout_ms").unwrap().parse().expect("timeout-ms");
-    let parsed_initial_limit: usize = matches
-        .get_one::<String>("initial_limit")
-        .unwrap()
-        .parse()
-        .expect("initial-limit");
-    let parsed_max_instructions: usize = matches
-        .get_one::<String>("max_instructions")
-        .unwrap()
-        .parse()
-        .expect("max-instructions");
+    let parsed_initial_limit: usize =
+        matches.get_one::<String>("initial_limit").unwrap().parse().expect("initial-limit");
+    let parsed_max_instructions: usize =
+        matches.get_one::<String>("max_instructions").unwrap().parse().expect("max-instructions");
     let oracle_precheck_max_steps: u32 = matches
         .get_one::<String>("oracle_precheck_max_steps")
         .unwrap()
@@ -224,20 +215,12 @@ fn main() {
         .unwrap()
         .parse()
         .expect("semantic-max-trials-per-bucket");
-    let initial_limit: usize = if inline_words.is_empty() {
-        parsed_initial_limit
-    } else {
-        1
-    };
-    let max_instructions: usize = if inline_words.is_empty() {
-        parsed_max_instructions
-    } else {
-        inline_words.len().max(1)
-    };
-    let oracle_memory_model = OracleMemoryModel::parse(
-        matches.get_one::<String>("oracle_memory_model").unwrap(),
-    )
-    .expect("oracle-memory-model");
+    let initial_limit: usize = if inline_words.is_empty() { parsed_initial_limit } else { 1 };
+    let max_instructions: usize =
+        if inline_words.is_empty() { parsed_max_instructions } else { inline_words.len().max(1) };
+    let oracle_memory_model =
+        OracleMemoryModel::parse(matches.get_one::<String>("oracle_memory_model").unwrap())
+            .expect("oracle-memory-model");
     let oracle_code_base =
         parse_u32_arg(matches.get_one::<String>("oracle_code_base").unwrap(), "oracle-code-base");
     let oracle_data_size_bytes = parse_u32_arg(

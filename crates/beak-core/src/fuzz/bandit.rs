@@ -134,4 +134,3 @@ pub fn set_last_arm(arm_idx: usize) {
 pub fn take_last_arm() -> Option<usize> {
     LAST_ARM.lock().unwrap().take()
 }
-

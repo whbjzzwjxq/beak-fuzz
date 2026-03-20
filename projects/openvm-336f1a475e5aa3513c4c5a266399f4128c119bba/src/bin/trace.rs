@@ -29,7 +29,7 @@ fn main() {
         .arg(
             Arg::new("oracle_memory_model")
                 .long("oracle-memory-model")
-                .default_value("split-code-data")
+                .default_value("shared-code-data")
                 .help("Oracle memory model: shared-code-data | split-code-data."),
         )
         .arg(
@@ -73,10 +73,9 @@ fn main() {
     let args = input_words;
     let print_micro_ops = matches.get_flag("print_micro_ops");
     let print_buckets = matches.get_flag("print_buckets");
-    let oracle_memory_model = OracleMemoryModel::parse(
-        matches.get_one::<String>("oracle_memory_model").unwrap(),
-    )
-    .expect("oracle-memory-model");
+    let oracle_memory_model =
+        OracleMemoryModel::parse(matches.get_one::<String>("oracle_memory_model").unwrap())
+            .expect("oracle-memory-model");
     let oracle_code_base =
         parse_u32_arg(matches.get_one::<String>("oracle_code_base").unwrap(), "oracle-code-base");
     let oracle_data_size_bytes = parse_u32_arg(
@@ -113,7 +112,12 @@ fn main() {
     }
 }
 
-fn run_trace(words: &[u32], print_micro_ops: bool, print_buckets: bool, oracle_cfg: OracleConfig) -> bool {
+fn run_trace(
+    words: &[u32],
+    print_micro_ops: bool,
+    print_buckets: bool,
+    oracle_cfg: OracleConfig,
+) -> bool {
     // --- 1. Oracle ---
     println!("\n=== Oracle (rrs-lib) ===");
     let oracle_regs = RISCVOracle::execute_with_config(words, oracle_cfg);

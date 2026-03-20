@@ -94,7 +94,7 @@ fn main() {
         .arg(
             Arg::new("oracle_memory_model")
                 .long("oracle-memory-model")
-                .default_value("split-code-data")
+                .default_value("shared-code-data")
                 .help("Oracle memory model: shared-code-data | split-code-data."),
         )
         .arg(

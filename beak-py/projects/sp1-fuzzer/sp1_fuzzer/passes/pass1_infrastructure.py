@@ -54,6 +54,7 @@ def _patch_core_dependency(*, sp1_install_path: Path) -> None:
     core_candidates = [
         (sp1_install_path / "core" / "Cargo.toml", "../crates/fuzzer_utils"),
         (sp1_install_path / "crates" / "core" / "Cargo.toml", "../fuzzer_utils"),
+        (sp1_install_path / "crates" / "core" / "machine" / "Cargo.toml", "../../fuzzer_utils"),
     ]
 
     for core_cargo, rel_path in core_candidates:

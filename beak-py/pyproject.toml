@@ -10,6 +10,7 @@ dependencies = [
     "nexus-fuzzer",
     "openvm-fuzzer",
     "pico-fuzzer",
+    "risc0-fuzzer",
     "sp1-fuzzer",
 ]
 
@@ -30,6 +31,7 @@ jolt-fuzzer = { workspace = true }
 nexus-fuzzer = { workspace = true }
 openvm-fuzzer = { workspace = true }
 pico-fuzzer = { workspace = true }
+risc0-fuzzer = { workspace = true }
 sp1-fuzzer = { workspace = true }
 
 [tool.black]
@@ -58,6 +60,7 @@ pythonpath = [
     "projects/nexus-fuzzer",
     "projects/openvm-fuzzer",
     "projects/pico-fuzzer",
+    "projects/risc0-fuzzer",
     "projects/sp1-fuzzer",
 ]
 testpaths = ["libs", "projects"]

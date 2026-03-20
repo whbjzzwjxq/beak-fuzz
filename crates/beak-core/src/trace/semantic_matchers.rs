@@ -4,9 +4,11 @@ use serde_json::{Value, json};
 
 use crate::trace::observations::{
     ArithmeticSpecialCaseObservation, AuipcPcLimbObservation, BoundaryOriginObservation,
-    ImmediateLimbObservation, MemoryAddressSpaceObservation, MemoryImmediateSignObservation,
-    MemoryWriteObservation, SequenceInsnObservation, SequenceSemanticMatcherProfile,
-    UpperImmediateInsnObservation, VolatileBoundaryObservation, XorMultiplicityObservation,
+    DivisionInsnObservation, EcallInsnObservation, ImmediateLimbObservation,
+    MemoryAddressSpaceObservation, MemoryImmediateSignObservation, MemoryWriteObservation,
+    RdBitDecompositionObservation, SequenceInsnObservation, SequenceSemanticMatcherProfile,
+    TimestampedLoadPathObservation, UpperImmediateInsnObservation, VolatileBoundaryObservation,
+    XorMultiplicityObservation, ZeroRegisterWriteObservation,
 };
 use crate::trace::{BucketHit, TraceSignal, semantic};
 
@@ -296,8 +298,19 @@ pub fn match_memory_immediate_sign_semantic_hits(
                     ("chip_name", json!(obs.chip_name)),
                     ("step_idx", json!(obs.step_idx)),
                     ("op_idx", json!(obs.op_idx)),
+                    ("op", json!(obs.op)),
                     ("imm", json!(obs.imm)),
                     ("imm_sign", json!(obs.imm_sign)),
+                    ("rs1_ptr", json!(obs.rs1_ptr)),
+                    ("rd_rs2_ptr", json!(obs.rd_rs2_ptr)),
+                    ("mem_as", json!(obs.mem_as)),
+                    ("effective_ptr", json!(obs.effective_ptr)),
+                    ("alt_effective_ptr", json!(obs.alt_effective_ptr)),
+                    ("alt_ptr_delta", json!(obs.alt_ptr_delta)),
+                    ("alt_ptr_in_range_29", json!(obs.alt_ptr_in_range_29)),
+                    ("is_load", json!(obs.is_load)),
+                    ("is_store", json!(obs.is_store)),
+                    ("needs_write", json!(obs.needs_write)),
                 ]),
             )
         })
@@ -346,6 +359,28 @@ pub fn match_boundary_origin_semantic_hits(
         .collect()
 }
 
+pub fn match_timestamped_load_path_semantic_hits(
+    observations: &[TimestampedLoadPathObservation],
+) -> Vec<BucketHit> {
+    observations
+        .iter()
+        .map(|obs| {
+            BucketHit::semantic(
+                semantic::memory::TIMESTAMPED_LOAD_PATH,
+                details_kv(&[
+                    ("kind", json!(obs.kind)),
+                    ("chip_name", json!(obs.chip_name)),
+                    ("step_idx", json!(obs.step_idx)),
+                    ("op_idx", json!(obs.op_idx)),
+                    ("timestamp", json!(obs.timestamp)),
+                    ("is_load", json!(obs.is_load)),
+                    ("is_store", json!(obs.is_store)),
+                ]),
+            )
+        })
+        .collect()
+}
+
 pub fn match_volatile_boundary_semantic_hits(
     observations: &[VolatileBoundaryObservation],
 ) -> Vec<BucketHit> {
@@ -384,11 +419,101 @@ pub fn match_arithmetic_special_case_semantic_hits(
         .collect()
 }
 
+pub fn match_zero_register_semantic_hits(
+    observations: &[ZeroRegisterWriteObservation],
+) -> Vec<BucketHit> {
+    observations
+        .iter()
+        .map(|obs| {
+            BucketHit::semantic(
+                semantic::decode::ZERO_REGISTER_IMMUTABILITY,
+                details_kv(&[
+                    ("op_idx", json!(obs.op_idx)),
+                    ("pc", json!(obs.pc)),
+                    ("raw_word", json!(obs.raw_word)),
+                    ("mnemonic", json!(obs.mnemonic)),
+                    ("semantic_family", json!("zero_register_write")),
+                ]),
+            )
+        })
+        .collect()
+}
+
+pub fn match_rd_bit_semantic_hits(
+    observations: &[RdBitDecompositionObservation],
+) -> Vec<BucketHit> {
+    observations
+        .iter()
+        .map(|obs| {
+            BucketHit::semantic(
+                semantic::decode::RD_BIT_DECOMPOSITION,
+                details_kv(&[
+                    ("op_idx", json!(obs.op_idx)),
+                    ("pc", json!(obs.pc)),
+                    ("raw_word", json!(obs.raw_word)),
+                    ("rd", json!(obs.rd)),
+                    ("mnemonic", json!(obs.mnemonic)),
+                    ("semantic_family", json!("rd_bit_decomposition")),
+                ]),
+            )
+        })
+        .collect()
+}
+
+pub fn match_division_semantic_hits(observations: &[DivisionInsnObservation]) -> Vec<BucketHit> {
+    let mut hits = Vec::new();
+    for obs in observations {
+        hits.push(BucketHit::semantic(
+            semantic::decode::OPERAND_INDEX_ROUTING,
+            details_kv(&[
+                ("op_idx", json!(obs.op_idx)),
+                ("pc", json!(obs.pc)),
+                ("raw_word", json!(obs.raw_word)),
+                ("mnemonic", json!(obs.mnemonic)),
+                ("rd", json!(obs.rd)),
+                ("rs1", json!(obs.rs1)),
+                ("rs2", json!(obs.rs2)),
+                ("semantic_family", json!("division_operand_routing")),
+            ]),
+        ));
+        hits.push(BucketHit::semantic(
+            semantic::arithmetic::DIVISION_REMAINDER_BOUND,
+            details_kv(&[
+                ("op_idx", json!(obs.op_idx)),
+                ("pc", json!(obs.pc)),
+                ("raw_word", json!(obs.raw_word)),
+                ("mnemonic", json!(obs.mnemonic)),
+                ("rd", json!(obs.rd)),
+                ("rs1", json!(obs.rs1)),
+                ("rs2", json!(obs.rs2)),
+                ("semantic_family", json!("division_remainder_bound")),
+            ]),
+        ));
+    }
+    hits
+}
+
+pub fn match_ecall_semantic_hits(observations: &[EcallInsnObservation]) -> Vec<BucketHit> {
+    observations
+        .iter()
+        .map(|obs| {
+            BucketHit::semantic(
+                semantic::control::ECALL_ARGUMENT_DECOMPOSITION,
+                details_kv(&[
+                    ("op_idx", json!(obs.op_idx)),
+                    ("pc", json!(obs.pc)),
+                    ("raw_word", json!(obs.raw_word)),
+                    ("mnemonic", json!(obs.mnemonic)),
+                    ("semantic_family", json!("ecall_argument_decomposition")),
+                ]),
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        match_sequence_semantic_hits, sequence_trace_signals,
-    };
+    use super::{match_sequence_semantic_hits, sequence_trace_signals};
     use crate::trace::observations::{SequenceInsnObservation, SequenceSemanticMatcherProfile};
     use crate::trace::{TraceSignal, semantic};
 

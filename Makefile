@@ -3,8 +3,10 @@
 	openvm-trace openvm-trace-buckets \
 	pico-install pico-build pico-run pico-fuzz \
 	sp1-install sp1-build sp1-run sp1-fuzz \
+	sp1-install-v4 sp1-build-v4 sp1-fuzz-v4 \
 	jolt-install jolt-build jolt-run jolt-fuzz \
-	nexus-install nexus-build nexus-run nexus-fuzz
+	nexus-install nexus-build nexus-run nexus-fuzz \
+	risc0-install risc0-build risc0-run risc0-fuzz
 
 # Commit selector (required for OpenVM targets).
 #
@@ -18,8 +20,10 @@
 COMMIT ?= bmk-regzero
 PICO_COMMIT ?= 45e74ccd62758c6d67239913956e749adaba261c
 SP1_COMMIT ?= 7f643da16813af4c0fbaad4837cd7409386cf38c
+SP1_AUDIT_V4_IS_MEMORY_COMMIT ?= 39ab52fce38172c9d23feed7248198dc14c164a9
 JOLT_COMMIT ?= e9caa23565dbb13019afe61a2c95f51d1999e286
 NEXUS_COMMIT ?= 636ccb360d0f4ae657ae4bb64e1e275ccec8826
+RISC0_COMMIT ?= c0db0713671c8ec467b3efc26b22a0b0591897ff
 BIN ?= beak-trace
 ARGS ?=
 
@@ -71,6 +75,15 @@ NEXUS_INITIAL_LIMIT ?= 1000
 NEXUS_TIMEOUT_MS ?= 5000
 NEXUS_ARGS ?=
 
+# RISC0
+RISC0_PROJECT_DIR ?= projects/risc0-$(RISC0_COMMIT)
+RISC0_ZKVM_DIR ?= $(abspath beak-py/out/risc0-$(RISC0_COMMIT)/risc0-src)
+RISC0_OUT_DIR ?= $(abspath $(RISC0_PROJECT_DIR)/out)
+RISC0_SEEDS ?= storage/fuzzing_seeds/initial.jsonl
+RISC0_INITIAL_LIMIT ?= 1000
+RISC0_TIMEOUT_MS ?= 5000
+RISC0_ARGS ?=
+
 define _require_pico_commit
 	@if [ -z "$(PICO_COMMIT)" ]; then \
 		echo "error: PICO_COMMIT is required (full SHA, e.g. 45e74ccd...)"; \
@@ -95,6 +108,13 @@ endef
 define _require_nexus_commit
 	@if [ -z "$(NEXUS_COMMIT)" ]; then \
 		echo "error: NEXUS_COMMIT is required (full SHA, e.g. 636ccb36...)"; \
+		exit 2; \
+	fi
+endef
+
+define _require_risc0_commit
+	@if [ -z "$(RISC0_COMMIT)" ]; then \
+		echo "error: RISC0_COMMIT is required (full SHA, e.g. c0db0713...)"; \
 		exit 2; \
 	fi
 endef
@@ -215,6 +235,15 @@ sp1-run: sp1-build
 sp1-fuzz: sp1-run
 	@echo "SP1 full repro finished for $(SP1_COMMIT)"
 
+sp1-install-v4:
+	@$(MAKE) sp1-install SP1_COMMIT=$(SP1_AUDIT_V4_IS_MEMORY_COMMIT)
+
+sp1-build-v4:
+	@$(MAKE) sp1-build SP1_COMMIT=$(SP1_AUDIT_V4_IS_MEMORY_COMMIT)
+
+sp1-fuzz-v4:
+	@$(MAKE) sp1-fuzz SP1_COMMIT=$(SP1_AUDIT_V4_IS_MEMORY_COMMIT)
+
 jolt-install:
 	$(_require_jolt_commit)
 	@mkdir -p "$(JOLT_PROJECT_DIR)"
@@ -268,3 +297,30 @@ nexus-run: nexus-build
 
 nexus-fuzz: nexus-run
 	@echo "Nexus full repro finished for $(NEXUS_COMMIT)"
+
+risc0-install:
+	$(_require_risc0_commit)
+	@mkdir -p "$(RISC0_PROJECT_DIR)"
+	cd beak-py && UV_CACHE_DIR=$${UV_CACHE_DIR:-/tmp/uv-cache} make install
+	cd beak-py && UV_CACHE_DIR=$${UV_CACHE_DIR:-/tmp/uv-cache} uv run risc0-fuzzer install --commit-or-branch "$(RISC0_COMMIT)" --zkvm-src ./risc0-src
+
+risc0-build:
+	$(_require_risc0_commit)
+	@mkdir -p "$(RISC0_PROJECT_DIR)"
+	cd "$(RISC0_PROJECT_DIR)" && CARGO_TARGET_DIR="$$PWD/target" cargo build --release --bin beak-trace --bin beak-fuzz
+
+risc0-run: risc0-build
+	$(_require_risc0_commit)
+	@mkdir -p "$(RISC0_OUT_DIR)"
+	cd "$(RISC0_PROJECT_DIR)" && UV_CACHE_DIR=$${UV_CACHE_DIR:-/tmp/uv-cache} cargo run --release -q --bin beak-fuzz -- \
+		--seeds-jsonl "$(RISC0_SEEDS)" \
+		--timeout-ms "$(RISC0_TIMEOUT_MS)" \
+		--initial-limit "$(RISC0_INITIAL_LIMIT)" \
+		--semantic-window-before "$(SEMANTIC_WINDOW_BEFORE)" \
+		--semantic-window-after "$(SEMANTIC_WINDOW_AFTER)" \
+		--semantic-step-stride "$(SEMANTIC_STEP_STRIDE)" \
+		--semantic-max-trials-per-bucket "$(SEMANTIC_MAX_TRIALS)" \
+		$(RISC0_ARGS)
+
+risc0-fuzz: risc0-run
+	@echo "RISC0 full repro finished for $(RISC0_COMMIT)"

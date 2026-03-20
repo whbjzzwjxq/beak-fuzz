@@ -19,7 +19,7 @@ use openvm_sdk::{F, Sdk, StdIn};
 use openvm_transpiler::transpiler::Transpiler;
 use p3_field::PrimeField32;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -71,8 +71,7 @@ fn build_exe(words: &[u32]) -> Result<std::sync::Arc<VmExe<F>>, String> {
     Ok(std::sync::Arc::new(VmExe::new(program)))
 }
 
-fn is_openvm_supported_rv32_word(word: u32) -> bool {
-    let _ = word;
+fn is_openvm_supported_rv32_word(_word: u32) -> bool {
     true
 }
 

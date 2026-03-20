@@ -22,6 +22,7 @@ clap = "4.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 strum = { version = "0.26", features = ["derive"] }
-sp1-core-executor = "3.4.0"
-sp1-prover = "3.4.0"
-sp1-stark = "3.4.0"
+sp1-core-executor = { path = "/tmp/sp1-7f/crates/core/executor" }
+sp1-core-machine = { path = "/tmp/sp1-7f/crates/core/machine" }
+sp1-prover = { path = "/tmp/sp1-7f/crates/prover" }
+sp1-stark = { path = "/tmp/sp1-7f/crates/stark" }

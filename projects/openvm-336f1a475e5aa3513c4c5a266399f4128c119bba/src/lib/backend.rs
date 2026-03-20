@@ -19,16 +19,12 @@ use openvm_sdk::{F, Sdk, StdIn};
 use openvm_stark_backend::p3_field::PrimeField32;
 use openvm_transpiler::transpiler::Transpiler;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-
-fn build_sdk() -> Sdk {
-    Sdk
-}
 
 fn build_vm_config() -> SdkVmConfig {
     let mut vm_config = SdkVmConfig::builder()
@@ -67,8 +63,7 @@ fn build_exe(words: &[u32]) -> Result<std::sync::Arc<VmExe<F>>, String> {
     Ok(std::sync::Arc::new(VmExe::new(program)))
 }
 
-fn is_openvm_supported_rv32_word(word: u32) -> bool {
-    let _ = word;
+fn is_openvm_supported_rv32_word(_word: u32) -> bool {
     true
 }
 
@@ -94,6 +89,7 @@ pub struct WorkerResponse {
 }
 
 const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
+const OPENVM_RV32_POINTER_MAX_BITS: u64 = 29;
 
 fn base_inject_kind(kind: &str) -> &str {
     kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
@@ -134,7 +130,7 @@ pub fn run_backend_once(
     let ms_build_exe = t0.elapsed().as_millis();
 
     let t1 = Instant::now();
-    let sdk = build_sdk();
+    let sdk = Sdk;
     let vm_config = build_vm_config();
     let continuation_enabled = vm_config.system.config.continuation_enabled;
     let app_config = AppConfig {
@@ -181,18 +177,8 @@ pub fn run_backend_once(
 
     let t4 = Instant::now();
     let observed_injection_sites = fuzzer_utils::take_observed_witness_sites();
-    let applied_injection_sites = fuzzer_utils::take_applied_witness_sites();
-    let injection_applied =
-        inject_kind
-            .and_then(|kind| applied_injection_sites.get(base_inject_kind(kind)))
-            .map(|steps| {
-                if inject_step == u64::MAX {
-                    !steps.is_empty()
-                } else {
-                    steps.contains(&inject_step)
-                }
-            })
-            .unwrap_or(false);
+    let mut applied_injection_sites = fuzzer_utils::take_applied_witness_sites();
+    let mut injection_applied = false;
     if let Some(kind) = inject_kind {
         let observed =
             observed_injection_sites.get(base_inject_kind(kind)).cloned().unwrap_or_default();
@@ -262,6 +248,24 @@ pub fn run_backend_once(
         "[openvm-backend-worker] iter={} prove_verify_ms={ms_prove_verify}",
         current_iteration
     );
+    let prove_phase_applied = fuzzer_utils::take_applied_witness_sites();
+    for (kind, steps) in prove_phase_applied {
+        applied_injection_sites.entry(kind).or_default().extend(steps);
+    }
+    for steps in applied_injection_sites.values_mut() {
+        steps.sort_unstable();
+        steps.dedup();
+    }
+    injection_applied = inject_kind
+        .and_then(|kind| applied_injection_sites.get(base_inject_kind(kind)))
+        .map(|steps| {
+            if inject_step == u64::MAX {
+                !steps.is_empty()
+            } else {
+                steps.contains(&inject_step)
+            }
+        })
+        .unwrap_or(false);
 
     Ok(WorkerResponse {
         request_id,
@@ -337,6 +341,14 @@ impl OpenVmBackend {
             .unwrap_or(0)
     }
 
+    fn hit_detail_bool(hit: &beak_core::trace::BucketHit, key: &str) -> bool {
+        hit.details.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+    }
+
+    fn hit_detail_u64(hit: &beak_core::trace::BucketHit, key: &str) -> Option<u64> {
+        hit.details.get(key).and_then(|v| v.as_u64())
+    }
+
     fn o5_variant_specs() -> Vec<String> {
         let mut specs = Vec::new();
         for mode in ["byte_bias", "neighbor_copy", "sign_echo", "modulus_bias", "rotate_lane"] {
@@ -395,48 +407,72 @@ impl OpenVmBackend {
         specs
     }
 
-    fn o8_variant_specs() -> Vec<String> {
-        let mut specs = Vec::new();
-        for mode in [
-            "flip_sign",
-            "force_negative",
-            "force_positive",
-            "masked_negative",
-            "masked_positive",
-            "record_flip_sign",
-            "record_force_negative",
-            "record_force_positive",
-            "record_masked_negative",
-            "record_masked_positive",
-            "lane_alias_plus",
-            "lane_alias_minus",
-        ] {
-            for phase in 0..2u32 {
-                for strength in 0..24u32 {
-                    specs.push(format!("mode={mode},phase={phase},strength={strength}"));
-                }
-            }
+    fn o2_variant_specs() -> Vec<String> {
+        const BABYBEAR_P: u32 = 2_013_265_921;
+        [17u32, 32, 64, 128, 256, 512, 1024]
+            .into_iter()
+            .map(|offset| format!("delta={}", BABYBEAR_P.saturating_sub(offset)))
+            .collect()
+    }
+
+    fn o8_variant_specs_for_hit(hit: &beak_core::trace::BucketHit) -> Vec<String> {
+        let is_store = Self::hit_detail_bool(hit, "is_store");
+        let is_load = Self::hit_detail_bool(hit, "is_load");
+        let alt_in_range = hit
+            .details
+            .get("alt_ptr_in_range_29")
+            .and_then(|v| v.as_bool())
+            .or_else(|| {
+                Self::hit_detail_u64(hit, "alt_effective_ptr")
+                    .map(|ptr| ptr < (1u64 << OPENVM_RV32_POINTER_MAX_BITS))
+            })
+            .unwrap_or(false);
+
+        let mut domains = Vec::new();
+        if is_store {
+            domains.push("store");
         }
+        if is_load {
+            domains.push("load");
+        }
+        domains.push("any");
+
+        let mut specs = Vec::new();
+        for domain in domains {
+            if alt_in_range {
+                specs.push(format!("mode=flip_sign,domain={domain},guard=alt_in_range"));
+            }
+            specs.push(format!("mode=flip_sign,domain={domain},guard=none"));
+        }
+
+        if alt_in_range {
+            specs.push("mode=flip_sign,domain=any,guard=alt_in_range,search=wildcard".to_string());
+        }
+        specs.push("mode=flip_sign,domain=any,guard=none,search=wildcard".to_string());
+        specs.dedup();
         specs
     }
 
     fn o15_variant_specs() -> Vec<String> {
         let mut specs = Vec::new();
-        for mode in [
-            "zero_divisor_only_marker_shift",
-            "zero_divisor_only_r_prime_alias",
-            "zero_divisor_only_lt_diff_bias",
-            "zero_divisor_only_flag_zero_divisor",
-        ] {
-            for strength in 0..20u32 {
+        specs.push("mode=shadow_invalid_one,search=wildcard".to_string());
+        specs.push("mode=lt_diff_bias,slot=0,strength=0,search=wildcard".to_string());
+        // Try the overflow-special-case variants first; the standard o15 seed does not exercise
+        // the zero-divisor-only path, so leading with those variants wastes semantic-search budget.
+        for mode in ["lt_diff_bias", "marker_shift", "r_prime_alias", "flag_zero_divisor"] {
+            for strength in 0..24u32 {
                 for slot in 0..4u32 {
                     specs.push(format!("mode={mode},slot={slot},strength={strength}"));
                 }
             }
         }
-        specs.push("mode=lt_diff_bias,slot=0,strength=0,search=wildcard".to_string());
-        for mode in ["flag_zero_divisor", "r_prime_alias", "lt_diff_bias", "marker_shift"] {
-            for strength in 0..24u32 {
+        for mode in [
+            "zero_divisor_only_lt_diff_bias",
+            "zero_divisor_only_marker_shift",
+            "zero_divisor_only_r_prime_alias",
+            "zero_divisor_only_flag_zero_divisor",
+        ] {
+            for strength in 0..20u32 {
                 for slot in 0..4u32 {
                     specs.push(format!("mode={mode},slot={slot},strength={strength}"));
                 }
@@ -451,15 +487,15 @@ impl OpenVmBackend {
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
+            "openvm.audit_o2.timestamp_shift" => Self::o2_variant_specs()
+                .into_iter()
+                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
+                .collect(),
             "openvm.audit_o5.rs2_imm_limbs" => Self::o5_variant_specs()
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
             "openvm.audit_o7.auipc_pc_limbs" => Self::o7_variant_specs()
-                .into_iter()
-                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
-                .collect(),
-            "openvm.audit_o8.loadstore_imm_sign" => Self::o8_variant_specs()
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
@@ -492,6 +528,15 @@ impl OpenVmBackend {
                     InjectionSchedule::Exact(0),
                     false,
                 )
+            } else if bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id
+                || bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id
+            {
+                (
+                    semantic::memory::TIMESTAMPED_LOAD_PATH.semantic_class,
+                    "openvm.audit_o2.timestamp_shift",
+                    InjectionSchedule::Exact(u64::MAX),
+                    false,
+                )
             } else if bucket_id == semantic::control::AUIPC_PC_LIMB_CONSISTENCY.id {
                 (
                     semantic::control::AUIPC_PC_LIMB_CONSISTENCY.semantic_class,
@@ -513,6 +558,13 @@ impl OpenVmBackend {
                     InjectionSchedule::AroundAnchor(anchor),
                     true,
                 )
+            } else if bucket_id == semantic::row::PADDING_INTERACTION_SEND.id {
+                (
+                    semantic::row::PADDING_INTERACTION_SEND.semantic_class,
+                    "openvm.audit_o3.invalid_row_rs2_read",
+                    InjectionSchedule::Exact(u64::MAX),
+                    false,
+                )
             } else {
                 return Vec::new();
             };
@@ -523,7 +575,14 @@ impl OpenVmBackend {
                 InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor))
             })
             .unwrap_or(fallback_schedule);
-        let inject_kinds = Self::inject_kinds_for_base(inject_kind);
+        let inject_kinds = if inject_kind == "openvm.audit_o8.loadstore_imm_sign" {
+            Self::o8_variant_specs_for_hit(hit)
+                .into_iter()
+                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
+                .collect()
+        } else {
+            Self::inject_kinds_for_base(inject_kind)
+        };
         let mut candidates: Vec<_> = inject_kinds
             .iter()
             .map(|kind| SemanticInjectionCandidate {
@@ -542,15 +601,20 @@ impl OpenVmBackend {
             .collect();
         if inject_kind == "openvm.audit_o8.loadstore_imm_sign" {
             candidates.extend(
-                inject_kinds.iter().filter(|kind| kind.contains("mode=flip_sign")).map(|kind| {
-                    SemanticInjectionCandidate {
+                inject_kinds
+                    .iter()
+                    .filter(|kind| {
+                        kind.contains("mode=flip_sign")
+                            && kind.contains("guard=alt_in_range")
+                            && kind.contains("domain=")
+                    })
+                    .map(|kind| SemanticInjectionCandidate {
                         bucket_id: hit.bucket_id.clone(),
                         trigger_signal_id: None,
                         semantic_class: semantic_class.to_string(),
                         inject_kind: kind.clone(),
                         schedule: InjectionSchedule::Exact(u64::MAX),
-                    }
-                }),
+                    }),
             );
         }
         if inject_kind == "openvm.audit_o15.divrem_special_case_on_invalid" {
@@ -582,16 +646,22 @@ impl OpenVmBackend {
         let bucket_id = candidate.bucket_id.as_str();
         if bucket_id == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id {
             0
-        } else if bucket_id == semantic::memory::IMMEDIATE_SIGN_CONSISTENCY.id {
+        } else if bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id
+            || bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id
+        {
             1
-        } else if bucket_id == semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.id {
+        } else if bucket_id == semantic::memory::IMMEDIATE_SIGN_CONSISTENCY.id {
             2
-        } else if bucket_id == semantic::control::AUIPC_PC_LIMB_CONSISTENCY.id {
+        } else if bucket_id == semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.id {
             3
-        } else if bucket_id == semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id {
+        } else if bucket_id == semantic::row::PADDING_INTERACTION_SEND.id {
             4
-        } else {
+        } else if bucket_id == semantic::control::AUIPC_PC_LIMB_CONSISTENCY.id {
             5
+        } else if bucket_id == semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id {
+            6
+        } else {
+            7
         }
     }
 

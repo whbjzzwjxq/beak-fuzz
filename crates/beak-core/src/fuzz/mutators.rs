@@ -1,14 +1,19 @@
 use std::num::NonZeroUsize;
 
 use libafl::prelude::*;
-use libafl_bolts::Named;
 use libafl_bolts::rands::Rand;
+use libafl_bolts::Named;
 
 use crate::rv32im::instruction::RV32IMInstruction;
 
 use super::bandit;
 
-type LoopState = StdState<InMemoryCorpus<BytesInput>, BytesInput, libafl_bolts::rands::StdRand, InMemoryCorpus<BytesInput>>;
+type LoopState = StdState<
+    InMemoryCorpus<BytesInput>,
+    BytesInput,
+    libafl_bolts::rands::StdRand,
+    InMemoryCorpus<BytesInput>,
+>;
 
 fn nz(n: usize) -> NonZeroUsize {
     NonZeroUsize::new(n.max(1)).unwrap()
@@ -104,10 +109,7 @@ pub const SEED_MUTATOR_NUM_ARMS: usize = 8;
 
 impl SeedMutator {
     pub fn new(max_instructions: usize) -> Self {
-        Self {
-            max_instructions,
-            name: "SeedMutator".into(),
-        }
+        Self { max_instructions, name: "SeedMutator".into() }
     }
 
     fn mutate_registers(state: &mut LoopState, words: &mut [u32], used_regs: &[u32]) {
@@ -162,9 +164,13 @@ impl SeedMutator {
         if new_imm == old_imm {
             return;
         }
-        let Ok(new_insn) =
-            RV32IMInstruction::from_parts(&insn.mnemonic, insn.rd, insn.rs1, insn.rs2, Some(new_imm))
-        else {
+        let Ok(new_insn) = RV32IMInstruction::from_parts(
+            &insn.mnemonic,
+            insn.rd,
+            insn.rs1,
+            insn.rs2,
+            Some(new_imm),
+        ) else {
             return;
         };
         words[idx] = new_insn.word;
@@ -286,13 +292,9 @@ impl SeedMutator {
         };
 
         let Some(new_mnemonic) = replacement else { return };
-        let Ok(new_insn) = RV32IMInstruction::from_parts(
-            new_mnemonic,
-            insn.rd,
-            insn.rs1,
-            insn.rs2,
-            insn.imm,
-        ) else {
+        let Ok(new_insn) =
+            RV32IMInstruction::from_parts(new_mnemonic, insn.rd, insn.rs1, insn.rs2, insn.imm)
+        else {
             return;
         };
         words[idx] = new_insn.word;
@@ -338,7 +340,11 @@ impl Named for SeedMutator {
 }
 
 impl Mutator<BytesInput, LoopState> for SeedMutator {
-    fn mutate(&mut self, state: &mut LoopState, input: &mut BytesInput) -> Result<MutationResult, Error> {
+    fn mutate(
+        &mut self,
+        state: &mut LoopState,
+        input: &mut BytesInput,
+    ) -> Result<MutationResult, Error> {
         let mut words = decode_words_from_input(input, self.max_instructions);
         if words.is_empty() {
             return Ok(MutationResult::Skipped);
@@ -372,4 +378,3 @@ impl Mutator<BytesInput, LoopState> for SeedMutator {
         Ok(())
     }
 }
-

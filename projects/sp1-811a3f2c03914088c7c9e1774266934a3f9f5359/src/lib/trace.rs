@@ -112,7 +112,8 @@ pub fn decode_word_to_sp1_instruction(word: u32) -> Result<SP1Instruction, Strin
         "divu" => SP1Instruction::new(Opcode::DIVU, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
         "rem" => SP1Instruction::new(Opcode::REM, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
         "remu" => SP1Instruction::new(Opcode::REMU, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "ecall" => SP1Instruction::new(Opcode::ECALL, 0, 0, 0, false, false),
+        // SP1 models ECALL with fixed operand registers x5/x10/x11.
+        "ecall" => SP1Instruction::new(Opcode::ECALL, 5, 10, 11, false, false),
         "ebreak" => SP1Instruction::new(Opcode::EBREAK, 0, 0, 0, false, false),
         _ => return Err(format!("unsupported rv32 mnemonic for sp1 executor: {m}")),
     };

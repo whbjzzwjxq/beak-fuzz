@@ -5,6 +5,9 @@
 ROOT=$(shell pwd)
 VIRTUALENV=$(ROOT)/.venv
 export UV_CACHE_DIR ?= $(ROOT)/.uv-cache
+SP1_COMMIT ?= 39ab52fce38172c9d23feed7248198dc14c164a9
+RISC0_COMMIT ?= c0db0713671c8ec467b3efc26b22a0b0591897ff
+RISC0_ZKVM_SRC ?= ./risc0-src
 UV_RUN=uv run
 BLACK=$(UV_RUN) black
 FLAKE8=$(UV_RUN) flake8
@@ -37,11 +40,11 @@ install-openvm: $(VIRTUALENV)
 
 install-sp1: $(VIRTUALENV)
 	uv sync --package sp1-fuzzer
-	$(UV_RUN) sp1-fuzzer install --commit-or-branch 7f643da16813af4c0fbaad4837cd7409386cf38c
+	$(UV_RUN) sp1-fuzzer install --commit-or-branch $(SP1_COMMIT)
 
 install-risc0: $(VIRTUALENV)
 	uv sync --package risc0-fuzzer
-	$(UV_RUN) risc0-fuzzer install --zkvm-src ./risc0-src --commit-or-branch ebd64e43e7d953e0edcee2d4e0225b75458d80b5
+	$(UV_RUN) risc0-fuzzer install --zkvm-src $(RISC0_ZKVM_SRC) --commit-or-branch $(RISC0_COMMIT)
 
 install-pico: $(VIRTUALENV)
 	uv sync --package pico-fuzzer

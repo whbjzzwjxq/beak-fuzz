@@ -2,7 +2,7 @@ use std::fmt;
 
 use rrs_lib::instruction_formats;
 use rrs_lib::instruction_string_outputter::InstructionStringOutputter;
-use rrs_lib::{InstructionProcessor, process_instruction};
+use rrs_lib::{process_instruction, InstructionProcessor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,11 +53,7 @@ impl fmt::Display for RV32IMEncodeError {
                 write!(f, "missing operand: {field}")
             }
             RV32IMEncodeError::InvalidImmediate(message) => write!(f, "{message}"),
-            RV32IMEncodeError::InvalidOperandCount {
-                mnemonic,
-                expected,
-                found,
-            } => write!(
+            RV32IMEncodeError::InvalidOperandCount { mnemonic, expected, found } => write!(
                 f,
                 "invalid operand count for '{mnemonic}': expected {expected}, got {found}"
             ),
@@ -135,15 +131,7 @@ impl RV32IMInstruction {
         rs2: Option<u32>,
         imm: Option<i32>,
     ) -> Self {
-        Self {
-            mnemonic: mnemonic.to_string(),
-            rd,
-            rs1,
-            rs2,
-            imm,
-            word,
-            asm,
-        }
+        Self { mnemonic: mnemonic.to_string(), rd, rs1, rs2, imm, word, asm }
     }
 }
 
@@ -162,8 +150,9 @@ impl<'de> Deserialize<'de> for RV32IMInstruction {
         D: Deserializer<'de>,
     {
         let word = u32::deserialize(deserializer)?;
-        RV32IMInstruction::decode(word)
-            .ok_or_else(|| serde::de::Error::custom(format!("failed to decode rv32im instruction: {}", word)))
+        RV32IMInstruction::decode(word).ok_or_else(|| {
+            serde::de::Error::custom(format!("failed to decode rv32im instruction: {}", word))
+        })
     }
 }
 
@@ -577,17 +566,11 @@ fn tokenize_asm(line: &str) -> Vec<String> {
 
 fn parse_register(token: &str, field: &'static str) -> Result<u32, RV32IMEncodeError> {
     let stripped = token.strip_prefix('x').ok_or_else(|| {
-        RV32IMEncodeError::InvalidRegisterToken {
-            field,
-            token: token.to_string(),
-        }
+        RV32IMEncodeError::InvalidRegisterToken { field, token: token.to_string() }
     })?;
-    let value = stripped.parse::<u32>().map_err(|_| {
-        RV32IMEncodeError::InvalidRegisterToken {
-            field,
-            token: token.to_string(),
-        }
-    })?;
+    let value = stripped
+        .parse::<u32>()
+        .map_err(|_| RV32IMEncodeError::InvalidRegisterToken { field, token: token.to_string() })?;
     if value > 31 {
         return Err(RV32IMEncodeError::InvalidRegister { field, value });
     }
@@ -597,23 +580,25 @@ fn parse_register(token: &str, field: &'static str) -> Result<u32, RV32IMEncodeE
 fn parse_immediate(token: &str) -> Result<i32, RV32IMEncodeError> {
     let t = token.trim();
     if let Some(hex) = t.strip_prefix("0x") {
-        return i32::from_str_radix(hex, 16)
-            .map_err(|_| RV32IMEncodeError::InvalidImmediate(format!("invalid hex immediate '{t}'")));
+        return i32::from_str_radix(hex, 16).map_err(|_| {
+            RV32IMEncodeError::InvalidImmediate(format!("invalid hex immediate '{t}'"))
+        });
     }
     if let Some(rest) = t.strip_prefix(".+") {
-        return rest.parse::<i32>().map_err(|_| {
-            RV32IMEncodeError::InvalidImmediate(format!("invalid immediate '{t}'"))
-        });
+        return rest
+            .parse::<i32>()
+            .map_err(|_| RV32IMEncodeError::InvalidImmediate(format!("invalid immediate '{t}'")));
     }
     if let Some(rest) = t.strip_prefix(".-") {
-        return rest.parse::<i32>().map(|v| -v).map_err(|_| {
-            RV32IMEncodeError::InvalidImmediate(format!("invalid immediate '{t}'"))
-        });
+        return rest
+            .parse::<i32>()
+            .map(|v| -v)
+            .map_err(|_| RV32IMEncodeError::InvalidImmediate(format!("invalid immediate '{t}'")));
     }
     if let Some(rest) = t.strip_prefix('.') {
-        return rest.parse::<i32>().map_err(|_| {
-            RV32IMEncodeError::InvalidImmediate(format!("invalid immediate '{t}'"))
-        });
+        return rest
+            .parse::<i32>()
+            .map_err(|_| RV32IMEncodeError::InvalidImmediate(format!("invalid immediate '{t}'")));
     }
     t.parse::<i32>()
         .map_err(|_| RV32IMEncodeError::InvalidImmediate(format!("invalid immediate '{t}'")))
@@ -749,29 +734,23 @@ fn parse_operands(
 fn parse_csr(token: &str) -> Result<i32, RV32IMEncodeError> {
     let t = token.trim();
     if let Some(hex) = t.strip_prefix("0x") {
-        return i32::from_str_radix(hex, 16).map_err(|_| {
-            RV32IMEncodeError::InvalidImmediate(format!("invalid csr '{t}'"))
-        });
+        return i32::from_str_radix(hex, 16)
+            .map_err(|_| RV32IMEncodeError::InvalidImmediate(format!("invalid csr '{t}'")));
     }
-    t.parse::<i32>()
-        .map_err(|_| RV32IMEncodeError::InvalidImmediate(format!("invalid csr '{t}'")))
+    t.parse::<i32>().map_err(|_| RV32IMEncodeError::InvalidImmediate(format!("invalid csr '{t}'")))
 }
 
 fn parse_csr_uimm(token: &str) -> Result<u32, RV32IMEncodeError> {
     let t = token.trim();
     let v = if let Some(hex) = t.strip_prefix("0x") {
-        u32::from_str_radix(hex, 16).map_err(|_| {
-            RV32IMEncodeError::InvalidImmediate(format!("invalid csr uimm '{t}'"))
-        })?
+        u32::from_str_radix(hex, 16)
+            .map_err(|_| RV32IMEncodeError::InvalidImmediate(format!("invalid csr uimm '{t}'")))?
     } else {
-        t.parse::<u32>().map_err(|_| {
-            RV32IMEncodeError::InvalidImmediate(format!("invalid csr uimm '{t}'"))
-        })?
+        t.parse::<u32>()
+            .map_err(|_| RV32IMEncodeError::InvalidImmediate(format!("invalid csr uimm '{t}'")))?
     };
     if v > 31 {
-        return Err(RV32IMEncodeError::InvalidImmediate(format!(
-            "csr uimm must be 0-31, got {v}"
-        )));
+        return Err(RV32IMEncodeError::InvalidImmediate(format!("csr uimm must be 0-31, got {v}")));
     }
     Ok(v)
 }
@@ -813,11 +792,7 @@ fn encode_from_parts(
                     | (rd << 7)
                     | op
             } else {
-                (((imm as u32) & 0xFFF) << 20)
-                    | (rs1 << 15)
-                    | (f3 << 12)
-                    | (rd << 7)
-                    | op
+                (((imm as u32) & 0xFFF) << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | op
             }
         }
         RV32IMFormat::S => {
@@ -988,7 +963,9 @@ fn decode_system_instruction(word: u32) -> Option<RV32IMInstruction> {
         }
     }
 
-    if opcode == 0x73 && (funct3 == 1 || funct3 == 2 || funct3 == 3 || funct3 == 5 || funct3 == 6 || funct3 == 7) {
+    if opcode == 0x73
+        && (funct3 == 1 || funct3 == 2 || funct3 == 3 || funct3 == 5 || funct3 == 6 || funct3 == 7)
+    {
         let csr = (word >> 20) & 0xfff;
         let mnemonic = match funct3 {
             1 => "csrrw",

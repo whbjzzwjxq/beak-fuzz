@@ -5,17 +5,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use libafl::prelude::*;
-use libafl_bolts::rands::StdRand;
-use libafl_bolts::tuples::tuple_list;
-use libafl_bolts::Named;
 use crate::fuzz::jsonl::{BugRecord, CorpusRecord, JsonlWriter, RunRecord};
 use crate::fuzz::seed::FuzzingSeed;
 use crate::rv32im::instruction::RV32IMInstruction;
 use crate::rv32im::oracle::{OracleConfig, RISCVOracle};
 use crate::trace::{
-    BucketHit, TraceSignal, sorted_signatures_from_hits, sorted_signatures_from_signals,
+    sorted_signatures_from_hits, sorted_signatures_from_signals, BucketHit, TraceSignal,
 };
+use libafl::prelude::*;
+use libafl_bolts::rands::StdRand;
+use libafl_bolts::tuples::tuple_list;
+use libafl_bolts::Named;
 
 use super::bandit;
 use super::mutators::{SeedMutator, SEED_MUTATOR_NUM_ARMS};
@@ -53,6 +53,10 @@ pub struct Loop1Outputs {
     pub corpus_path: PathBuf,
     pub bugs_path: PathBuf,
     pub runs_path: Option<PathBuf>,
+}
+
+fn is_baseline_mismatch(stats: &RunStats) -> bool {
+    !stats.injected_phase && !stats.mismatch_regs.is_empty()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -164,10 +168,8 @@ fn eval_once<B: LoopBackend>(
     let signal_sigs = sorted_signatures_from_signals(&eval.trace_signals);
     let sig = canonical_bucket_sig(&bucket_sigs);
     let signal_sig = canonical_bucket_sig(&signal_sigs);
-    let backend_timed_out = backend_error
-        .as_deref()
-        .map(|e| e.contains("timed out"))
-        .unwrap_or(false);
+    let backend_timed_out =
+        backend_error.as_deref().map(|e| e.contains("timed out")).unwrap_or(false);
     let timed_out = start.elapsed() > timeout || backend_timed_out;
 
     RunStats {
@@ -313,7 +315,12 @@ struct BucketNoveltyFeedback {
 }
 
 impl BucketNoveltyFeedback {
-    fn new(corpus_writer: JsonlWriter, bug_writer: JsonlWriter, run_writer: JsonlWriter, cfg: Loop1Config) -> Self {
+    fn new(
+        corpus_writer: JsonlWriter,
+        bug_writer: JsonlWriter,
+        run_writer: JsonlWriter,
+        cfg: Loop1Config,
+    ) -> Self {
         Self {
             seen: HashSet::new(),
             seen_bucket_ids: HashSet::new(),
@@ -356,15 +363,15 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
         }
 
         let underconstrained_candidate = stats.underconstrained_candidate;
-        let mismatch = !stats.mismatch_regs.is_empty();
+        let baseline_mismatch = is_baseline_mismatch(&stats);
         let has_exception = !stats.injected_phase
             && (stats.timed_out || stats.backend_error.is_some() || stats.oracle_error.is_some());
-        let is_bug = mismatch || has_exception || underconstrained_candidate;
+        let is_bug = baseline_mismatch || has_exception || underconstrained_candidate;
         if is_bug {
             let words = decode_words_from_input(input, 2048);
             let kind = if has_exception {
                 "exception"
-            } else if mismatch {
+            } else if baseline_mismatch {
                 "mismatch"
             } else {
                 "underconstrained_candidate"
@@ -400,7 +407,11 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
                     backend_error: stats.backend_error.clone(),
                     oracle_error: stats.oracle_error.clone(),
                     bucket_hits: stats.bucket_hits.clone(),
-                    mismatch_regs: if mismatch { stats.mismatch_regs.clone() } else { Vec::new() },
+                    mismatch_regs: if baseline_mismatch {
+                        stats.mismatch_regs.clone()
+                    } else {
+                        Vec::new()
+                    },
                     instructions: words,
                     metadata: serde_json::json!({
                         "kind": kind,
@@ -467,7 +478,7 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
             rng_seed: self.cfg.rng_seed,
             timeout_ms: self.cfg.timeout_ms,
             timed_out: stats.timed_out,
-            mismatch: !stats.mismatch_regs.is_empty(),
+            mismatch: baseline_mismatch,
             bucket_hits_sig: sig,
             signal_sig: stats.signal_sig.clone(),
             instructions: words,
@@ -566,8 +577,12 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     let corpus = InMemoryCorpus::<BytesInput>::new();
     let solutions = InMemoryCorpus::<BytesInput>::new();
 
-    let mut feedback =
-        BucketNoveltyFeedback::new(corpus_writer.clone(), bug_writer.clone(), run_writer.clone(), cfg.clone());
+    let mut feedback = BucketNoveltyFeedback::new(
+        corpus_writer.clone(),
+        bug_writer.clone(),
+        run_writer.clone(),
+        cfg.clone(),
+    );
     let mut objective = NeverObjective::new();
     let mut state: LoopState =
         StdState::new(rand, corpus, solutions, &mut feedback, &mut objective)
@@ -617,7 +632,11 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
             return ExitKind::Ok;
         }
         if cfg.precheck_oracle_max_steps > 0 {
-            let pre = RISCVOracle::execute_with_step_limit(&words, cfg.oracle, cfg.precheck_oracle_max_steps);
+            let pre = RISCVOracle::execute_with_step_limit(
+                &words,
+                cfg.oracle,
+                cfg.precheck_oracle_max_steps,
+            );
             if pre.hit_step_limit {
                 eprintln!(
                     "[LOOP1][WARN] skip seed: oracle precheck hit step limit (steps={} limit={} words={})",
@@ -668,7 +687,8 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
                     }
 
                     backend.clear_direct_injection();
-                    let Some(inject_kind) = backend.arm_direct_injection_from_hits(&filtered_hits) else {
+                    let Some(inject_kind) = backend.arm_direct_injection_from_hits(&filtered_hits)
+                    else {
                         continue;
                     };
 
@@ -678,11 +698,10 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
                     injected.direct_injection_kind = Some(inject_kind);
                     injected.target_buckets = vec![bucket_id.clone()];
                     injected.baseline_bucket_hits_sig = Some(baseline.bucket_hits_sig.clone());
-                    injected.underconstrained_candidate =
-                        baseline.backend_error.is_none()
-                            && baseline.oracle_error.is_none()
-                            && injected.backend_error.is_none()
-                            && injected.oracle_error.is_none();
+                    injected.underconstrained_candidate = baseline.backend_error.is_none()
+                        && baseline.oracle_error.is_none()
+                        && injected.backend_error.is_none()
+                        && injected.oracle_error.is_none();
 
                     if injected.underconstrained_candidate {
                         // Mark resolved only for true underconstrained signals.
@@ -749,11 +768,7 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
 
     let initial_count = state.corpus().count();
     for idx in 0..initial_count {
-        eprintln!(
-            "[LOOP1][initial {}/{}] evaluating seed corpus entry",
-            idx + 1,
-            initial_count
-        );
+        eprintln!("[LOOP1][initial {}/{}] evaluating seed corpus entry", idx + 1, initial_count);
         let id = CorpusId::from(idx);
         let Ok(tc_cell) = state.corpus().get(id) else { continue };
         let tc = tc_cell.borrow();
@@ -769,8 +784,10 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
         let s = LAST_RUN.lock().unwrap().clone();
         let kind = if s.underconstrained_candidate {
             "underconstrained_candidate"
-        } else if !s.mismatch_regs.is_empty() {
+        } else if is_baseline_mismatch(&s) {
             "mismatch"
+        } else if s.injected_phase && !s.mismatch_regs.is_empty() {
+            "injected_mismatch"
         } else if s.timed_out || s.backend_error.is_some() || s.oracle_error.is_some() {
             "exception"
         } else if s.skip_reason.is_some() {
@@ -794,9 +811,5 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     bug_writer.flush()?;
     run_writer.flush()?;
 
-    Ok(Loop1Outputs {
-        corpus_path,
-        bugs_path,
-        runs_path: Some(runs_path),
-    })
+    Ok(Loop1Outputs { corpus_path, bugs_path, runs_path: Some(runs_path) })
 }

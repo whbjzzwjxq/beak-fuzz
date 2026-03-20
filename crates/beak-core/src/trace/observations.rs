@@ -70,8 +70,19 @@ pub struct MemoryImmediateSignObservation {
     pub op_idx: u64,
     pub kind: String,
     pub chip_name: String,
+    pub op: u32,
     pub imm: i32,
     pub imm_sign: bool,
+    pub rs1_ptr: u32,
+    pub rd_rs2_ptr: u32,
+    pub mem_as: u32,
+    pub effective_ptr: u32,
+    pub alt_effective_ptr: u32,
+    pub alt_ptr_delta: i32,
+    pub alt_ptr_in_range_29: bool,
+    pub is_load: bool,
+    pub is_store: bool,
+    pub needs_write: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +106,17 @@ pub struct BoundaryOriginObservation {
 }
 
 #[derive(Debug, Clone)]
+pub struct TimestampedLoadPathObservation {
+    pub step_idx: u64,
+    pub op_idx: u64,
+    pub kind: String,
+    pub chip_name: String,
+    pub timestamp: Option<u32>,
+    pub is_load: bool,
+    pub is_store: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct VolatileBoundaryObservation {
     pub step_idx: u64,
     pub op_idx: u64,
@@ -108,4 +130,40 @@ pub struct ArithmeticSpecialCaseObservation {
     pub op_idx: u64,
     pub rs1: u32,
     pub rs2: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ZeroRegisterWriteObservation {
+    pub op_idx: u64,
+    pub pc: u64,
+    pub raw_word: u32,
+    pub mnemonic: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RdBitDecompositionObservation {
+    pub op_idx: u64,
+    pub pc: u64,
+    pub raw_word: u32,
+    pub rd: u32,
+    pub mnemonic: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DivisionInsnObservation {
+    pub op_idx: u64,
+    pub pc: u64,
+    pub raw_word: u32,
+    pub mnemonic: String,
+    pub rd: u32,
+    pub rs1: u32,
+    pub rs2: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct EcallInsnObservation {
+    pub op_idx: u64,
+    pub pc: u64,
+    pub raw_word: u32,
+    pub mnemonic: String,
 }

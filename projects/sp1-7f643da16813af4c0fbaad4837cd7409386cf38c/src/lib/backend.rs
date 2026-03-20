@@ -11,11 +11,13 @@ use beak_core::fuzz::benchmark::{
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic};
 use serde::{Deserialize, Serialize};
+use sp1_core_machine::utils::run_test;
 use sp1_core_executor::{
-    ExecutionRecord, Executor, ExecutorMode, Opcode, Register, events::MemoryRecordEnum,
+    ExecutionRecord, Executor, ExecutorMode, Opcode, Register,
+    events::{CpuEvent, MemoryRecordEnum},
 };
 use sp1_prover::SP1Prover;
-use sp1_stark::{MachineProver, SP1CoreOpts, StarkGenericConfig};
+use sp1_stark::{CpuProver, MachineProver, SP1CoreOpts, StarkGenericConfig};
 
 use crate::trace::{Sp1Trace, build_sp1_program};
 
@@ -67,6 +69,7 @@ struct RealRunnerResponse {
 
 const TIMESTAMP_INJECT_KIND: &str = "sp1.audit_timestamp.mem_row_wraparound";
 const BOOL_INJECT_KIND: &str = "sp1.audit_multiplicity_bool_constraint.local_event_row";
+const S26_INJECT_KIND: &str = "sp1.audit_s26.padding_send_to_table_nonzero";
 const S27_INJECT_KIND: &str = "sp1.audit_s27.is_memory_lw_zero";
 const S28_INJECT_KIND: &str = "sp1.audit_s28.next_pc_ecall_arbitrary";
 
@@ -102,25 +105,97 @@ fn record_site(sites: &mut BTreeMap<String, Vec<u64>>, kind: &str, step: u64) {
 
 fn collect_observed_injection_sites(records: &[ExecutionRecord]) -> BTreeMap<String, Vec<u64>> {
     let mut sites = BTreeMap::<String, Vec<u64>>::new();
+    if records.iter().any(|record| !record.syscall_events.is_empty()) {
+        record_site(&mut sites, S26_INJECT_KIND, 0);
+    }
     let mut flat_cpu_idx = 0u64;
     for record in records {
         for event in &record.cpu_events {
-            if event.memory_record.is_some() {
+            let instruction = record.program.fetch(event.pc);
+            if event.a_record.is_some() || event.b_record.is_some() || event.c_record.is_some() {
                 record_site(&mut sites, TIMESTAMP_INJECT_KIND, flat_cpu_idx);
             }
-            if matches!(event.memory_record.as_ref(), Some(MemoryRecordEnum::Write(_))) {
+            if has_write_record(event) {
                 record_site(&mut sites, BOOL_INJECT_KIND, flat_cpu_idx);
             }
-            if event.instruction.opcode == Opcode::LW {
+            if instruction.opcode == Opcode::LW {
                 record_site(&mut sites, S27_INJECT_KIND, flat_cpu_idx);
             }
-            if event.instruction.opcode == Opcode::ECALL {
+            if instruction.opcode == Opcode::ECALL {
                 record_site(&mut sites, S28_INJECT_KIND, flat_cpu_idx);
             }
             flat_cpu_idx = flat_cpu_idx.saturating_add(1);
         }
     }
     sites
+}
+
+fn has_write_record(event: &CpuEvent) -> bool {
+    matches!(event.a_record, Some(MemoryRecordEnum::Write(_)))
+        || matches!(event.b_record, Some(MemoryRecordEnum::Write(_)))
+        || matches!(event.c_record, Some(MemoryRecordEnum::Write(_)))
+}
+
+fn first_memory_record_mut(event: &mut CpuEvent) -> Option<&mut MemoryRecordEnum> {
+    if event.a_record.is_some() {
+        event.a_record.as_mut()
+    } else if event.b_record.is_some() {
+        event.b_record.as_mut()
+    } else {
+        event.c_record.as_mut()
+    }
+}
+
+fn resolve_witness_injection_step(
+    inject_kind: Option<&str>,
+    inject_step: u64,
+    observed_injection_sites: &BTreeMap<String, Vec<u64>>,
+) -> Option<u64> {
+    let kind = inject_kind?;
+    if base_inject_kind(kind) != S26_INJECT_KIND {
+        return None;
+    }
+    let steps = observed_injection_sites.get(S26_INJECT_KIND)?;
+    if inject_step == u64::MAX {
+        steps.first().copied()
+    } else if steps.contains(&inject_step) {
+        Some(inject_step)
+    } else {
+        None
+    }
+}
+
+fn with_scoped_witness_injection_env<T>(
+    inject_kind: Option<&str>,
+    inject_step: Option<u64>,
+    f: impl FnOnce() -> T,
+) -> T {
+    let prev_kind = std::env::var("BEAK_SP1_WITNESS_INJECT_KIND").ok();
+    let prev_step = std::env::var("BEAK_SP1_WITNESS_INJECT_STEP").ok();
+
+    match (inject_kind, inject_step) {
+        (Some(kind), Some(step)) => {
+            std::env::set_var("BEAK_SP1_WITNESS_INJECT_KIND", kind);
+            std::env::set_var("BEAK_SP1_WITNESS_INJECT_STEP", step.to_string());
+        }
+        _ => {
+            std::env::remove_var("BEAK_SP1_WITNESS_INJECT_KIND");
+            std::env::remove_var("BEAK_SP1_WITNESS_INJECT_STEP");
+        }
+    }
+
+    let result = f();
+
+    match prev_kind {
+        Some(v) => std::env::set_var("BEAK_SP1_WITNESS_INJECT_KIND", v),
+        None => std::env::remove_var("BEAK_SP1_WITNESS_INJECT_KIND"),
+    }
+    match prev_step {
+        Some(v) => std::env::set_var("BEAK_SP1_WITNESS_INJECT_STEP", v),
+        None => std::env::remove_var("BEAK_SP1_WITNESS_INJECT_STEP"),
+    }
+
+    result
 }
 
 fn apply_injection_to_records(
@@ -147,6 +222,7 @@ fn apply_injection_to_records(
     let target_step = if inject_step == u64::MAX { None } else { Some(inject_step) };
     for record in records.iter_mut() {
         for event in &mut record.cpu_events {
+            let instruction = record.program.fetch(event.pc);
             let step_match = target_step.map(|s| s == flat_cpu_idx).unwrap_or(true);
             if !step_match {
                 flat_cpu_idx = flat_cpu_idx.saturating_add(1);
@@ -156,7 +232,7 @@ fn apply_injection_to_records(
                 // Simulate timestamp wraparound style witness corruption on memory accesses.
                 TIMESTAMP_INJECT_KIND => {
                     event.clk = event.clk.wrapping_add(u32::MAX);
-                    if let Some(mem) = event.memory_record.as_mut() {
+                    if let Some(mem) = first_memory_record_mut(event) {
                         match mem {
                             MemoryRecordEnum::Read(r) => {
                                 r.prev_timestamp = r.timestamp;
@@ -173,29 +249,39 @@ fn apply_injection_to_records(
                 }
                 // Simulate local-event multiplicity corruption.
                 BOOL_INJECT_KIND => {
-                    if let Some(MemoryRecordEnum::Write(w)) = event.memory_record.as_mut() {
+                    if let Some(MemoryRecordEnum::Write(w)) = event.a_record.as_mut() {
+                        w.value ^= 1;
+                        return true;
+                    }
+                    if let Some(MemoryRecordEnum::Write(w)) = event.b_record.as_mut() {
+                        w.value ^= 1;
+                        return true;
+                    }
+                    if let Some(MemoryRecordEnum::Write(w)) = event.c_record.as_mut() {
                         w.value ^= 1;
                         return true;
                     }
                 }
                 // s27: force LW row to look non-memory by breaking opcode->memory selector relation.
                 S27_INJECT_KIND => {
-                    if event.instruction.opcode == Opcode::LW {
+                    if instruction.opcode == Opcode::LW {
                         match inject_variant_mode(kind) {
                             Some("noop_prefix") => {}
                             Some("opcode_alias_only") => {
-                                event.instruction.opcode = Opcode::ADD;
+                                event.a = 0;
                                 return true;
                             }
                             Some("memory_drop_only") => {
-                                event.memory = None;
-                                event.memory_record = None;
+                                event.a_record = None;
+                                event.b_record = None;
+                                event.c_record = None;
                                 return true;
                             }
                             _ => {
-                                event.instruction.opcode = Opcode::ADD;
-                                event.memory = None;
-                                event.memory_record = None;
+                                event.a = 0;
+                                event.a_record = None;
+                                event.b_record = None;
+                                event.c_record = None;
                                 return true;
                             }
                         }
@@ -203,7 +289,7 @@ fn apply_injection_to_records(
                 }
                 // s28: forge an arbitrary ECALL next_pc.
                 S28_INJECT_KIND => {
-                    if event.instruction.opcode == Opcode::ECALL {
+                    if instruction.opcode == Opcode::ECALL {
                         match inject_variant_mode(kind) {
                             Some("noop_prefix") => {}
                             Some("near_jump") => {
@@ -238,7 +324,6 @@ fn run_sp1_real_backend(
     inject_kind: Option<&str>,
     inject_step: u64,
 ) -> Result<RealRunnerResponse, String> {
-    let prover: SP1Prover = SP1Prover::new();
     let program = build_sp1_program(words)?;
     let mut executor = Executor::new(program, SP1CoreOpts::default());
     executor.executor_mode = ExecutorMode::Trace;
@@ -246,19 +331,30 @@ fn run_sp1_real_backend(
 
     let mut records = std::mem::take(&mut executor.records);
     let observed_injection_sites = collect_observed_injection_sites(&records);
-    let injection_applied = apply_injection_to_records(
+    let mut injection_applied = apply_injection_to_records(
         &mut records,
         inject_kind,
         inject_step,
         &observed_injection_sites,
     );
+    let witness_injection_step =
+        resolve_witness_injection_step(inject_kind, inject_step, &observed_injection_sites);
+    if witness_injection_step.is_some() && inject_kind.map(base_inject_kind) == Some(S26_INJECT_KIND) {
+        injection_applied = true;
+    }
     let trace = Sp1Trace::from_execution_records(words, &records)?;
-    let (prove_ok, verify_ok, prove_verify_error) =
-        run_sp1_prove_verify_with_prover(&prover, &executor.program, &records);
+    let use_official_run_test =
+        inject_kind.is_none() || inject_kind.map(base_inject_kind) == Some(S26_INJECT_KIND);
+    let (prove_ok, verify_ok, prove_verify_error) = if use_official_run_test {
+        run_sp1_prove_verify_with_run_test(&executor.program, inject_kind, witness_injection_step)
+    } else {
+        let prover: SP1Prover = SP1Prover::new();
+        run_sp1_prove_verify_with_prover(&prover, &executor.program, &records)
+    };
 
     let mut regs = [0u32; 32];
     for i in 0..32usize {
-        regs[i] = executor.register(Register::from_u32(i as u32));
+        regs[i] = executor.register(Register::from_u8(i as u8));
     }
 
     Ok(RealRunnerResponse {
@@ -304,6 +400,23 @@ fn run_sp1_prove_verify_with_prover(
     }
 
     (true, true, None)
+}
+
+fn run_sp1_prove_verify_with_run_test(
+    program: &sp1_core_executor::Program,
+    inject_kind: Option<&str>,
+    witness_injection_step: Option<u64>,
+) -> (bool, bool, Option<String>) {
+    let prove_result = with_scoped_witness_injection_env(
+        inject_kind.filter(|kind| base_inject_kind(kind) == S26_INJECT_KIND),
+        witness_injection_step,
+        || run_test::<CpuProver<_, _>>(program.clone()),
+    );
+
+    match prove_result {
+        Ok(_) => (true, true, None),
+        Err(e) => (true, false, Some(format!("sp1 run_test prove/verify failed: {e}"))),
+    }
 }
 
 pub fn run_backend_once(
@@ -447,12 +560,14 @@ impl Sp1Backend {
 
     fn semantic_candidate_priority(candidate: &SemanticInjectionCandidate) -> u8 {
         let bucket_id = candidate.bucket_id.as_str();
-        if bucket_id == semantic::control::ECALL_NEXT_PC.id {
+        if bucket_id == semantic::row::PADDING_INTERACTION_SEND.id {
             0
-        } else if bucket_id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id {
+        } else if bucket_id == semantic::control::ECALL_NEXT_PC.id {
             1
-        } else {
+        } else if bucket_id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id {
             2
+        } else {
+            3
         }
     }
 
@@ -460,7 +575,13 @@ impl Sp1Backend {
         let anchor = Self::step_from_hit(hit);
         let bucket_id = hit.bucket_id.as_str();
         let (semantic_class, inject_kind, fallback_schedule) =
-            if bucket_id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id {
+            if bucket_id == semantic::row::PADDING_INTERACTION_SEND.id {
+                (
+                    semantic::row::PADDING_INTERACTION_SEND.semantic_class,
+                    S26_INJECT_KIND,
+                    InjectionSchedule::Exact(0),
+                )
+            } else if bucket_id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id {
                 (
                     semantic::memory::KIND_SELECTOR_CONSISTENCY.semantic_class,
                     S27_INJECT_KIND,
@@ -569,6 +690,7 @@ impl Sp1Backend {
         }
     }
 }
+
 
 impl BenchmarkBackend for Sp1Backend {
     fn is_usable_seed(&self, words: &[u32]) -> bool {

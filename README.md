@@ -143,12 +143,16 @@ make pico-fuzz \
 Note: Pico currently uses an OpenVM-compatible Rust CLI surface for loop1/loop2 orchestration, but its
 backend replay/injection path is still partial (not yet equivalent to OpenVM backend completeness).
 
-## 6) SP1 Audit Workflow (7f64 / 811a commits)
+## 6) SP1 Audit Workflow (7f64 / 811a / 39ab commits)
 
 SP1 commits from benchmark CSV:
 
 - `7f643da16813af4c0fbaad4837cd7409386cf38c`
 - `811a3f2c03914088c7c9e1774266934a3f9f5359`
+
+SP1 latest-audit vulnerable commit:
+
+- `39ab52fce38172c9d23feed7248198dc14c164a9` (`[High] is_memory underconstrained`, fixed by `185d266233e09a15bc3d5d077d36b714d5d55084`)
 
 Install snapshot:
 
@@ -175,4 +179,12 @@ make sp1-fuzz \
   SP1_COMMIT=811a3f2c03914088c7c9e1774266934a3f9f5359 \
   SP1_ITERS=1000 \
   SP1_CHAIN_DIRECT_INJECTION=1
+```
+
+Convenience targets for the real v4 audit snapshot:
+
+```bash
+make sp1-install-v4
+make sp1-build-v4
+make sp1-fuzz-v4
 ```

@@ -1,0 +1,26 @@
+[package]
+name = "beak-sp1-39ab52fc"
+version = "0.1.0"
+edition = "2021"
+description = "SP1-specific beak binaries (commit 39ab52fc)"
+publish = false
+
+[lib]
+path = "src/lib/mod.rs"
+
+[[bin]]
+name = "beak-fuzz"
+path = "src/bin/fuzz.rs"
+
+[[bin]]
+name = "beak-trace"
+path = "src/bin/trace.rs"
+
+[dependencies]
+beak-core = { path = "../../crates/beak-core" }
+clap = "4.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sp1-core-executor = { path = "../../beak-py/out/sp1-39ab52fce38172c9d23feed7248198dc14c164a9/sp1-src/crates/core/executor" }
+sp1-core-machine = { path = "../../beak-py/out/sp1-39ab52fce38172c9d23feed7248198dc14c164a9/sp1-src/crates/core/machine" }
+sp1-stark = { path = "../../beak-py/out/sp1-39ab52fce38172c9d23feed7248198dc14c164a9/sp1-src/crates/stark" }

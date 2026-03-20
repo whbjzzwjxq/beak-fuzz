@@ -29,7 +29,7 @@ fn main() {
         .arg(
             Arg::new("oracle_memory_model")
                 .long("oracle-memory-model")
-                .default_value("split-code-data")
+                .default_value("shared-code-data")
                 .help("Oracle memory model: shared-code-data | split-code-data."),
         )
         .arg(
@@ -191,4 +191,3 @@ fn parse_u32_arg(value: &str, name: &str) -> u32 {
         s.parse::<u32>().unwrap_or_else(|_| panic!("invalid {name}: {value}"))
     }
 }
-
