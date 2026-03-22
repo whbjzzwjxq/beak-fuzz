@@ -8,7 +8,7 @@ Current semantic coverage:
 
 - `sem.decode.upper_immediate_materialization`
   - generalized class: `semantic.decode.upper_immediate_materialization`
-  - injection family: `jolt.audit_decode.upper_immediate_materialization`
+  - injection family: `jolt.semantic.decode.upper_immediate_materialization`
 
 The current backend executes the real Jolt emulator and drives semantic trace-row
 search end-to-end through the real Jolt `prover_preprocess -> prove -> verify`

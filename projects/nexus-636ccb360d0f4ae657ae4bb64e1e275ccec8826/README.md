@@ -8,10 +8,10 @@ Current semantic coverage:
 
 - `sem.memory.write_payload_consistency`
   - generalized class: `semantic.memory.write_payload_flow_consistency`
-  - injection family: `nexus.audit_memory.store_payload_trace`
+  - injection family: `nexus.semantic.memory.write_payload_trace`
 - `sem.memory.store_load_payload_flow`
   - generalized class: `semantic.memory.write_payload_flow_consistency`
-  - injection family: `nexus.audit_memory.store_payload_trace`
+  - injection family: `nexus.semantic.memory.write_payload_trace`
 
 Minimal smoke checks:
 

@@ -13,36 +13,6 @@ from zkvm_fuzzer_utils.git import (
 logger = logging.getLogger("fuzzer")
 
 
-def _assets_root() -> Path:
-    return Path(__file__).resolve().parent / "assets"
-
-
-def apply_beak_risc0_patches(zkvm_src: Path) -> None:
-    asset_root = _assets_root()
-    prove_dir = zkvm_src / "risc0/circuit/rv32im/src/prove"
-    prove_dir.mkdir(parents=True, exist_ok=True)
-    witgen_mod = prove_dir / "witgen/mod.rs"
-
-    beak_src = asset_root / "risc0/circuit/rv32im/src/prove/beak.rs"
-    if witgen_mod.exists():
-        witgen_mod_contents = witgen_mod.read_text(encoding="utf-8")
-        if "pub struct PreflightResults" not in witgen_mod_contents:
-            beak_src = asset_root / "risc0/circuit/rv32im/src/prove/beak_legacy.rs"
-    beak_dst = prove_dir / "beak.rs"
-    shutil.copyfile(beak_src, beak_dst)
-
-    mod_rs = prove_dir / "mod.rs"
-    contents = mod_rs.read_text(encoding="utf-8")
-    marker = "pub mod beak;\n"
-    if marker not in contents:
-        anchor = "#[cfg(test)]\nmod tests;\n"
-        if anchor in contents:
-            contents = contents.replace(anchor, anchor + marker, 1)
-        else:
-            contents = marker + contents
-        mod_rs.write_text(contents, encoding="utf-8")
-
-
 def clone_and_checkout_risc0(
     *, dest: Path, commit_or_branch: str, zkvm_src: Path | None = None
 ) -> Path:
@@ -65,5 +35,4 @@ def clone_and_checkout_risc0(
             shutil.rmtree(dest, ignore_errors=True)
             git_clone_and_switch(dest, repo, resolved)
 
-    apply_beak_risc0_patches(dest)
     return dest

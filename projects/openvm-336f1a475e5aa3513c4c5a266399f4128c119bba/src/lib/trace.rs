@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 
 use beak_core::trace::observations::{
     ArithmeticSpecialCaseObservation, AuipcPcLimbObservation, BoundaryOriginObservation,
-    ImmediateLimbObservation, MemoryAddressSpaceObservation, MemoryImmediateSignObservation,
-    TimestampedLoadPathObservation, VolatileBoundaryObservation, XorMultiplicityObservation,
+    ImmediateLimbObservation, MemoryImmediateSignObservation, TimestampedLoadPathObservation,
+    VolatileBoundaryObservation, XorMultiplicityObservation,
 };
-use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic, semantic_matchers};
+use beak_core::trace::{semantic, semantic_matchers, BucketHit, Trace, TraceSignal};
 use serde_json::Value;
 
 use crate::chip_row::{OpenVMChipRow, OpenVMChipRowKind, OpenVMChipRowPayload, Rs2Source};
@@ -41,9 +41,7 @@ pub struct OpenVMTrace {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenVmMemoryObservationProfile {
-    None,
     ImmediateSign,
-    AddressSpace,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -109,7 +107,6 @@ fn derive_semantic_feedback(
     let mut xor_multiplicity = Vec::new();
     let mut auipc_pc_limb = Vec::new();
     let mut memory_immediate_sign = Vec::new();
-    let mut memory_address_space = Vec::new();
     let mut boundary_origin = Vec::new();
     let mut timestamped_load_path = Vec::new();
     let mut volatile_boundary = Vec::new();
@@ -254,16 +251,6 @@ fn derive_semantic_feedback(
                             needs_write: *needs_write,
                         });
                     }
-                    OpenVmMemoryObservationProfile::AddressSpace => {
-                        memory_address_space.push(MemoryAddressSpaceObservation {
-                            step_idx: base.step_idx,
-                            op_idx: base.op_idx,
-                            kind: kind.clone(),
-                            chip_name: base.chip_name.clone(),
-                            mem_as: *mem_as,
-                        });
-                    }
-                    OpenVmMemoryObservationProfile::None => {}
                 }
             }
             OpenVMChipRowPayload::LoadSignExtend {
@@ -313,16 +300,6 @@ fn derive_semantic_feedback(
                             needs_write: *needs_write,
                         });
                     }
-                    OpenVmMemoryObservationProfile::AddressSpace => {
-                        memory_address_space.push(MemoryAddressSpaceObservation {
-                            step_idx: base.step_idx,
-                            op_idx: base.op_idx,
-                            kind: kind.clone(),
-                            chip_name: base.chip_name.clone(),
-                            mem_as: *mem_as,
-                        });
-                    }
-                    OpenVmMemoryObservationProfile::None => {}
                 }
             }
             OpenVMChipRowPayload::Connector {
@@ -360,8 +337,6 @@ fn derive_semantic_feedback(
     bucket_hits.extend(semantic_matchers::match_memory_immediate_sign_semantic_hits(
         &memory_immediate_sign,
     ));
-    bucket_hits
-        .extend(semantic_matchers::match_memory_address_space_semantic_hits(&memory_address_space));
     bucket_hits.extend(semantic_matchers::match_boundary_origin_semantic_hits(&boundary_origin));
     bucket_hits.extend(semantic_matchers::match_timestamped_load_path_semantic_hits(
         &timestamped_load_path,

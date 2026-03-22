@@ -14,7 +14,13 @@ pub struct SequenceSemanticMatcherProfile {
     pub emit_boolean_on_load_after_store: bool,
     pub emit_kind_selector: bool,
     pub emit_digest_route: bool,
-    pub emit_ecall_next_pc: bool,
+    pub emit_control_flow_bindings: bool,
+    pub emit_memory_alignment: bool,
+    pub emit_memory_address_progression: bool,
+    pub emit_load_value_binding: bool,
+    pub emit_opcode_selector_bindings: bool,
+    pub emit_partial_word_write: bool,
+    pub emit_ecall_word_validity: bool,
 }
 
 #[derive(Debug, Clone)]

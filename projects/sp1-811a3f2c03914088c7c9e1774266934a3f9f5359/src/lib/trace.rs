@@ -45,6 +45,17 @@ fn op_u32_to_i32(v: u32) -> i32 {
     v as i32
 }
 
+fn req_reg_u8(name: &str, mnemonic: &str, value: Option<u32>) -> Result<u8, String> {
+    let reg = value.ok_or_else(|| format!("missing {name} for {mnemonic}"))?;
+    u8::try_from(reg).map_err(|_| format!("register {name}={reg} does not fit in u8 for {mnemonic}"))
+}
+
+fn word_for_pc(words: &[u32], program: &Program, pc: u32) -> Option<u32> {
+    let offset = pc.checked_sub(program.pc_base)?;
+    let idx = (offset / 4) as usize;
+    words.get(idx).copied()
+}
+
 pub fn build_sp1_program(words: &[u32]) -> Result<Program, String> {
     let mut instructions = Vec::with_capacity(words.len());
     for (idx, &word) in words.iter().enumerate() {
@@ -65,53 +76,54 @@ pub fn decode_word_to_sp1_instruction(word: u32) -> Result<SP1Instruction, Strin
     let req_imm = |v: Option<i32>| -> Result<i32, String> {
         v.ok_or_else(|| format!("missing imm for {m}"))
     };
+    let req_reg = |name: &str, v: Option<u32>| -> Result<u8, String> { req_reg_u8(name, m, v) };
 
     let insn = match m {
-        "add" => SP1Instruction::new(Opcode::ADD, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "addi" => SP1Instruction::new(Opcode::ADD, req("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sub" => SP1Instruction::new(Opcode::SUB, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "xor" => SP1Instruction::new(Opcode::XOR, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "xori" => SP1Instruction::new(Opcode::XOR, req("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "or" => SP1Instruction::new(Opcode::OR, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "ori" => SP1Instruction::new(Opcode::OR, req("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "and" => SP1Instruction::new(Opcode::AND, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "andi" => SP1Instruction::new(Opcode::AND, req("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sll" => SP1Instruction::new(Opcode::SLL, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "slli" => SP1Instruction::new(Opcode::SLL, req("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "srl" => SP1Instruction::new(Opcode::SRL, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "srli" => SP1Instruction::new(Opcode::SRL, req("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sra" => SP1Instruction::new(Opcode::SRA, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "srai" => SP1Instruction::new(Opcode::SRA, req("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "slt" => SP1Instruction::new(Opcode::SLT, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "slti" => SP1Instruction::new(Opcode::SLT, req("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sltu" => SP1Instruction::new(Opcode::SLTU, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "sltiu" => SP1Instruction::new(Opcode::SLTU, req("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lb" => SP1Instruction::new(Opcode::LB, req("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lh" => SP1Instruction::new(Opcode::LH, req("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lw" => SP1Instruction::new(Opcode::LW, req("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lbu" => SP1Instruction::new(Opcode::LBU, req("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lhu" => SP1Instruction::new(Opcode::LHU, req("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sb" => SP1Instruction::new(Opcode::SB, req("rs2", dec.rs2)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sh" => SP1Instruction::new(Opcode::SH, req("rs2", dec.rs2)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sw" => SP1Instruction::new(Opcode::SW, req("rs2", dec.rs2)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "beq" => SP1Instruction::new(Opcode::BEQ, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "bne" => SP1Instruction::new(Opcode::BNE, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "blt" => SP1Instruction::new(Opcode::BLT, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "bge" => SP1Instruction::new(Opcode::BGE, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "bltu" => SP1Instruction::new(Opcode::BLTU, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "bgeu" => SP1Instruction::new(Opcode::BGEU, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "jal" => SP1Instruction::new(Opcode::JAL, req("rd", dec.rd)?, imm_as_u32(req_imm(dec.imm)?), 0, true, true),
-        "jalr" => SP1Instruction::new(Opcode::JALR, req("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lui" => SP1Instruction::new(Opcode::ADD, req("rd", dec.rd)?, 0, imm_as_u32(req_imm(dec.imm)?), true, true),
-        "auipc" => SP1Instruction::new(Opcode::AUIPC, req("rd", dec.rd)?, imm_as_u32(req_imm(dec.imm)?), 0, true, true),
-        "mul" => SP1Instruction::new(Opcode::MUL, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "mulh" => SP1Instruction::new(Opcode::MULH, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "mulhu" => SP1Instruction::new(Opcode::MULHU, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "mulhsu" => SP1Instruction::new(Opcode::MULHSU, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "div" => SP1Instruction::new(Opcode::DIV, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "divu" => SP1Instruction::new(Opcode::DIVU, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "rem" => SP1Instruction::new(Opcode::REM, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "remu" => SP1Instruction::new(Opcode::REMU, req("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "add" => SP1Instruction::new(Opcode::ADD, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "addi" => SP1Instruction::new(Opcode::ADD, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "sub" => SP1Instruction::new(Opcode::SUB, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "xor" => SP1Instruction::new(Opcode::XOR, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "xori" => SP1Instruction::new(Opcode::XOR, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "or" => SP1Instruction::new(Opcode::OR, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "ori" => SP1Instruction::new(Opcode::OR, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "and" => SP1Instruction::new(Opcode::AND, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "andi" => SP1Instruction::new(Opcode::AND, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "sll" => SP1Instruction::new(Opcode::SLL, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "slli" => SP1Instruction::new(Opcode::SLL, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "srl" => SP1Instruction::new(Opcode::SRL, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "srli" => SP1Instruction::new(Opcode::SRL, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "sra" => SP1Instruction::new(Opcode::SRA, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "srai" => SP1Instruction::new(Opcode::SRA, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "slt" => SP1Instruction::new(Opcode::SLT, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "slti" => SP1Instruction::new(Opcode::SLT, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "sltu" => SP1Instruction::new(Opcode::SLTU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "sltiu" => SP1Instruction::new(Opcode::SLTU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "lb" => SP1Instruction::new(Opcode::LB, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "lh" => SP1Instruction::new(Opcode::LH, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "lw" => SP1Instruction::new(Opcode::LW, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "lbu" => SP1Instruction::new(Opcode::LBU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "lhu" => SP1Instruction::new(Opcode::LHU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "sb" => SP1Instruction::new(Opcode::SB, req_reg("rs2", dec.rs2)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "sh" => SP1Instruction::new(Opcode::SH, req_reg("rs2", dec.rs2)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "sw" => SP1Instruction::new(Opcode::SW, req_reg("rs2", dec.rs2)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "beq" => SP1Instruction::new(Opcode::BEQ, req_reg("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "bne" => SP1Instruction::new(Opcode::BNE, req_reg("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "blt" => SP1Instruction::new(Opcode::BLT, req_reg("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "bge" => SP1Instruction::new(Opcode::BGE, req_reg("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "bltu" => SP1Instruction::new(Opcode::BLTU, req_reg("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "bgeu" => SP1Instruction::new(Opcode::BGEU, req_reg("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "jal" => SP1Instruction::new(Opcode::JAL, req_reg("rd", dec.rd)?, imm_as_u32(req_imm(dec.imm)?), 0, true, true),
+        "jalr" => SP1Instruction::new(Opcode::JALR, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
+        "lui" => SP1Instruction::new(Opcode::ADD, req_reg("rd", dec.rd)?, 0, imm_as_u32(req_imm(dec.imm)?), true, true),
+        "auipc" => SP1Instruction::new(Opcode::AUIPC, req_reg("rd", dec.rd)?, imm_as_u32(req_imm(dec.imm)?), 0, true, true),
+        "mul" => SP1Instruction::new(Opcode::MUL, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "mulh" => SP1Instruction::new(Opcode::MULH, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "mulhu" => SP1Instruction::new(Opcode::MULHU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "mulhsu" => SP1Instruction::new(Opcode::MULHSU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "div" => SP1Instruction::new(Opcode::DIV, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "divu" => SP1Instruction::new(Opcode::DIVU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "rem" => SP1Instruction::new(Opcode::REM, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "remu" => SP1Instruction::new(Opcode::REMU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
         // SP1 models ECALL with fixed operand registers x5/x10/x11.
         "ecall" => SP1Instruction::new(Opcode::ECALL, 5, 10, 11, false, false),
         "ebreak" => SP1Instruction::new(Opcode::EBREAK, 0, 0, 0, false, false),
@@ -127,57 +139,77 @@ fn decoded_ops_from_executor_instruction(insn: &SP1Instruction) -> DecodedOps {
         ADD | SUB | XOR | OR | AND | SLL | SRL | SRA | SLT | SLTU | MUL | MULH | MULHU | MULHSU
         | DIV | DIVU | REM | REMU => {
             if insn.imm_c {
+                let (rd, rs1, imm) = insn.i_type();
                 DecodedOps {
-                    rd: Some(insn.op_a),
-                    rs1: Some(insn.op_b),
+                    rd: Some(rd as u32),
+                    rs1: Some(rs1 as u32),
                     rs2: None,
-                    imm: Some(op_u32_to_i32(insn.op_c)),
+                    imm: Some(op_u32_to_i32(imm)),
                 }
             } else {
+                let (rd, rs1, rs2) = insn.r_type();
                 DecodedOps {
-                    rd: Some(insn.op_a),
-                    rs1: Some(insn.op_b),
-                    rs2: Some(insn.op_c),
+                    rd: Some(rd as u32),
+                    rs1: Some(rs1 as u32),
+                    rs2: Some(rs2 as u32),
                     imm: None,
                 }
             }
         }
-        LB | LH | LW | LBU | LHU => DecodedOps {
-            rd: Some(insn.op_a),
-            rs1: Some(insn.op_b),
-            rs2: None,
-            imm: Some(op_u32_to_i32(insn.op_c)),
-        },
-        SB | SH | SW => DecodedOps {
-            rd: None,
-            rs1: Some(insn.op_b),
-            rs2: Some(insn.op_a),
-            imm: Some(op_u32_to_i32(insn.op_c)),
-        },
-        BEQ | BNE | BLT | BGE | BLTU | BGEU => DecodedOps {
-            rd: None,
-            rs1: Some(insn.op_a),
-            rs2: Some(insn.op_b),
-            imm: Some(op_u32_to_i32(insn.op_c)),
-        },
-        JAL => DecodedOps {
-            rd: Some(insn.op_a),
-            rs1: None,
-            rs2: None,
-            imm: Some(op_u32_to_i32(insn.op_b)),
-        },
-        JALR => DecodedOps {
-            rd: Some(insn.op_a),
-            rs1: Some(insn.op_b),
-            rs2: None,
-            imm: Some(op_u32_to_i32(insn.op_c)),
-        },
-        AUIPC => DecodedOps {
-            rd: Some(insn.op_a),
-            rs1: None,
-            rs2: None,
-            imm: Some(op_u32_to_i32(insn.op_b)),
-        },
+        LB | LH | LW | LBU | LHU => {
+            let (rd, rs1, imm) = insn.i_type();
+            DecodedOps {
+                rd: Some(rd as u32),
+                rs1: Some(rs1 as u32),
+                rs2: None,
+                imm: Some(op_u32_to_i32(imm)),
+            }
+        }
+        SB | SH | SW => {
+            let (rs2, rs1, imm) = insn.s_type();
+            DecodedOps {
+                rd: None,
+                rs1: Some(rs1 as u32),
+                rs2: Some(rs2 as u32),
+                imm: Some(op_u32_to_i32(imm)),
+            }
+        }
+        BEQ | BNE | BLT | BGE | BLTU | BGEU => {
+            let (rs1, rs2, imm) = insn.b_type();
+            DecodedOps {
+                rd: None,
+                rs1: Some(rs1 as u32),
+                rs2: Some(rs2 as u32),
+                imm: Some(op_u32_to_i32(imm)),
+            }
+        }
+        JAL => {
+            let (rd, imm) = insn.j_type();
+            DecodedOps {
+                rd: Some(rd as u32),
+                rs1: None,
+                rs2: None,
+                imm: Some(op_u32_to_i32(imm)),
+            }
+        }
+        JALR => {
+            let (rd, rs1, imm) = insn.i_type();
+            DecodedOps {
+                rd: Some(rd as u32),
+                rs1: Some(rs1 as u32),
+                rs2: None,
+                imm: Some(op_u32_to_i32(imm)),
+            }
+        }
+        AUIPC => {
+            let (rd, imm) = insn.u_type();
+            DecodedOps {
+                rd: Some(rd as u32),
+                rs1: None,
+                rs2: None,
+                imm: Some(op_u32_to_i32(imm)),
+            }
+        }
         ECALL | EBREAK | UNIMP => DecodedOps::default(),
     }
 }
@@ -238,7 +270,10 @@ impl Sp1Trace {
         Self::from_execution_records(words, &records)
     }
 
-    pub fn from_execution_records(words: &[u32], records: &[ExecutionRecord]) -> Result<Self, String> {
+    pub fn from_execution_records(
+        words: &[u32],
+        records: &[Box<ExecutionRecord>],
+    ) -> Result<Self, String> {
         let mut instructions = Vec::new();
         let mut chip_rows = Vec::new();
         let mut interactions = Vec::new();
@@ -248,47 +283,11 @@ impl Sp1Trace {
 
         for record in records {
             for cpu in &record.cpu_events {
-                let fallback = words.get(step_idx as usize).copied().unwrap_or_default();
-                let mnemonic = cpu.instruction.opcode.mnemonic().to_string();
+                let exec_insn = record.program.fetch(cpu.pc);
+                let fallback_word = word_for_pc(words, &record.program, cpu.pc);
 
-                let insn = if fallback != 0 {
-                    if let Ok(dec) = RV32IMInstruction::from_word(fallback) {
-                        if dec.mnemonic == mnemonic {
-                            Sp1Insn {
-                                seq,
-                                step_idx,
-                                pc: cpu.pc,
-                                timestamp: cpu.clk,
-                                next_pc: cpu.next_pc,
-                                next_timestamp: cpu.clk.saturating_add(1),
-                                word: dec.word,
-                                mnemonic: dec.mnemonic,
-                                rd: dec.rd,
-                                rs1: dec.rs1,
-                                rs2: dec.rs2,
-                                imm: dec.imm,
-                                asm: dec.asm,
-                            }
-                        } else {
-                            let ops = decoded_ops_from_executor_instruction(&cpu.instruction);
-                            Sp1Insn {
-                                seq,
-                                step_idx,
-                                pc: cpu.pc,
-                                timestamp: cpu.clk,
-                                next_pc: cpu.next_pc,
-                                next_timestamp: cpu.clk.saturating_add(1),
-                                word: fallback,
-                                mnemonic: mnemonic.clone(),
-                                rd: ops.rd,
-                                rs1: ops.rs1,
-                                rs2: ops.rs2,
-                                imm: ops.imm,
-                                asm: asm_from_parts(&mnemonic, ops),
-                            }
-                        }
-                    } else {
-                        let ops = decoded_ops_from_executor_instruction(&cpu.instruction);
+                let insn = if let Some(word) = fallback_word {
+                    if let Ok(dec) = RV32IMInstruction::from_word(word) {
                         Sp1Insn {
                             seq,
                             step_idx,
@@ -296,7 +295,25 @@ impl Sp1Trace {
                             timestamp: cpu.clk,
                             next_pc: cpu.next_pc,
                             next_timestamp: cpu.clk.saturating_add(1),
-                            word: fallback,
+                            word: dec.word,
+                            mnemonic: dec.mnemonic,
+                            rd: dec.rd,
+                            rs1: dec.rs1,
+                            rs2: dec.rs2,
+                            imm: dec.imm,
+                            asm: dec.asm,
+                        }
+                    } else {
+                        let mnemonic = exec_insn.opcode.mnemonic().to_string();
+                        let ops = decoded_ops_from_executor_instruction(exec_insn);
+                        Sp1Insn {
+                            seq,
+                            step_idx,
+                            pc: cpu.pc,
+                            timestamp: cpu.clk,
+                            next_pc: cpu.next_pc,
+                            next_timestamp: cpu.clk.saturating_add(1),
+                            word,
                             mnemonic: mnemonic.clone(),
                             rd: ops.rd,
                             rs1: ops.rs1,
@@ -306,7 +323,8 @@ impl Sp1Trace {
                         }
                     }
                 } else {
-                    let ops = decoded_ops_from_executor_instruction(&cpu.instruction);
+                    let mnemonic = exec_insn.opcode.mnemonic().to_string();
+                    let ops = decoded_ops_from_executor_instruction(exec_insn);
                     Sp1Insn {
                         seq,
                         step_idx,
@@ -468,7 +486,13 @@ impl Sp1Trace {
                 emit_boolean_on_load_after_store: false,
                 emit_kind_selector: false,
                 emit_digest_route: false,
-                emit_ecall_next_pc: false,
+                emit_control_flow_bindings: false,
+                emit_memory_alignment: true,
+                emit_memory_address_progression: true,
+                emit_load_value_binding: true,
+                emit_opcode_selector_bindings: false,
+                emit_partial_word_write: true,
+                emit_ecall_word_validity: false,
             },
             &insns,
         );

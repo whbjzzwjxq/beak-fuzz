@@ -10,7 +10,7 @@ use beak_core::fuzz::benchmark::{
     BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic};
+use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
 use serde::{Deserialize, Serialize};
 
 use crate::trace::PicoTrace;
@@ -67,15 +67,21 @@ struct RealRunnerResponse {
     injection_applied: bool,
 }
 
-const TIMESTAMP_INJECT_KIND: &str = "pico.audit_timestamp.mem_offset_flip";
-const BOOL_INJECT_KIND: &str = "pico.audit_multiplicity_bool_constraint.local_event_row";
+const TIMESTAMP_INJECT_KIND: &str = "pico.semantic.memory.timestamped_load_path";
+const BOOL_INJECT_KIND: &str = "pico.semantic.lookup.boolean_multiplicity";
+const H1_INJECT_KIND: &str = "pico.semantic.exec.op_selector_binding";
+const H8_INJECT_KIND: &str = "pico.semantic.control.ecall_word_validity";
 
 fn base_inject_kind(kind: &str) -> &str {
     kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
 }
 
 fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
-    if variant.is_empty() { kind.to_string() } else { format!("{kind}::{variant}") }
+    if variant.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind}::{variant}")
+    }
 }
 
 fn real_runner_manifest_path() -> PathBuf {
@@ -338,6 +344,29 @@ impl PicoBackend {
         specs
     }
 
+    fn h1_variant_specs() -> Vec<String> {
+        let mut specs = Vec::new();
+        for rank in 0..512u32 {
+            specs.push(format!("mode=noop_prefix,rank={rank}"));
+        }
+        specs.push("mode=auto_toggle".to_string());
+        specs.push("mode=lw_to_lbu".to_string());
+        specs.push("mode=lh_to_lhu".to_string());
+        specs.push("mode=sw_to_sb".to_string());
+        specs
+    }
+
+    fn h8_variant_specs() -> Vec<String> {
+        let mut specs = Vec::new();
+        for rank in 0..256u32 {
+            specs.push(format!("mode=noop_prefix,rank={rank}"));
+        }
+        specs.push("mode=xor_low_byte".to_string());
+        specs.push("mode=add_one".to_string());
+        specs.push("mode=flip_sign_bit".to_string());
+        specs
+    }
+
     fn inject_kinds_for_base(inject_kind: &str) -> Vec<String> {
         match inject_kind {
             TIMESTAMP_INJECT_KIND => Self::timestamp_variant_specs()
@@ -345,6 +374,14 @@ impl PicoBackend {
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
             BOOL_INJECT_KIND => Self::bool_variant_specs()
+                .into_iter()
+                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
+                .collect(),
+            H1_INJECT_KIND => Self::h1_variant_specs()
+                .into_iter()
+                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
+                .collect(),
+            H8_INJECT_KIND => Self::h8_variant_specs()
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
@@ -366,6 +403,18 @@ impl PicoBackend {
                 (
                     semantic::lookup::BOOLEAN_MULTIPLICITY.semantic_class,
                     BOOL_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::exec::OP_SELECTOR_BINDING.id {
+                (
+                    semantic::exec::OP_SELECTOR_BINDING.semantic_class,
+                    H1_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::control::ECALL_WORD_VALIDITY.id {
+                (
+                    semantic::control::ECALL_WORD_VALIDITY.semantic_class,
+                    H8_INJECT_KIND,
                     InjectionSchedule::AroundAnchor(anchor),
                 )
             } else {
@@ -394,10 +443,14 @@ impl PicoBackend {
         let bucket_id = candidate.bucket_id.as_str();
         if bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id {
             0
-        } else if bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id {
+        } else if bucket_id == semantic::exec::OP_SELECTOR_BINDING.id {
             1
-        } else {
+        } else if bucket_id == semantic::control::ECALL_WORD_VALIDITY.id {
             2
+        } else if bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id {
+            3
+        } else {
+            4
         }
     }
 
@@ -476,7 +529,6 @@ impl PicoBackend {
         }
     }
 }
-
 
 impl BenchmarkBackend for PicoBackend {
     fn is_usable_seed(&self, words: &[u32]) -> bool {

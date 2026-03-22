@@ -8,18 +8,19 @@ use beak_core::fuzz::benchmark::{
     BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic};
+use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
 use common::constants::RAM_START_ADDRESS;
 use common::rv_trace::{CircuitFlags, MemoryConfig, RVTraceRow};
 use jolt::jolt_core::jolt::instruction::virtual_advice::ADVICEInstruction;
-use jolt::jolt_core::jolt::vm::JoltTraceStep;
 use jolt::jolt_core::jolt::vm::rv32i_vm::{C, M};
-use jolt::{F, Jolt, PCS, ProofTranscript, RV32I, RV32IJoltVM, host};
+use jolt::jolt_core::jolt::vm::JoltTraceStep;
+use jolt::{host, Jolt, ProofTranscript, RV32IJoltVM, F, PCS, RV32I};
 use serde::{Deserialize, Serialize};
 
 use crate::trace::JoltTrace;
 
-const UPPER_IMMEDIATE_INJECT_KIND: &str = "jolt.audit_decode.upper_immediate_materialization";
+const UPPER_IMMEDIATE_INJECT_KIND: &str = "jolt.semantic.decode.upper_immediate_materialization";
+const ENTRYPOINT_INJECT_KIND: &str = "jolt.semantic.control.entrypoint_binding";
 const LOOP_FOREVER_WORD: u32 = 0x0000_006f;
 const T0_REG: u32 = 5;
 const T1_REG: u32 = 6;
@@ -55,7 +56,11 @@ fn base_inject_kind(kind: &str) -> &str {
 }
 
 fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
-    if variant.is_empty() { kind.to_string() } else { format!("{kind}::{variant}") }
+    if variant.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind}::{variant}")
+    }
 }
 
 fn inject_variant_value<'a>(kind: &'a str, key: &str) -> Option<&'a str> {
@@ -117,7 +122,11 @@ fn encode_sb(rs2: u32, rs1: u32, imm12: i32) -> u32 {
 }
 
 fn align_up(value: u64, align: u64) -> u64 {
-    if align == 0 || value % align == 0 { value } else { value + (align - value % align) }
+    if align == 0 || value % align == 0 {
+        value
+    } else {
+        value + (align - value % align)
+    }
 }
 
 fn push_u32(out: &mut Vec<u8>, value: u32) {
@@ -265,6 +274,9 @@ fn is_real_lui_step(step: &JoltTraceStep<RV32I>) -> bool {
 
 fn collect_observed_injection_sites(trace: &[JoltTraceStep<RV32I>]) -> BTreeMap<String, Vec<u64>> {
     let mut sites = BTreeMap::<String, Vec<u64>>::new();
+    if !trace.is_empty() {
+        record_site(&mut sites, ENTRYPOINT_INJECT_KIND, 0);
+    }
     for (idx, step) in trace.iter().enumerate() {
         if is_real_lui_step(step) {
             record_site(&mut sites, UPPER_IMMEDIATE_INJECT_KIND, idx as u64);
@@ -274,7 +286,7 @@ fn collect_observed_injection_sites(trace: &[JoltTraceStep<RV32I>]) -> BTreeMap<
 }
 
 fn apply_injection_to_trace(
-    trace: &mut [JoltTraceStep<RV32I>],
+    trace: &mut Vec<JoltTraceStep<RV32I>>,
     inject_kind: Option<&str>,
     inject_step: u64,
     observed_injection_sites: &BTreeMap<String, Vec<u64>>,
@@ -283,6 +295,29 @@ fn apply_injection_to_trace(
         return false;
     };
     let base_kind = base_inject_kind(kind);
+    if base_kind == ENTRYPOINT_INJECT_KIND {
+        if inject_step != u64::MAX
+            && !observed_injection_sites
+                .get(base_kind)
+                .map(|steps| steps.contains(&inject_step))
+                .unwrap_or(false)
+        {
+            return false;
+        }
+        if matches!(inject_variant_mode(kind), Some("noop_prefix")) {
+            return false;
+        }
+        let prefix_len = match inject_variant_mode(kind) {
+            Some("skip_one") => 1usize,
+            Some("skip_two") | Some("far_page") => 2usize,
+            _ => 2usize,
+        };
+        if trace.len() <= prefix_len {
+            return false;
+        }
+        trace.drain(0..prefix_len);
+        return true;
+    }
     if base_kind != UPPER_IMMEDIATE_INJECT_KIND {
         return false;
     }
@@ -452,8 +487,23 @@ impl JoltBackend {
         specs
     }
 
+    fn entrypoint_variant_specs() -> Vec<String> {
+        let mut specs = Vec::new();
+        for rank in 0..128u32 {
+            specs.push(format!("mode=noop_prefix,rank={rank}"));
+        }
+        specs.push("mode=skip_one".to_string());
+        specs.push("mode=skip_two".to_string());
+        specs.push("mode=far_page".to_string());
+        specs
+    }
+
     fn inject_kinds_for_base(inject_kind: &str) -> Vec<String> {
         match inject_kind {
+            ENTRYPOINT_INJECT_KIND => Self::entrypoint_variant_specs()
+                .into_iter()
+                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
+                .collect(),
             UPPER_IMMEDIATE_INJECT_KIND => Self::variant_specs()
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
@@ -465,7 +515,9 @@ impl JoltBackend {
     fn semantic_candidate_from_hit(&self, hit: &BucketHit) -> Vec<SemanticInjectionCandidate> {
         let anchor = Self::step_from_hit(hit);
         let (semantic_class, inject_kind) =
-            if hit.bucket_id == semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.id {
+            if hit.bucket_id == semantic::control::ENTRYPOINT_BINDING.id {
+                (semantic::control::ENTRYPOINT_BINDING.semantic_class, ENTRYPOINT_INJECT_KIND)
+            } else if hit.bucket_id == semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.id {
                 (
                     semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.semantic_class,
                     UPPER_IMMEDIATE_INJECT_KIND,

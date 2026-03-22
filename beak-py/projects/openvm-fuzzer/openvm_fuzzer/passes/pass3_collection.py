@@ -828,10 +828,10 @@ def _patch_336f_base_alu_adapter_emit_chip_row(openvm_install_path: Path) -> Non
             // BEAK-INSERT: guard.336f.adapter.base_alu.preprocess_o5
             // BEAK-INSERT: witness-only injection for audit-o5 (immediate limb decomposition).
             // Keep rs2_imm unchanged while forging out-of-range limb[0].
-            if fuzzer_utils::should_inject_witness("openvm.audit_o5.rs2_imm_limbs", beak_witness_step)
+            if fuzzer_utils::should_inject_witness("openvm.semantic.alu.immediate_limb_consistency", beak_witness_step)
             {
                 eprintln!(
-                    "[beak-witness-inject] kind=openvm.audit_o5.rs2_imm_limbs step={} c_u32={}",
+                    "[beak-witness-inject] kind=openvm.semantic.alu.immediate_limb_consistency step={} c_u32={}",
                     beak_witness_step,
                     c_u32
                 );
@@ -1094,10 +1094,10 @@ def _patch_336f_auipc_core_witness_injection(openvm_install_path: Path) -> None:
 
         // BEAK-INSERT: guard.336f.auipc.core.preprocess_o7
         let beak_witness_step = fuzzer_utils::next_witness_step();
-        if fuzzer_utils::should_inject_witness("openvm.audit_o7.auipc_pc_limbs", beak_witness_step) {
+        if fuzzer_utils::should_inject_witness("openvm.semantic.control.auipc_pc_limb_consistency", beak_witness_step) {
             let can_inject_o7 = ((from_pc >> 24) != 0) || (((imm >> 16) & 0xff) != 0);
             eprintln!(
-                "[beak-witness-inject] kind=openvm.audit_o7.auipc_pc_limbs step={} from_pc={} imm={}",
+                "[beak-witness-inject] kind=openvm.semantic.control.auipc_pc_limb_consistency step={} from_pc={} imm={}",
                 beak_witness_step,
                 from_pc,
                 imm
@@ -1140,7 +1140,7 @@ def _patch_336f_loadstore_adapter_witness_injection(openvm_install_path: Path) -
         // BEAK-INSERT: guard.336f.loadstore.adapter.preprocess_o8
         let beak_witness_step = fuzzer_utils::next_witness_step();
         let beak_variant =
-            fuzzer_utils::active_witness_variant("openvm.audit_o8.loadstore_imm_sign");
+            fuzzer_utils::active_witness_variant("openvm.semantic.memory.immediate_sign_consistency");
         let spec = beak_variant
             .as_deref()
             .unwrap_or("mode=flip_sign,domain=any,guard=none");
@@ -1167,7 +1167,7 @@ def _patch_336f_loadstore_adapter_witness_injection(openvm_install_path: Path) -
         let base_imm_extended = imm + imm_sign * 0xffff0000;
         let orig_ptr = rs1_val.wrapping_add(base_imm_extended);
         let mut beak_imm_sign = imm_sign;
-        if fuzzer_utils::should_inject_witness("openvm.audit_o8.loadstore_imm_sign", beak_witness_step) {
+        if fuzzer_utils::should_inject_witness("openvm.semantic.memory.immediate_sign_consistency", beak_witness_step) {
             let candidate_sign = if imm_sign == 1 { 0 } else { 1 };
             let candidate_ext = imm + candidate_sign * 0xffff0000;
             let flipped_ptr = rs1_val.wrapping_add(candidate_ext);
@@ -1183,7 +1183,7 @@ def _patch_336f_loadstore_adapter_witness_injection(openvm_install_path: Path) -
             };
             if mode == "flip_sign" && domain_ok && guard_ok && opcode_shift_ok(flipped_ptr) && ptr_in_range {
                 eprintln!(
-                    "[beak-witness-inject] kind=openvm.audit_o8.loadstore_imm_sign step={} imm={} mode={} domain={} guard={} orig_ptr={} flipped_ptr={} flipped_sign={} variant={}",
+                    "[beak-witness-inject] kind=openvm.semantic.memory.immediate_sign_consistency step={} imm={} mode={} domain={} guard={} orig_ptr={} flipped_ptr={} flipped_sign={} variant={}",
                     beak_witness_step,
                     imm,
                     mode,
@@ -1197,7 +1197,7 @@ def _patch_336f_loadstore_adapter_witness_injection(openvm_install_path: Path) -
                 beak_imm_sign = candidate_sign;
             } else {
                 eprintln!(
-                    "[beak-witness-inject] kind=openvm.audit_o8.loadstore_imm_sign step={} imm={} mode=skip_context domain={} guard={} orig_ptr={} variant={}",
+                    "[beak-witness-inject] kind=openvm.semantic.memory.immediate_sign_consistency step={} imm={} mode=skip_context domain={} guard={} orig_ptr={} variant={}",
                     beak_witness_step,
                     imm,
                     domain,
@@ -1275,7 +1275,7 @@ def _patch_336f_divrem_core_witness_injection(openvm_install_path: Path) -> None
         // BEAK-INSERT: guard.336f.divrem.core.o15
         let beak_witness_step = fuzzer_utils::next_witness_step();
         let beak_inject_o15 = fuzzer_utils::should_inject_witness(
-            "openvm.audit_o15.divrem_special_case_on_invalid",
+            "openvm.semantic.arithmetic.special_case_consistency",
             beak_witness_step,
         );
         // BEAK-INSERT-END
@@ -1290,7 +1290,7 @@ def _patch_336f_divrem_core_witness_injection(openvm_install_path: Path) -> None
         // BEAK-INSERT: guard.336f.divrem.core.o15.apply
         if beak_inject_o15 {
             eprintln!(
-                "[beak-witness-inject] kind=openvm.audit_o15.divrem_special_case_on_invalid step={}",
+                "[beak-witness-inject] kind=openvm.semantic.arithmetic.special_case_consistency step={}",
                 beak_witness_step
             );
             // Force invalid row while keeping special_case=true, so multiplicity becomes -1.
@@ -1338,7 +1338,7 @@ def _patch_336f_bitwise_lookup_shadow_multiplicity_injection(openvm_install_path
         // This intentionally mutates *prove-side* lookup multiplicity while keeping
         // runtime behavior unchanged.
         if std::env::var("BEAK_OPENVM_WITNESS_INJECT_KIND").ok().as_deref()
-            == Some("openvm.audit_o1.bitwise_mult_p_plus_1")
+            == Some("openvm.semantic.lookup.xor_multiplicity_consistency")
         {
             // BabyBear prime: 2^31 - 2^27 + 1 = 2013265921.
             // We inject p+1 as a weak aliasing signal bucket.
@@ -1350,14 +1350,14 @@ def _patch_336f_bitwise_lookup_shadow_multiplicity_injection(openvm_install_path
                     cols.mult_xor = F::from_canonical_u32(BEAK_BABYBEAR_P_PLUS_1);
                     injected = true;
                     eprintln!(
-                        "[beak-witness-inject] kind=openvm.audit_o1.bitwise_mult_p_plus_1 mode=shadow_lookup_multiplicity"
+                        "[beak-witness-inject] kind=openvm.semantic.lookup.xor_multiplicity_consistency mode=shadow_lookup_multiplicity"
                     );
                     break;
                 }
             }
             if !injected {
                 eprintln!(
-                    "[beak-witness-inject] kind=openvm.audit_o1.bitwise_mult_p_plus_1 mode=shadow_lookup_multiplicity no_nonzero_xor_row"
+                    "[beak-witness-inject] kind=openvm.semantic.lookup.xor_multiplicity_consistency mode=shadow_lookup_multiplicity no_nonzero_xor_row"
                 );
             }
         }
@@ -1394,10 +1394,10 @@ def _patch_f038_volatile_witness_injection(openvm_install_path: Path) -> None:
 
                 // BEAK-INSERT: guard.f038.volatile.o25
                 if i == memory_len - 1
-                    && fuzzer_utils::should_inject_witness("openvm.audit_o25.volatile_addr_range", i as u64)
+                    && fuzzer_utils::should_inject_witness("openvm.semantic.memory.volatile_boundary_range", i as u64)
                 {
                     eprintln!(
-                        "[beak-witness-inject] kind=openvm.audit_o25.volatile_addr_range step={} old_as={} old_ptr={}",
+                        "[beak-witness-inject] kind=openvm.semantic.memory.volatile_boundary_range step={} old_as={} old_ptr={}",
                         i,
                         *addr_space,
                         *ptr
@@ -1464,9 +1464,9 @@ def _patch_f038_connector_witness_injection(openvm_install_path: Path) -> None:
     new = r"""    pub fn begin(&mut self, state: ExecutionState<u32>) {
         let mut beak_ts = state.timestamp;
         let beak_step = fuzzer_utils::next_witness_step();
-        if fuzzer_utils::should_inject_witness("openvm.audit_o26.connector_start_ts", beak_step) {
+        if fuzzer_utils::should_inject_witness("openvm.semantic.time.boundary_origin_consistency", beak_step) {
             eprintln!(
-                "[beak-witness-inject] kind=openvm.audit_o26.connector_start_ts step={} from_ts={}",
+                "[beak-witness-inject] kind=openvm.semantic.time.boundary_origin_consistency step={} from_ts={}",
                 beak_step,
                 state.timestamp
             );
@@ -1481,7 +1481,7 @@ def _patch_f038_connector_witness_injection(openvm_install_path: Path) -> None:
         });
     }
 """
-    if "// openvm.audit_o26.connector_start_ts" not in c and old in c:
+    if "// openvm.semantic.time.boundary_origin_consistency" not in c and old in c:
         c = c.replace(old, new, 1)
     path.write_text(c)
 
@@ -1529,9 +1529,9 @@ def _patch_f038_loadstore_mem_as_witness_injection(openvm_install_path: Path) ->
         ))
 """
     new2 = r"""        let mut beak_mem_as = e;
-        if fuzzer_utils::should_inject_witness("openvm.audit_o51.loadstore_mem_as", beak_witness_step) {
+        if fuzzer_utils::should_inject_witness("openvm.semantic.memory.address_space_consistency", beak_witness_step) {
             eprintln!(
-                "[beak-witness-inject] kind=openvm.audit_o51.loadstore_mem_as step={} old_mem_as={}",
+                "[beak-witness-inject] kind=openvm.semantic.memory.address_space_consistency step={} old_mem_as={}",
                 beak_witness_step,
                 e.as_canonical_u32()
             );

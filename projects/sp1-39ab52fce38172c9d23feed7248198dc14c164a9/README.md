@@ -42,4 +42,4 @@ make sp1-fuzz SP1_COMMIT=39ab52fce38172c9d23feed7248198dc14c164a9
 
 The semantic injection kind for the real audit issue is:
 
-- `sp1.audit_v4.is_memory_instruction_interaction`
+- `sp1.semantic.exec.memory_effect_binding`

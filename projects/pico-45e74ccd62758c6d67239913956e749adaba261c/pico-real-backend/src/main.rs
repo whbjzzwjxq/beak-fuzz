@@ -13,16 +13,16 @@ use pico_vm::{
         },
     },
     instances::{
-        chiptype::riscv_chiptype::RiscvChipType,
-        configs::riscv_config::StarkConfig as RiscvBBSC,
+        chiptype::riscv_chiptype::RiscvChipType, configs::riscv_config::StarkConfig as RiscvBBSC,
         machine::riscv::RiscvMachine,
     },
     machine::machine::MachineBehavior,
     primitives::consts::RISCV_NUM_PVS,
 };
 use rrs_lib::{
+    InstructionProcessor,
     instruction_formats::{BType, IType, ITypeCSR, ITypeShamt, JType, RType, SType, UType},
-    process_instruction, InstructionProcessor,
+    process_instruction,
 };
 use serde::{Deserialize, Serialize};
 
@@ -45,9 +45,10 @@ struct RunnerResponse {
     injection_applied: bool,
 }
 
-const TIMESTAMP_INJECT_KIND: &str = "pico.audit_timestamp.mem_offset_flip";
-const BOOL_INJECT_KIND: &str = "pico.audit_multiplicity_bool_constraint.local_event_row";
-const LEGACY_BOOL_INJECT_KIND: &str = "pico.audit_isreal.local_event_row";
+const TIMESTAMP_INJECT_KIND: &str = "pico.semantic.memory.timestamped_load_path";
+const BOOL_INJECT_KIND: &str = "pico.semantic.lookup.boolean_multiplicity";
+const H1_INJECT_KIND: &str = "pico.semantic.exec.op_selector_binding";
+const H8_INJECT_KIND: &str = "pico.semantic.control.ecall_word_validity";
 
 fn base_inject_kind(kind: &str) -> &str {
     kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
@@ -69,14 +70,7 @@ fn inject_variant_mode(kind: &str) -> Option<&str> {
 }
 
 fn mapped_env_inject_kind(kind: &str) -> String {
-    let base = match base_inject_kind(kind) {
-        BOOL_INJECT_KIND => LEGACY_BOOL_INJECT_KIND,
-        other => other,
-    };
-    match kind.split_once("::") {
-        Some((_, variant)) => format!("{base}::{variant}"),
-        None => base.to_string(),
-    }
+    kind.to_string()
 }
 
 fn i_from_r(opcode: Opcode, dec: &RType) -> Instruction {
@@ -207,27 +201,13 @@ impl InstructionProcessor for Transpiler {
         Instruction::new(Opcode::JAL, dec.rd as u32, dec.imm as u32, 0, true, true)
     }
     fn process_jalr(&mut self, dec: IType) -> Self::InstructionResult {
-        Instruction::new(
-            Opcode::JALR,
-            dec.rd as u32,
-            dec.rs1 as u32,
-            dec.imm as u32,
-            false,
-            true,
-        )
+        Instruction::new(Opcode::JALR, dec.rd as u32, dec.rs1 as u32, dec.imm as u32, false, true)
     }
     fn process_lui(&mut self, dec: UType) -> Self::InstructionResult {
         Instruction::new(Opcode::ADD, dec.rd as u32, 0, dec.imm as u32, true, true)
     }
     fn process_auipc(&mut self, dec: UType) -> Self::InstructionResult {
-        Instruction::new(
-            Opcode::AUIPC,
-            dec.rd as u32,
-            dec.imm as u32,
-            dec.imm as u32,
-            true,
-            true,
-        )
+        Instruction::new(Opcode::AUIPC, dec.rd as u32, dec.imm as u32, dec.imm as u32, true, true)
     }
     fn process_ecall(&mut self) -> Self::InstructionResult {
         Instruction::new(Opcode::ECALL, 5, 10, 11, false, false)
@@ -309,16 +289,12 @@ fn mutate_records_for_injection(
     let kind = inject_kind.unwrap_or("");
     std::env::set_var(
         "BEAK_PICO_WITNESS_INJECT_KIND",
-        if kind.is_empty() {
-            String::new()
-        } else {
-            mapped_env_inject_kind(kind)
-        },
+        if kind.is_empty() { String::new() } else { mapped_env_inject_kind(kind) },
     );
     std::env::set_var("BEAK_PICO_WITNESS_INJECT_STEP", inject_step.to_string());
     if !kind.is_empty() {
         match base_inject_kind(kind) {
-            TIMESTAMP_INJECT_KIND | BOOL_INJECT_KIND | LEGACY_BOOL_INJECT_KIND => {}
+            TIMESTAMP_INJECT_KIND | BOOL_INJECT_KIND | H1_INJECT_KIND | H8_INJECT_KIND => {}
             _ => return Err(format!("unsupported inject_kind={kind}")),
         }
     }
@@ -337,13 +313,19 @@ fn collect_observed_injection_sites(records: &[EmulationRecord]) -> BTreeMap<Str
     let mut memory_step = 0u64;
     let mut local_step = 0u64;
     let mut init_finalize_step = 0u64;
+    let mut cpu_step = 0u64;
 
     for record in records {
         for event in &record.cpu_events {
             if event.instruction.is_memory_instruction() {
                 record_site(&mut sites, TIMESTAMP_INJECT_KIND, memory_step);
+                record_site(&mut sites, H1_INJECT_KIND, memory_step);
                 memory_step = memory_step.saturating_add(1);
             }
+            if event.instruction.opcode == Opcode::ECALL {
+                record_site(&mut sites, H8_INJECT_KIND, cpu_step);
+            }
+            cpu_step = cpu_step.saturating_add(1);
         }
         for _ in record.get_local_mem_events() {
             record_site(&mut sites, BOOL_INJECT_KIND, local_step);
@@ -395,8 +377,8 @@ fn run_one(
     let mut instructions = decode_words(words)?;
     // Ensure Pico witness generation ends with next_pc == 0.
     let mut tr = Transpiler;
-    let halt =
-        process_instruction(&mut tr, 0x0000_0067).ok_or_else(|| "failed to decode HALT jalr".to_string())?;
+    let halt = process_instruction(&mut tr, 0x0000_0067)
+        .ok_or_else(|| "failed to decode HALT jalr".to_string())?;
     instructions.push(halt);
     const ENTRY_PC: u32 = 0x1000;
     let program = Arc::new(Program::new(instructions, ENTRY_PC, ENTRY_PC));
@@ -432,14 +414,16 @@ fn run_one(
         });
     }
 
-    let prove_verify = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<bool, String> {
-        let machine = RiscvMachine::new(RiscvBBSC::new(), RiscvChipType::all_chips(), RISCV_NUM_PVS);
-        let (pk, vk) = machine.setup_keys(&program);
-        machine.complement_record(&mut records);
-        let proofs = machine.base_machine().prove_ensemble(&pk, &records);
-        let verify_ok = machine.base_machine().verify_ensemble(&vk, &proofs).is_ok();
-        Ok(verify_ok)
-    }));
+    let prove_verify =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<bool, String> {
+            let machine =
+                RiscvMachine::new(RiscvBBSC::new(), RiscvChipType::all_chips(), RISCV_NUM_PVS);
+            let (pk, vk) = machine.setup_keys(&program);
+            machine.complement_record(&mut records);
+            let proofs = machine.base_machine().prove_ensemble(&pk, &records);
+            let verify_ok = machine.base_machine().verify_ensemble(&vk, &proofs).is_ok();
+            Ok(verify_ok)
+        }));
     let verify_ok = match prove_verify {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
@@ -459,10 +443,7 @@ fn run_one(
                 micro_op_count: records.len(),
                 prove_ok: false,
                 verify_ok: false,
-                error: Some(format!(
-                    "prove/verify panic: {}",
-                    panic_payload_to_string(p.as_ref())
-                )),
+                error: Some(format!("prove/verify panic: {}", panic_payload_to_string(p.as_ref()))),
                 observed_injection_sites,
                 injection_applied,
             });
@@ -486,15 +467,15 @@ fn main() {
         let _ = writeln!(
             std::io::stdout(),
             "{}",
-                serde_json::to_string(&RunnerResponse {
-                    final_regs: None,
-                    micro_op_count: 0,
-                    prove_ok: false,
-                    verify_ok: false,
-                    error: Some("failed to read stdin".to_string()),
-                    observed_injection_sites: BTreeMap::new(),
-                    injection_applied: false,
-                })
+            serde_json::to_string(&RunnerResponse {
+                final_regs: None,
+                micro_op_count: 0,
+                prove_ok: false,
+                verify_ok: false,
+                error: Some("failed to read stdin".to_string()),
+                observed_injection_sites: BTreeMap::new(),
+                injection_applied: false,
+            })
             .unwrap_or_else(|_| "{\"error\":\"failed to serialize error\"}".to_string())
         );
         return;
@@ -522,12 +503,7 @@ fn main() {
     };
 
     let resp = match std::panic::catch_unwind(|| {
-        run_one(
-            &req.words,
-            req.do_prove_verify,
-            req.inject_kind.as_deref(),
-            req.inject_step,
-        )
+        run_one(&req.words, req.do_prove_verify, req.inject_kind.as_deref(), req.inject_step)
     }) {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => RunnerResponse {

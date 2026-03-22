@@ -16,6 +16,8 @@ pub struct GlobalState {
     pub injection_kind: String,
     pub injection_step: u64,
     pub witness_step_idx: u64,
+    pub executor_step_idx: u64,
+    pub injection_run_id: String,
 }
 
 impl GlobalState {
@@ -38,6 +40,29 @@ impl GlobalState {
             injection_kind,
             injection_step,
             witness_step_idx: 0,
+            executor_step_idx: 0,
+            injection_run_id: std::env::var("BEAK_SP1_WITNESS_RUN_ID").unwrap_or_default(),
+        }
+    }
+
+    fn sync_injection_from_env(&mut self) {
+        let env_kind = std::env::var("BEAK_SP1_WITNESS_INJECT_KIND").unwrap_or_default();
+        let env_step = std::env::var("BEAK_SP1_WITNESS_INJECT_STEP")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        let env_run_id = std::env::var("BEAK_SP1_WITNESS_RUN_ID").unwrap_or_default();
+
+        if self.injection_kind != env_kind
+            || self.injection_step != env_step
+            || self.injection_run_id != env_run_id
+        {
+            self.injection_enabled = !env_kind.is_empty();
+            self.injection_kind = env_kind;
+            self.injection_step = env_step;
+            self.injection_run_id = env_run_id;
+            self.witness_step_idx = 0;
+            self.executor_step_idx = 0;
         }
     }
 
@@ -67,6 +92,7 @@ impl GlobalState {
         self.row_count = 0;
         self.last_row_id = None;
         self.witness_step_idx = 0;
+        self.executor_step_idx = 0;
         out
     }
 }
@@ -81,14 +107,41 @@ pub fn take_json_logs() -> Vec<Value> {
 
 pub fn next_witness_step() -> u64 {
     let mut g = GLOBAL_STATE.lock().unwrap();
+    g.sync_injection_from_env();
     let cur = g.witness_step_idx;
     g.witness_step_idx = g.witness_step_idx.saturating_add(1);
     cur
 }
 
+pub fn next_executor_step() -> u64 {
+    let mut g = GLOBAL_STATE.lock().unwrap();
+    g.sync_injection_from_env();
+    let cur = g.executor_step_idx;
+    g.executor_step_idx = g.executor_step_idx.saturating_add(1);
+    cur
+}
+
 pub fn should_inject_witness(kind: &str, step: u64) -> bool {
-    let g = GLOBAL_STATE.lock().unwrap();
+    let mut g = GLOBAL_STATE.lock().unwrap();
+    g.sync_injection_from_env();
     g.injection_enabled && g.injection_kind == kind && g.injection_step == step
+}
+
+fn base_injection_kind(kind: &str) -> &str {
+    kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
+}
+
+pub fn matching_injection_kind(base_kind: &str, step: u64) -> Option<String> {
+    let mut g = GLOBAL_STATE.lock().unwrap();
+    g.sync_injection_from_env();
+    if !g.injection_enabled || g.injection_step != step {
+        return None;
+    }
+    if base_injection_kind(g.injection_kind.as_str()) == base_kind {
+        Some(g.injection_kind.clone())
+    } else {
+        None
+    }
 }
 
 pub fn configure_witness_injection(kind: Option<&str>, step: u64) {
@@ -106,6 +159,8 @@ pub fn configure_witness_injection(kind: Option<&str>, step: u64) {
         }
     }
     g.witness_step_idx = 0;
+    g.executor_step_idx = 0;
+    g.injection_run_id = std::env::var("BEAK_SP1_WITNESS_RUN_ID").unwrap_or_default();
 }
 
 pub fn emit_instruction(

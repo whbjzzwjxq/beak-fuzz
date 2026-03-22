@@ -33,7 +33,7 @@ def _patch_cpu_trace(path: Path) -> None:
         // BEAK-INSERT: sp1.v4.is_memory_underconstrained
         let beak_step = fuzzer_utils::next_witness_step();
         if fuzzer_utils::should_inject_witness(
-            "sp1.audit_v4.is_memory_instruction_interaction",
+            "sp1.semantic.exec.memory_effect_binding",
             beak_step,
         ) {
             cols.is_memory = F::zero();

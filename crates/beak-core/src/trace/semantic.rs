@@ -4,6 +4,7 @@ pub enum SemanticBucketCategory {
     Arithmetic,
     Control,
     Decode,
+    Exec,
     Interaction,
     Lookup,
     Memory,
@@ -63,15 +64,21 @@ pub mod control {
         SemanticBucketCategory::Control,
     );
 
-    pub const ECALL_NEXT_PC: SemanticBucket = SemanticBucket::new(
-        "sem.control.ecall_next_pc",
-        "semantic.control.ecall_next_pc",
-        SemanticBucketCategory::Control,
-    );
-
     pub const ECALL_ARGUMENT_DECOMPOSITION: SemanticBucket = SemanticBucket::new(
         "sem.control.ecall_argument_decomposition",
         "semantic.control.ecall_argument_decomposition",
+        SemanticBucketCategory::Control,
+    );
+
+    pub const ECALL_WORD_VALIDITY: SemanticBucket = SemanticBucket::new(
+        "sem.control.ecall_word_validity",
+        "semantic.control.ecall_word_validity",
+        SemanticBucketCategory::Control,
+    );
+
+    pub const ENTRYPOINT_BINDING: SemanticBucket = SemanticBucket::new(
+        "sem.control.entrypoint_binding",
+        "semantic.control.entrypoint_binding",
         SemanticBucketCategory::Control,
     );
 }
@@ -104,6 +111,46 @@ pub mod decode {
     );
 }
 
+pub mod exec {
+    use super::{SemanticBucket, SemanticBucketCategory};
+
+    pub const SOURCE_OPERAND_BINDING: SemanticBucket = SemanticBucket::new(
+        "sem.exec.source_operand_binding",
+        "semantic.exec.source_operand_binding",
+        SemanticBucketCategory::Exec,
+    );
+
+    pub const DEST_BINDING: SemanticBucket = SemanticBucket::new(
+        "sem.exec.dest_binding",
+        "semantic.exec.dest_binding",
+        SemanticBucketCategory::Exec,
+    );
+
+    pub const OP_SELECTOR_BINDING: SemanticBucket = SemanticBucket::new(
+        "sem.exec.op_selector_binding",
+        "semantic.exec.op_selector_binding",
+        SemanticBucketCategory::Exec,
+    );
+
+    pub const CONTROL_FLOW_BINDING: SemanticBucket = SemanticBucket::new(
+        "sem.exec.control_flow_binding",
+        "semantic.exec.control_flow_binding",
+        SemanticBucketCategory::Exec,
+    );
+
+    pub const MEMORY_EFFECT_BINDING: SemanticBucket = SemanticBucket::new(
+        "sem.exec.memory_effect_binding",
+        "semantic.exec.memory_effect_binding",
+        SemanticBucketCategory::Exec,
+    );
+
+    pub const PARTIAL_WORD_WRITE_CONSISTENCY: SemanticBucket = SemanticBucket::new(
+        "sem.exec.partial_word_write_consistency",
+        "semantic.exec.partial_word_write_consistency",
+        SemanticBucketCategory::Exec,
+    );
+}
+
 pub mod interaction {
     use super::{SemanticBucket, SemanticBucketCategory};
 
@@ -133,6 +180,18 @@ pub mod lookup {
 pub mod memory {
     use super::{SemanticBucket, SemanticBucketCategory};
 
+    pub const ADDRESS_ALIGNMENT_CONSISTENCY: SemanticBucket = SemanticBucket::new(
+        "sem.memory.address_alignment_consistency",
+        "semantic.memory.address_alignment_consistency",
+        SemanticBucketCategory::Memory,
+    );
+
+    pub const ADDRESS_PROGRESSION_CONSISTENCY: SemanticBucket = SemanticBucket::new(
+        "sem.memory.address_progression_consistency",
+        "semantic.memory.address_progression_consistency",
+        SemanticBucketCategory::Memory,
+    );
+
     pub const ADDRESS_SPACE_CONSISTENCY: SemanticBucket = SemanticBucket::new(
         "sem.memory.address_space_consistency",
         "semantic.memory.address_space_consistency",
@@ -148,6 +207,12 @@ pub mod memory {
     pub const KIND_SELECTOR_CONSISTENCY: SemanticBucket = SemanticBucket::new(
         "sem.memory.kind_selector_consistency",
         "semantic.memory.kind_selector_consistency",
+        SemanticBucketCategory::Memory,
+    );
+
+    pub const LOAD_VALUE_BINDING: SemanticBucket = SemanticBucket::new(
+        "sem.memory.load_value_binding",
+        "semantic.memory.load_value_binding",
         SemanticBucketCategory::Memory,
     );
 
@@ -202,17 +267,27 @@ pub const ALL_BUCKETS: &[SemanticBucket] = &[
     arithmetic::SPECIAL_CASE_CONSISTENCY,
     control::AUIPC_PC_LIMB_CONSISTENCY,
     control::ECALL_ARGUMENT_DECOMPOSITION,
-    control::ECALL_NEXT_PC,
+    control::ECALL_WORD_VALIDITY,
+    control::ENTRYPOINT_BINDING,
     decode::OPERAND_INDEX_ROUTING,
     decode::RD_BIT_DECOMPOSITION,
     decode::UPPER_IMMEDIATE_MATERIALIZATION,
     decode::ZERO_REGISTER_IMMUTABILITY,
+    exec::SOURCE_OPERAND_BINDING,
+    exec::DEST_BINDING,
+    exec::OP_SELECTOR_BINDING,
+    exec::CONTROL_FLOW_BINDING,
+    exec::MEMORY_EFFECT_BINDING,
+    exec::PARTIAL_WORD_WRITE_CONSISTENCY,
     interaction::DIGEST_KIND_ROUTE,
     lookup::BOOLEAN_MULTIPLICITY,
     lookup::XOR_MULTIPLICITY_CONSISTENCY,
+    memory::ADDRESS_ALIGNMENT_CONSISTENCY,
+    memory::ADDRESS_PROGRESSION_CONSISTENCY,
     memory::ADDRESS_SPACE_CONSISTENCY,
     memory::IMMEDIATE_SIGN_CONSISTENCY,
     memory::KIND_SELECTOR_CONSISTENCY,
+    memory::LOAD_VALUE_BINDING,
     memory::STORE_LOAD_PAYLOAD_FLOW,
     memory::TIMESTAMPED_LOAD_PATH,
     memory::VOLATILE_BOUNDARY_RANGE,

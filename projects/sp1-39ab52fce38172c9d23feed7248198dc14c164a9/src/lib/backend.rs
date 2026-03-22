@@ -16,7 +16,7 @@ use sp1_stark::CpuProver;
 
 use crate::trace::{Sp1Trace, build_sp1_program, decode_word_to_sp1_instruction};
 
-const IS_MEMORY_INJECT_KIND: &str = "sp1.audit_v4.is_memory_instruction_interaction";
+const IS_MEMORY_INJECT_KIND: &str = "sp1.semantic.exec.memory_effect_binding";
 const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
 
 #[derive(Debug, Clone)]

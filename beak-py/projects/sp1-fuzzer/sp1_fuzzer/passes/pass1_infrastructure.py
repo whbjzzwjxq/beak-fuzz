@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from zkvm_fuzzer_utils.file import create_file
-
 _FUZZER_UTILS_TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "fuzzer_utils_crate"
 
 
@@ -12,14 +10,13 @@ def _read_fuzzer_utils_template(filename: str) -> str:
 
 
 def _create_fuzzer_utils_crate(*, sp1_install_path: Path) -> None:
-    create_file(
-        sp1_install_path / "crates" / "fuzzer_utils" / "Cargo.toml",
-        _read_fuzzer_utils_template("Cargo.toml"),
-    )
-    create_file(
-        sp1_install_path / "crates" / "fuzzer_utils" / "src" / "lib.rs",
-        _read_fuzzer_utils_template("lib.rs"),
-    )
+    cargo_toml = sp1_install_path / "crates" / "fuzzer_utils" / "Cargo.toml"
+    cargo_toml.parent.mkdir(parents=True, exist_ok=True)
+    cargo_toml.write_text(_read_fuzzer_utils_template("Cargo.toml"))
+
+    lib_rs = sp1_install_path / "crates" / "fuzzer_utils" / "src" / "lib.rs"
+    lib_rs.parent.mkdir(parents=True, exist_ok=True)
+    lib_rs.write_text(_read_fuzzer_utils_template("lib.rs"))
 
 
 def _patch_workspace_manifest(*, sp1_install_path: Path) -> None:
@@ -54,6 +51,7 @@ def _patch_core_dependency(*, sp1_install_path: Path) -> None:
     core_candidates = [
         (sp1_install_path / "core" / "Cargo.toml", "../crates/fuzzer_utils"),
         (sp1_install_path / "crates" / "core" / "Cargo.toml", "../fuzzer_utils"),
+        (sp1_install_path / "crates" / "core" / "executor" / "Cargo.toml", "../../fuzzer_utils"),
         (sp1_install_path / "crates" / "core" / "machine" / "Cargo.toml", "../../fuzzer_utils"),
     ]
 

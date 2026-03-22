@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -9,17 +10,15 @@ use beak_core::fuzz::benchmark::{
     BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic};
+use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
 use serde::{Deserialize, Serialize};
-use sp1_core_machine::utils::run_test;
 use sp1_core_executor::{
-    ExecutionRecord, Executor, ExecutorMode, Opcode, Register,
-    events::{CpuEvent, MemoryRecordEnum},
+    syscalls::SyscallCode, ExecutionRecord, Executor, ExecutorMode, Opcode, Register,
 };
-use sp1_prover::SP1Prover;
-use sp1_stark::{CpuProver, MachineProver, SP1CoreOpts, StarkGenericConfig};
+use sp1_core_machine::utils::run_test;
+use sp1_stark::{CpuProver, SP1CoreOpts};
 
-use crate::trace::{Sp1Trace, build_sp1_program};
+use crate::trace::{build_sp1_program, Sp1Trace};
 
 #[derive(Debug, Clone)]
 struct WitnessInjectionPlan {
@@ -67,20 +66,37 @@ struct RealRunnerResponse {
     injection_applied: bool,
 }
 
-const TIMESTAMP_INJECT_KIND: &str = "sp1.audit_timestamp.mem_row_wraparound";
-const BOOL_INJECT_KIND: &str = "sp1.audit_multiplicity_bool_constraint.local_event_row";
-const S26_INJECT_KIND: &str = "sp1.audit_s26.padding_send_to_table_nonzero";
-const S27_INJECT_KIND: &str = "sp1.audit_s27.is_memory_lw_zero";
-const S28_INJECT_KIND: &str = "sp1.audit_s28.next_pc_ecall_arbitrary";
+const S28_INJECT_KIND: &str = "sp1.semantic.exec.control_flow_binding";
+const ADDRESS_PROGRESSION_INJECT_KIND: &str = "sp1.semantic.memory.address_progression_consistency";
+const ADDRESS_ALIGNMENT_INJECT_KIND: &str = "sp1.semantic.memory.address_alignment_consistency";
+const LOAD_VALUE_BINDING_INJECT_KIND: &str = "sp1.semantic.memory.load_value_binding";
+const PARTIAL_WORD_WRITE_INJECT_KIND: &str = "sp1.semantic.exec.partial_word_write_consistency";
+static WITNESS_RUN_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn base_inject_kind(kind: &str) -> &str {
     kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
 }
 
 fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
-    if variant.is_empty() { kind.to_string() } else { format!("{kind}::{variant}") }
+    if variant.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind}::{variant}")
+    }
 }
 
+fn supports_official_injection_kind(kind: &str) -> bool {
+    matches!(
+        base_inject_kind(kind),
+        S28_INJECT_KIND
+            | ADDRESS_PROGRESSION_INJECT_KIND
+            | ADDRESS_ALIGNMENT_INJECT_KIND
+            | LOAD_VALUE_BINDING_INJECT_KIND
+            | PARTIAL_WORD_WRITE_INJECT_KIND
+    )
+}
+
+#[cfg(test)]
 fn inject_variant_value<'a>(kind: &'a str, key: &str) -> Option<&'a str> {
     let (_, variant) = kind.split_once("::")?;
     for field in variant.split(',') {
@@ -92,8 +108,118 @@ fn inject_variant_value<'a>(kind: &'a str, key: &str) -> Option<&'a str> {
     None
 }
 
+#[cfg(test)]
 fn inject_variant_mode(kind: &str) -> Option<&str> {
     inject_variant_value(kind, "mode")
+}
+
+#[cfg(test)]
+fn inject_variant_family(kind: &str) -> Option<&str> {
+    inject_variant_value(kind, "family")
+}
+
+fn control_flow_family_for_opcode(opcode: Opcode) -> Option<&'static str> {
+    match opcode {
+        Opcode::BEQ | Opcode::BNE | Opcode::BLT | Opcode::BGE | Opcode::BLTU | Opcode::BGEU => {
+            Some("branch")
+        }
+        Opcode::JAL | Opcode::JALR => Some("jump"),
+        Opcode::ECALL => Some("ecall"),
+        _ => None,
+    }
+}
+
+fn control_flow_site_key(family: &str) -> String {
+    inject_kind_with_variant(S28_INJECT_KIND, &format!("family={family}"))
+}
+
+fn control_flow_semantic_class(family: Option<&str>) -> String {
+    match family {
+        Some(family) => {
+            format!("{}.{}", semantic::exec::CONTROL_FLOW_BINDING.semantic_class, family)
+        }
+        None => semantic::exec::CONTROL_FLOW_BINDING.semantic_class.to_string(),
+    }
+}
+
+#[cfg(test)]
+fn branch_next_pc_mutation(mode: Option<&str>, pc: u32, observed_next_pc: u32) -> Option<u32> {
+    let sequential = pc.wrapping_add(4);
+    match mode {
+        Some("noop_prefix") => None,
+        Some("force_fallthrough") => Some(sequential),
+        Some("force_taken_near") => {
+            let near_taken =
+                if observed_next_pc == sequential { pc.wrapping_add(8) } else { sequential };
+            Some(near_taken)
+        }
+        _ => Some(pc.wrapping_add(0x10000)),
+    }
+}
+
+#[cfg(test)]
+fn jump_next_pc_mutation(mode: Option<&str>, pc: u32, observed_next_pc: u32) -> Option<u32> {
+    let sequential = pc.wrapping_add(4);
+    match mode {
+        Some("noop_prefix") => None,
+        Some("force_sequential") => {
+            Some(if observed_next_pc == sequential { pc.wrapping_add(8) } else { sequential })
+        }
+        Some("force_near_jump") => Some(if observed_next_pc == pc.wrapping_add(8) {
+            pc.wrapping_add(12)
+        } else {
+            pc.wrapping_add(8)
+        }),
+        _ => Some(pc.wrapping_add(0x10000)),
+    }
+}
+
+#[cfg(test)]
+fn ecall_next_pc_mutation(mode: Option<&str>, pc: u32, observed_next_pc: u32) -> Option<u32> {
+    match mode {
+        Some("noop_prefix") => None,
+        Some("near_jump") => Some(if observed_next_pc == pc.wrapping_add(8) {
+            pc.wrapping_add(12)
+        } else {
+            pc.wrapping_add(8)
+        }),
+        Some("mid_jump") => Some(if observed_next_pc == pc.wrapping_add(0x40) {
+            pc.wrapping_add(0x44)
+        } else {
+            pc.wrapping_add(0x40)
+        }),
+        _ => Some(pc.wrapping_add(0x10000)),
+    }
+}
+
+#[cfg(test)]
+fn mutated_control_flow_next_pc(
+    kind: &str,
+    opcode: Opcode,
+    pc: u32,
+    observed_next_pc: u32,
+) -> Option<u32> {
+    let family = inject_variant_family(kind).or_else(|| control_flow_family_for_opcode(opcode));
+    match family {
+        Some("branch")
+            if matches!(
+                opcode,
+                Opcode::BEQ | Opcode::BNE | Opcode::BLT | Opcode::BGE | Opcode::BLTU | Opcode::BGEU
+            ) =>
+        {
+            branch_next_pc_mutation(inject_variant_mode(kind), pc, observed_next_pc)
+        }
+        Some("jump") if matches!(opcode, Opcode::JAL | Opcode::JALR) => {
+            jump_next_pc_mutation(inject_variant_mode(kind), pc, observed_next_pc)
+        }
+        Some("ecall") if opcode == Opcode::ECALL => {
+            ecall_next_pc_mutation(inject_variant_mode(kind), pc, observed_next_pc)
+        }
+        None if opcode == Opcode::ECALL => {
+            ecall_next_pc_mutation(inject_variant_mode(kind), pc, observed_next_pc)
+        }
+        _ => None,
+    }
 }
 
 fn record_site(sites: &mut BTreeMap<String, Vec<u64>>, kind: &str, step: u64) {
@@ -105,24 +231,50 @@ fn record_site(sites: &mut BTreeMap<String, Vec<u64>>, kind: &str, step: u64) {
 
 fn collect_observed_injection_sites(records: &[ExecutionRecord]) -> BTreeMap<String, Vec<u64>> {
     let mut sites = BTreeMap::<String, Vec<u64>>::new();
-    if records.iter().any(|record| !record.syscall_events.is_empty()) {
-        record_site(&mut sites, S26_INJECT_KIND, 0);
-    }
     let mut flat_cpu_idx = 0u64;
     for record in records {
         for event in &record.cpu_events {
             let instruction = record.program.fetch(event.pc);
-            if event.a_record.is_some() || event.b_record.is_some() || event.c_record.is_some() {
-                record_site(&mut sites, TIMESTAMP_INJECT_KIND, flat_cpu_idx);
-            }
-            if has_write_record(event) {
-                record_site(&mut sites, BOOL_INJECT_KIND, flat_cpu_idx);
-            }
-            if instruction.opcode == Opcode::LW {
-                record_site(&mut sites, S27_INJECT_KIND, flat_cpu_idx);
-            }
-            if instruction.opcode == Opcode::ECALL {
+            if let Some(family) = control_flow_family_for_opcode(instruction.opcode) {
                 record_site(&mut sites, S28_INJECT_KIND, flat_cpu_idx);
+                record_site(&mut sites, &control_flow_site_key(family), flat_cpu_idx);
+            }
+            match instruction.opcode {
+                Opcode::LH | Opcode::LHU | Opcode::LW | Opcode::SH | Opcode::SW => {
+                    record_site(&mut sites, ADDRESS_ALIGNMENT_INJECT_KIND, flat_cpu_idx);
+                }
+                Opcode::ECALL => {
+                    let syscall = SyscallCode::from_u32(event.a);
+                    if syscall.should_send() == 1 {
+                        record_site(&mut sites, ADDRESS_ALIGNMENT_INJECT_KIND, flat_cpu_idx);
+                    }
+                }
+                _ => {}
+            }
+            match instruction.opcode {
+                Opcode::LB
+                | Opcode::LBU
+                | Opcode::LH
+                | Opcode::LHU
+                | Opcode::LW
+                | Opcode::SB
+                | Opcode::SH
+                | Opcode::SW => {
+                    record_site(&mut sites, ADDRESS_PROGRESSION_INJECT_KIND, flat_cpu_idx);
+                }
+                _ => {}
+            }
+            match instruction.opcode {
+                Opcode::LB | Opcode::LBU | Opcode::LH | Opcode::LHU | Opcode::LW => {
+                    record_site(&mut sites, LOAD_VALUE_BINDING_INJECT_KIND, flat_cpu_idx);
+                }
+                _ => {}
+            }
+            match instruction.opcode {
+                Opcode::LB | Opcode::LBU | Opcode::LH | Opcode::LHU => {
+                    record_site(&mut sites, PARTIAL_WORD_WRITE_INJECT_KIND, flat_cpu_idx);
+                }
+                _ => {}
             }
             flat_cpu_idx = flat_cpu_idx.saturating_add(1);
         }
@@ -130,32 +282,16 @@ fn collect_observed_injection_sites(records: &[ExecutionRecord]) -> BTreeMap<Str
     sites
 }
 
-fn has_write_record(event: &CpuEvent) -> bool {
-    matches!(event.a_record, Some(MemoryRecordEnum::Write(_)))
-        || matches!(event.b_record, Some(MemoryRecordEnum::Write(_)))
-        || matches!(event.c_record, Some(MemoryRecordEnum::Write(_)))
-}
-
-fn first_memory_record_mut(event: &mut CpuEvent) -> Option<&mut MemoryRecordEnum> {
-    if event.a_record.is_some() {
-        event.a_record.as_mut()
-    } else if event.b_record.is_some() {
-        event.b_record.as_mut()
-    } else {
-        event.c_record.as_mut()
-    }
-}
-
-fn resolve_witness_injection_step(
+fn resolve_runtime_injection_step(
     inject_kind: Option<&str>,
     inject_step: u64,
     observed_injection_sites: &BTreeMap<String, Vec<u64>>,
 ) -> Option<u64> {
     let kind = inject_kind?;
-    if base_inject_kind(kind) != S26_INJECT_KIND {
+    if !supports_official_injection_kind(kind) {
         return None;
     }
-    let steps = observed_injection_sites.get(S26_INJECT_KIND)?;
+    let steps = observed_injection_sites.get(base_inject_kind(kind))?;
     if inject_step == u64::MAX {
         steps.first().copied()
     } else if steps.contains(&inject_step) {
@@ -172,6 +308,8 @@ fn with_scoped_witness_injection_env<T>(
 ) -> T {
     let prev_kind = std::env::var("BEAK_SP1_WITNESS_INJECT_KIND").ok();
     let prev_step = std::env::var("BEAK_SP1_WITNESS_INJECT_STEP").ok();
+    let prev_run_id = std::env::var("BEAK_SP1_WITNESS_RUN_ID").ok();
+    let run_id = WITNESS_RUN_SEQ.fetch_add(1, Ordering::Relaxed).to_string();
 
     match (inject_kind, inject_step) {
         (Some(kind), Some(step)) => {
@@ -183,6 +321,7 @@ fn with_scoped_witness_injection_env<T>(
             std::env::remove_var("BEAK_SP1_WITNESS_INJECT_STEP");
         }
     }
+    std::env::set_var("BEAK_SP1_WITNESS_RUN_ID", &run_id);
 
     let result = f();
 
@@ -194,128 +333,32 @@ fn with_scoped_witness_injection_env<T>(
         Some(v) => std::env::set_var("BEAK_SP1_WITNESS_INJECT_STEP", v),
         None => std::env::remove_var("BEAK_SP1_WITNESS_INJECT_STEP"),
     }
+    match prev_run_id {
+        Some(v) => std::env::set_var("BEAK_SP1_WITNESS_RUN_ID", v),
+        None => std::env::remove_var("BEAK_SP1_WITNESS_RUN_ID"),
+    }
 
     result
 }
 
-fn apply_injection_to_records(
-    records: &mut [ExecutionRecord],
+fn run_sp1_executor(
+    program: &sp1_core_executor::Program,
     inject_kind: Option<&str>,
-    inject_step: u64,
-    observed_injection_sites: &BTreeMap<String, Vec<u64>>,
-) -> bool {
-    let Some(kind) = inject_kind else {
-        return false;
-    };
-    let base_kind = base_inject_kind(kind);
+    inject_step: Option<u64>,
+) -> Result<Executor<'static>, String> {
+    let mut executor = Executor::new(program.clone(), SP1CoreOpts::default());
+    executor.executor_mode = ExecutorMode::Trace;
+    with_scoped_witness_injection_env(
+        inject_kind.filter(|kind| supports_official_injection_kind(kind)),
+        inject_step,
+        || executor.run(),
+    )
+    .map_err(|e| format!("sp1 executor run failed: {e}"))?;
+    Ok(executor)
+}
 
-    if inject_step != u64::MAX
-        && !observed_injection_sites
-            .get(base_kind)
-            .map(|steps| steps.contains(&inject_step))
-            .unwrap_or(false)
-    {
-        return false;
-    }
-
-    let mut flat_cpu_idx = 0u64;
-    let target_step = if inject_step == u64::MAX { None } else { Some(inject_step) };
-    for record in records.iter_mut() {
-        for event in &mut record.cpu_events {
-            let instruction = record.program.fetch(event.pc);
-            let step_match = target_step.map(|s| s == flat_cpu_idx).unwrap_or(true);
-            if !step_match {
-                flat_cpu_idx = flat_cpu_idx.saturating_add(1);
-                continue;
-            }
-            match base_kind {
-                // Simulate timestamp wraparound style witness corruption on memory accesses.
-                TIMESTAMP_INJECT_KIND => {
-                    event.clk = event.clk.wrapping_add(u32::MAX);
-                    if let Some(mem) = first_memory_record_mut(event) {
-                        match mem {
-                            MemoryRecordEnum::Read(r) => {
-                                r.prev_timestamp = r.timestamp;
-                                r.timestamp = 0;
-                                return true;
-                            }
-                            MemoryRecordEnum::Write(w) => {
-                                w.prev_timestamp = w.timestamp;
-                                w.timestamp = 0;
-                                return true;
-                            }
-                        }
-                    }
-                }
-                // Simulate local-event multiplicity corruption.
-                BOOL_INJECT_KIND => {
-                    if let Some(MemoryRecordEnum::Write(w)) = event.a_record.as_mut() {
-                        w.value ^= 1;
-                        return true;
-                    }
-                    if let Some(MemoryRecordEnum::Write(w)) = event.b_record.as_mut() {
-                        w.value ^= 1;
-                        return true;
-                    }
-                    if let Some(MemoryRecordEnum::Write(w)) = event.c_record.as_mut() {
-                        w.value ^= 1;
-                        return true;
-                    }
-                }
-                // s27: force LW row to look non-memory by breaking opcode->memory selector relation.
-                S27_INJECT_KIND => {
-                    if instruction.opcode == Opcode::LW {
-                        match inject_variant_mode(kind) {
-                            Some("noop_prefix") => {}
-                            Some("opcode_alias_only") => {
-                                event.a = 0;
-                                return true;
-                            }
-                            Some("memory_drop_only") => {
-                                event.a_record = None;
-                                event.b_record = None;
-                                event.c_record = None;
-                                return true;
-                            }
-                            _ => {
-                                event.a = 0;
-                                event.a_record = None;
-                                event.b_record = None;
-                                event.c_record = None;
-                                return true;
-                            }
-                        }
-                    }
-                }
-                // s28: forge an arbitrary ECALL next_pc.
-                S28_INJECT_KIND => {
-                    if instruction.opcode == Opcode::ECALL {
-                        match inject_variant_mode(kind) {
-                            Some("noop_prefix") => {}
-                            Some("near_jump") => {
-                                event.next_pc = event.pc.wrapping_add(8);
-                                return true;
-                            }
-                            Some("mid_jump") => {
-                                event.next_pc = event.pc.wrapping_add(0x40);
-                                return true;
-                            }
-                            _ => {
-                                event.next_pc = event.pc.wrapping_add(0x10000);
-                                return true;
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-            if target_step.is_some() {
-                return false;
-            }
-            flat_cpu_idx = flat_cpu_idx.saturating_add(1);
-        }
-    }
-    false
+fn supports_official_injection(inject_kind: Option<&str>) -> bool {
+    inject_kind.map(supports_official_injection_kind).unwrap_or(true)
 }
 
 fn run_sp1_real_backend(
@@ -325,32 +368,44 @@ fn run_sp1_real_backend(
     inject_step: u64,
 ) -> Result<RealRunnerResponse, String> {
     let program = build_sp1_program(words)?;
-    let mut executor = Executor::new(program, SP1CoreOpts::default());
-    executor.executor_mode = ExecutorMode::Trace;
-    executor.run().map_err(|e| format!("sp1 executor run failed: {e}"))?;
-
-    let mut records = std::mem::take(&mut executor.records);
-    let observed_injection_sites = collect_observed_injection_sites(&records);
-    let mut injection_applied = apply_injection_to_records(
-        &mut records,
-        inject_kind,
-        inject_step,
-        &observed_injection_sites,
-    );
-    let witness_injection_step =
-        resolve_witness_injection_step(inject_kind, inject_step, &observed_injection_sites);
-    if witness_injection_step.is_some() && inject_kind.map(base_inject_kind) == Some(S26_INJECT_KIND) {
-        injection_applied = true;
+    let mut executor = run_sp1_executor(&program, None, None)?;
+    let baseline_records = std::mem::take(&mut executor.records);
+    let observed_injection_sites = collect_observed_injection_sites(&baseline_records);
+    if !supports_official_injection(inject_kind) {
+        let trace = Sp1Trace::from_execution_records(words, &baseline_records)?;
+        let mut regs = [0u32; 32];
+        for i in 0..32usize {
+            regs[i] = executor.register(Register::from_u8(i as u8));
+        }
+        return Ok(RealRunnerResponse {
+            final_regs: Some(regs),
+            micro_op_count: trace.instruction_count(),
+            bucket_hits: trace.bucket_hits().to_vec(),
+            trace_signals: trace.trace_signals().to_vec(),
+            prove_ok: false,
+            verify_ok: false,
+            error: Some(format!(
+                "sp1 official prove path only supports baseline and {S28_INJECT_KIND}; requested {} still depended on the removed raw-record shortcut",
+                inject_kind.unwrap_or_default()
+            )),
+            observed_injection_sites,
+            injection_applied: false,
+        });
     }
-    let trace = Sp1Trace::from_execution_records(words, &records)?;
-    let use_official_run_test =
-        inject_kind.is_none() || inject_kind.map(base_inject_kind) == Some(S26_INJECT_KIND);
-    let (prove_ok, verify_ok, prove_verify_error) = if use_official_run_test {
-        run_sp1_prove_verify_with_run_test(&executor.program, inject_kind, witness_injection_step)
+
+    let runtime_injection_step =
+        resolve_runtime_injection_step(inject_kind, inject_step, &observed_injection_sites);
+    let injection_applied = runtime_injection_step.is_some();
+    let records = if injection_applied {
+        executor = run_sp1_executor(&program, inject_kind, runtime_injection_step)?;
+        std::mem::take(&mut executor.records)
     } else {
-        let prover: SP1Prover = SP1Prover::new();
-        run_sp1_prove_verify_with_prover(&prover, &executor.program, &records)
+        baseline_records
     };
+
+    let trace = Sp1Trace::from_execution_records(words, &records)?;
+    let (prove_ok, verify_ok, prove_verify_error) =
+        run_sp1_prove_verify_with_run_test(&executor.program, inject_kind, runtime_injection_step);
 
     let mut regs = [0u32; 32];
     for i in 0..32usize {
@@ -370,45 +425,13 @@ fn run_sp1_real_backend(
     })
 }
 
-fn run_sp1_prove_verify_with_prover(
-    prover: &SP1Prover,
-    program: &sp1_core_executor::Program,
-    records: &[ExecutionRecord],
-) -> (bool, bool, Option<String>) {
-    let (pk, vk) = prover.core_prover.setup(program);
-    let mut prove_challenger = prover.core_prover.config().challenger();
-    let mut prove_records = records.to_vec();
-    for (idx, shard) in prove_records.iter_mut().enumerate() {
-        shard.public_values.shard = (idx + 1) as u32;
-    }
-
-    let proof = match prover.core_prover.prove(
-        &pk,
-        prove_records,
-        &mut prove_challenger,
-        SP1CoreOpts::default(),
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            return (false, false, Some(format!("sp1 core prove failed: {e}")));
-        }
-    };
-
-    let mut verify_challenger = prover.core_prover.config().challenger();
-    if let Err(e) = prover.core_prover.machine().verify(&vk, &proof, &mut verify_challenger) {
-        return (true, false, Some(format!("sp1 core verify failed: {e}")));
-    }
-
-    (true, true, None)
-}
-
 fn run_sp1_prove_verify_with_run_test(
     program: &sp1_core_executor::Program,
     inject_kind: Option<&str>,
     witness_injection_step: Option<u64>,
 ) -> (bool, bool, Option<String>) {
     let prove_result = with_scoped_witness_injection_env(
-        inject_kind.filter(|kind| base_inject_kind(kind) == S26_INJECT_KIND),
+        inject_kind.filter(|kind| supports_official_injection_kind(kind)),
         witness_injection_step,
         || run_test::<CpuProver<_, _>>(program.clone()),
     );
@@ -522,75 +545,157 @@ impl Sp1Backend {
             .unwrap_or(0)
     }
 
-    fn s27_variant_specs() -> Vec<String> {
+    fn s28_variant_specs_for_family(family: &str) -> Vec<String> {
         let mut specs = Vec::new();
         for rank in 0..768u32 {
-            specs.push(format!("mode=noop_prefix,rank={rank}"));
+            specs.push(format!("family={family},mode=noop_prefix,rank={rank}"));
         }
-        specs.push("mode=opcode_alias_only".to_string());
-        specs.push("mode=memory_drop_only".to_string());
-        specs.push("mode=legacy_selector_break".to_string());
+        match family {
+            "branch" => {
+                specs.push("family=branch,mode=force_fallthrough".to_string());
+                specs.push("family=branch,mode=force_taken_near".to_string());
+                specs.push("family=branch,mode=legacy_far_jump".to_string());
+            }
+            "jump" => {
+                specs.push("family=jump,mode=force_sequential".to_string());
+                specs.push("family=jump,mode=force_near_jump".to_string());
+                specs.push("family=jump,mode=legacy_far_jump".to_string());
+            }
+            _ => {
+                specs.push("family=ecall,mode=near_jump".to_string());
+                specs.push("family=ecall,mode=mid_jump".to_string());
+                specs.push("family=ecall,mode=legacy_far_jump".to_string());
+            }
+        }
         specs
     }
 
-    fn s28_variant_specs() -> Vec<String> {
+    fn address_progression_variant_specs() -> Vec<String> {
         let mut specs = Vec::new();
-        for rank in 0..768u32 {
+        for rank in 0..512u32 {
             specs.push(format!("mode=noop_prefix,rank={rank}"));
         }
-        specs.push("mode=near_jump".to_string());
-        specs.push("mode=mid_jump".to_string());
-        specs.push("mode=legacy_far_jump".to_string());
+        specs.push("mode=advance_width".to_string());
+        specs.push("mode=advance_word".to_string());
+        specs.push("mode=far_page".to_string());
         specs
     }
 
-    fn inject_kinds_for_base(inject_kind: &str) -> Vec<String> {
-        match inject_kind {
-            S27_INJECT_KIND => Self::s27_variant_specs()
-                .into_iter()
-                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
-                .collect(),
-            S28_INJECT_KIND => Self::s28_variant_specs()
-                .into_iter()
-                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
-                .collect(),
-            _ => vec![inject_kind.to_string()],
+    fn address_alignment_variant_specs() -> Vec<String> {
+        let mut specs = Vec::new();
+        for rank in 0..512u32 {
+            specs.push(format!("mode=noop_prefix,rank={rank}"));
         }
+        specs.push("mode=misalign_plus_one".to_string());
+        specs.push("mode=misalign_plus_three".to_string());
+        specs.push("mode=precompile_ptr_plus_one".to_string());
+        specs.push("mode=precompile_ptr_plus_two".to_string());
+        specs.push("mode=global_event_plus_one".to_string());
+        specs.push("mode=global_event_plus_two".to_string());
+        specs
+    }
+
+    fn load_value_variant_specs() -> Vec<String> {
+        let mut specs = Vec::new();
+        for rank in 0..512u32 {
+            specs.push(format!("mode=noop_prefix,rank={rank}"));
+        }
+        specs.push("mode=xor_low_bit".to_string());
+        specs.push("mode=flip_sign_bit".to_string());
+        specs.push("mode=legacy_xor_mask".to_string());
+        specs
+    }
+
+    fn partial_word_variant_specs() -> Vec<String> {
+        let mut specs = Vec::new();
+        for rank in 0..512u32 {
+            specs.push(format!("mode=noop_prefix,rank={rank}"));
+        }
+        specs.push("mode=flip_upper_bits".to_string());
+        specs.push("mode=set_upper_ones".to_string());
+        specs
     }
 
     fn semantic_candidate_priority(candidate: &SemanticInjectionCandidate) -> u8 {
         let bucket_id = candidate.bucket_id.as_str();
-        if bucket_id == semantic::row::PADDING_INTERACTION_SEND.id {
-            0
-        } else if bucket_id == semantic::control::ECALL_NEXT_PC.id {
+        if bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id {
             1
-        } else if bucket_id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id {
+        } else if bucket_id == semantic::memory::LOAD_VALUE_BINDING.id {
             2
-        } else {
+        } else if bucket_id == semantic::exec::PARTIAL_WORD_WRITE_CONSISTENCY.id {
             3
+        } else if bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id {
+            4
+        } else if bucket_id == semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.id {
+            5
+        } else {
+            6
         }
     }
 
     fn semantic_candidate_from_hit(&self, hit: &BucketHit) -> Vec<SemanticInjectionCandidate> {
         let anchor = Self::step_from_hit(hit);
         let bucket_id = hit.bucket_id.as_str();
-        let (semantic_class, inject_kind, fallback_schedule) =
-            if bucket_id == semantic::row::PADDING_INTERACTION_SEND.id {
+        let control_flow_family =
+            hit.details.get("control_flow_family").and_then(|value| value.as_str());
+        let control_flow_site_key = control_flow_family.map(control_flow_site_key);
+        let (semantic_class, inject_kinds, schedule_lookup_key, fallback_schedule) =
+            if bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id {
                 (
-                    semantic::row::PADDING_INTERACTION_SEND.semantic_class,
-                    S26_INJECT_KIND,
-                    InjectionSchedule::Exact(0),
-                )
-            } else if bucket_id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id {
-                (
-                    semantic::memory::KIND_SELECTOR_CONSISTENCY.semantic_class,
-                    S27_INJECT_KIND,
+                    control_flow_semantic_class(control_flow_family),
+                    Self::s28_variant_specs_for_family(control_flow_family.unwrap_or("ecall"))
+                        .into_iter()
+                        .map(|variant| inject_kind_with_variant(S28_INJECT_KIND, &variant))
+                        .collect::<Vec<_>>(),
+                    control_flow_site_key.unwrap_or_else(|| S28_INJECT_KIND.to_string()),
                     InjectionSchedule::AroundAnchor(anchor),
                 )
-            } else if bucket_id == semantic::control::ECALL_NEXT_PC.id {
+            } else if bucket_id == semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.id {
                 (
-                    semantic::control::ECALL_NEXT_PC.semantic_class,
-                    S28_INJECT_KIND,
+                    semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.semantic_class.to_string(),
+                    Self::address_progression_variant_specs()
+                        .into_iter()
+                        .map(|variant| {
+                            inject_kind_with_variant(ADDRESS_PROGRESSION_INJECT_KIND, &variant)
+                        })
+                        .collect::<Vec<_>>(),
+                    ADDRESS_PROGRESSION_INJECT_KIND.to_string(),
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id {
+                (
+                    semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.semantic_class.to_string(),
+                    Self::address_alignment_variant_specs()
+                        .into_iter()
+                        .map(|variant| {
+                            inject_kind_with_variant(ADDRESS_ALIGNMENT_INJECT_KIND, &variant)
+                        })
+                        .collect::<Vec<_>>(),
+                    ADDRESS_ALIGNMENT_INJECT_KIND.to_string(),
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::memory::LOAD_VALUE_BINDING.id {
+                (
+                    semantic::memory::LOAD_VALUE_BINDING.semantic_class.to_string(),
+                    Self::load_value_variant_specs()
+                        .into_iter()
+                        .map(|variant| {
+                            inject_kind_with_variant(LOAD_VALUE_BINDING_INJECT_KIND, &variant)
+                        })
+                        .collect::<Vec<_>>(),
+                    LOAD_VALUE_BINDING_INJECT_KIND.to_string(),
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::exec::PARTIAL_WORD_WRITE_CONSISTENCY.id {
+                (
+                    semantic::exec::PARTIAL_WORD_WRITE_CONSISTENCY.semantic_class.to_string(),
+                    Self::partial_word_variant_specs()
+                        .into_iter()
+                        .map(|variant| {
+                            inject_kind_with_variant(PARTIAL_WORD_WRITE_INJECT_KIND, &variant)
+                        })
+                        .collect::<Vec<_>>(),
+                    PARTIAL_WORD_WRITE_INJECT_KIND.to_string(),
                     InjectionSchedule::AroundAnchor(anchor),
                 )
             } else {
@@ -598,17 +703,17 @@ impl Sp1Backend {
             };
         let schedule = self
             .last_observed_injection_sites
-            .get(base_inject_kind(inject_kind))
+            .get(schedule_lookup_key.as_str())
             .map(|steps| {
                 InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor))
             })
             .unwrap_or(fallback_schedule);
-        Self::inject_kinds_for_base(inject_kind)
+        inject_kinds
             .into_iter()
             .map(|kind| SemanticInjectionCandidate {
                 bucket_id: hit.bucket_id.clone(),
                 trigger_signal_id: None,
-                semantic_class: semantic_class.to_string(),
+                semantic_class: semantic_class.clone(),
                 inject_kind: kind,
                 schedule: schedule.clone(),
             })
@@ -690,7 +795,6 @@ impl Sp1Backend {
         }
     }
 }
-
 
 impl BenchmarkBackend for Sp1Backend {
     fn is_usable_seed(&self, words: &[u32]) -> bool {
@@ -825,5 +929,84 @@ impl BenchmarkBackend for Sp1Backend {
 impl Drop for Sp1Backend {
     fn drop(&mut self) {
         self.stop_worker();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        control_flow_semantic_class, control_flow_site_key, inject_kind_with_variant,
+        mutated_control_flow_next_pc, run_backend_once, InjectionSchedule, Opcode, Sp1Backend,
+        S28_INJECT_KIND,
+    };
+    use beak_core::trace::{semantic, BucketHit};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn s28_mutation_is_family_scoped() {
+        let branch_kind =
+            inject_kind_with_variant(S28_INJECT_KIND, "family=branch,mode=force_fallthrough");
+        assert_eq!(mutated_control_flow_next_pc(&branch_kind, Opcode::BEQ, 0x20, 0x28), Some(0x24));
+        assert_eq!(mutated_control_flow_next_pc(&branch_kind, Opcode::ECALL, 0x20, 0x24), None);
+
+        let jump_kind =
+            inject_kind_with_variant(S28_INJECT_KIND, "family=jump,mode=force_sequential");
+        assert_eq!(mutated_control_flow_next_pc(&jump_kind, Opcode::JAL, 0x40, 0x80), Some(0x44));
+
+        let ecall_kind = inject_kind_with_variant(S28_INJECT_KIND, "family=ecall,mode=near_jump");
+        assert_eq!(
+            mutated_control_flow_next_pc(&ecall_kind, Opcode::ECALL, 0x80, 0x84),
+            Some(0x88)
+        );
+    }
+
+    #[test]
+    fn control_flow_hit_uses_family_specific_schedule_and_class() {
+        let mut backend = Sp1Backend::new(16, 1000);
+        backend
+            .last_observed_injection_sites
+            .insert(control_flow_site_key("branch"), vec![12, 4, 9]);
+
+        let mut details = HashMap::new();
+        details.insert("step_idx".to_string(), json!(8));
+        details.insert("control_flow_family".to_string(), json!("branch"));
+        let hit = BucketHit::semantic(semantic::exec::CONTROL_FLOW_BINDING, details);
+
+        let candidates = backend.semantic_candidate_from_hit(&hit);
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().all(
+            |candidate| candidate.semantic_class == control_flow_semantic_class(Some("branch"))
+        ));
+        assert!(candidates.iter().all(|candidate| candidate.inject_kind.contains("family=branch")));
+
+        match &candidates[0].schedule {
+            InjectionSchedule::Explicit(steps) => assert_eq!(steps, &vec![9, 4, 12]),
+            other => panic!("expected explicit branch schedule, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn s28_official_run_test_path_applies_injection() {
+        let words = vec![0x0020_0293, 0x0030_0513, 0x0000_0593, 0x0000_0613, 0x0000_0073];
+
+        let baseline = run_backend_once(1, &words, 10_000, 0, None, 0).expect("baseline run");
+        assert!(
+            baseline.backend_error.is_none(),
+            "baseline backend_error={:?}",
+            baseline.backend_error
+        );
+
+        let injected = run_backend_once(
+            2,
+            &words,
+            10_000,
+            0,
+            Some("sp1.semantic.exec.control_flow_binding::family=ecall,mode=near_jump"),
+            u64::MAX,
+        )
+        .expect("injected run");
+
+        assert!(injected.injection_applied, "s28 official path did not apply injection");
     }
 }

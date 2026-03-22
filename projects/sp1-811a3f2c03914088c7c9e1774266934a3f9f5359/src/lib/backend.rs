@@ -11,12 +11,11 @@ use beak_core::fuzz::benchmark::{
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic};
 use serde::{Deserialize, Serialize};
-use sp1_core_executor::{
-    ExecutionRecord, Executor, ExecutorMode, Register, events::MemoryRecordEnum,
-};
+use sp1_core_executor::events::{CpuEvent, MemInstrEvent, MemoryRecordEnum};
+use sp1_core_executor::{ExecutionRecord, Executor, ExecutorMode, Register};
+use sp1_core_machine::io::SP1Stdin;
 use sp1_core_machine::utils::run_test;
-use sp1_prover::SP1Prover;
-use sp1_stark::{CpuProver, MachineProver, SP1CoreOpts, StarkGenericConfig};
+use sp1_stark::{CpuProver, SP1CoreOpts};
 
 use crate::trace::{Sp1Trace, build_sp1_program};
 
@@ -66,8 +65,8 @@ struct RealRunnerResponse {
     injection_applied: bool,
 }
 
-const TIMESTAMP_INJECT_KIND: &str = "sp1.audit_timestamp.mem_row_wraparound";
-const BOOL_INJECT_KIND: &str = "sp1.audit_multiplicity_bool_constraint.local_event_row";
+const TIMESTAMP_INJECT_KIND: &str = "sp1.semantic.memory.timestamped_load_path";
+const BOOL_INJECT_KIND: &str = "sp1.semantic.lookup.boolean_multiplicity";
 
 fn base_inject_kind(kind: &str) -> &str {
     kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
@@ -99,123 +98,36 @@ fn record_site(sites: &mut BTreeMap<String, Vec<u64>>, kind: &str, step: u64) {
     }
 }
 
-fn collect_observed_injection_sites(records: &[ExecutionRecord]) -> BTreeMap<String, Vec<u64>> {
-    let mut sites = BTreeMap::<String, Vec<u64>>::new();
+fn visit_memory_steps<F>(records: &[Box<ExecutionRecord>], mut f: F)
+where
+    F: FnMut(u64, &CpuEvent, &MemInstrEvent),
+{
     let mut flat_cpu_idx = 0u64;
     for record in records {
-        for event in &record.cpu_events {
-            if event.memory_record.is_some() {
-                record_site(&mut sites, TIMESTAMP_INJECT_KIND, flat_cpu_idx);
-            }
-            if matches!(event.memory_record.as_ref(), Some(MemoryRecordEnum::Write(_))) {
-                record_site(&mut sites, BOOL_INJECT_KIND, flat_cpu_idx);
+        let mut mem_iter = record.memory_instr_events.iter();
+        for cpu in &record.cpu_events {
+            let insn = record.program.fetch(cpu.pc);
+            if insn.is_memory_load_instruction() || insn.is_memory_store_instruction() {
+                if let Some(mem_event) = mem_iter.next() {
+                    f(flat_cpu_idx, cpu, mem_event);
+                }
             }
             flat_cpu_idx = flat_cpu_idx.saturating_add(1);
         }
     }
-    sites
 }
 
-fn apply_injection_to_records(
-    records: &mut [ExecutionRecord],
-    inject_kind: Option<&str>,
-    inject_step: u64,
-    observed_injection_sites: &BTreeMap<String, Vec<u64>>,
-) -> bool {
-    let Some(kind) = inject_kind else {
-        return false;
-    };
-    let base_kind = base_inject_kind(kind);
-
-    if inject_step != u64::MAX
-        && !observed_injection_sites
-            .get(base_kind)
-            .map(|steps| steps.contains(&inject_step))
-            .unwrap_or(false)
-    {
-        return false;
-    }
-
-    let mut flat_cpu_idx = 0u64;
-    let target_step = if inject_step == u64::MAX { None } else { Some(inject_step) };
-    for record in records.iter_mut() {
-        for event in &mut record.cpu_events {
-            let step_match = target_step.map(|s| s == flat_cpu_idx).unwrap_or(true);
-            if !step_match {
-                flat_cpu_idx = flat_cpu_idx.saturating_add(1);
-                continue;
-            }
-            match base_kind {
-                // Simulate timestamp wraparound style witness corruption on memory accesses.
-                TIMESTAMP_INJECT_KIND => match inject_variant_mode(kind) {
-                    Some("noop_prefix") => {}
-                    Some("clk_only_wrap") => {
-                        event.clk = event.clk.wrapping_add(u32::MAX);
-                        return true;
-                    }
-                    Some("prev_only_zero") => {
-                        if let Some(mem) = event.memory_record.as_mut() {
-                            match mem {
-                                MemoryRecordEnum::Read(r) => {
-                                    r.prev_timestamp = 0;
-                                    return true;
-                                }
-                                MemoryRecordEnum::Write(w) => {
-                                    w.prev_timestamp = 0;
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        event.clk = event.clk.wrapping_add(u32::MAX);
-                        if let Some(mem) = event.memory_record.as_mut() {
-                            match mem {
-                                MemoryRecordEnum::Read(r) => {
-                                    r.prev_timestamp = r.timestamp;
-                                    r.timestamp = 0;
-                                    return true;
-                                }
-                                MemoryRecordEnum::Write(w) => {
-                                    w.prev_timestamp = w.timestamp;
-                                    w.timestamp = 0;
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                },
-                // Simulate local-event multiplicity corruption.
-                BOOL_INJECT_KIND => match inject_variant_mode(kind) {
-                    Some("noop_prefix") => {}
-                    Some("write_timestamp_bias") => {
-                        if let Some(MemoryRecordEnum::Write(w)) = event.memory_record.as_mut() {
-                            w.prev_timestamp = w.timestamp;
-                            return true;
-                        }
-                    }
-                    Some("write_value_bias") => {
-                        if let Some(MemoryRecordEnum::Write(w)) = event.memory_record.as_mut() {
-                            w.value = w.value.wrapping_add(1);
-                            return true;
-                        }
-                    }
-                    _ => {
-                        if let Some(MemoryRecordEnum::Write(w)) = event.memory_record.as_mut() {
-                            w.value ^= 1;
-                            return true;
-                        }
-                    }
-                },
-                _ => {}
-            }
-            if target_step.is_some() {
-                return false;
-            }
-            flat_cpu_idx = flat_cpu_idx.saturating_add(1);
+fn collect_observed_injection_sites(
+    records: &[Box<ExecutionRecord>],
+) -> BTreeMap<String, Vec<u64>> {
+    let mut sites = BTreeMap::<String, Vec<u64>>::new();
+    visit_memory_steps(records, |step, _cpu, mem_event| {
+        record_site(&mut sites, TIMESTAMP_INJECT_KIND, step);
+        if matches!(mem_event.mem_access, MemoryRecordEnum::Write(_)) {
+            record_site(&mut sites, BOOL_INJECT_KIND, step);
         }
-    }
-    false
+    });
+    sites
 }
 
 fn bool_padding_injection_requested(
@@ -272,6 +184,19 @@ fn timestamp_padding_injection_requested(
         .unwrap_or(false)
 }
 
+fn supports_official_injection(inject_kind: Option<&str>) -> bool {
+    match inject_kind.map(base_inject_kind) {
+        None => true,
+        Some(TIMESTAMP_INJECT_KIND) => {
+            inject_kind.and_then(inject_variant_mode) == Some("padding_zero_ts")
+        }
+        Some(BOOL_INJECT_KIND) => {
+            inject_kind.and_then(inject_variant_mode) == Some("padding_alias")
+        }
+        _ => false,
+    }
+}
+
 fn run_sp1_official_trace_prove_verify(
     program: &sp1_core_executor::Program,
     inject_bool_padding_alias: bool,
@@ -287,7 +212,7 @@ fn run_sp1_official_trace_prove_verify(
     } else {
         std::env::remove_var("BEAK_SP1_TIMESTAMP_PADDING_MODE");
     }
-    let result = run_test::<CpuProver<_, _>>(program.clone());
+    let result = run_test::<CpuProver<_, _>>(program.clone(), SP1Stdin::new());
     std::env::remove_var("BEAK_SP1_BOOL_PADDING_MODE");
     std::env::remove_var("BEAK_SP1_TIMESTAMP_PADDING_MODE");
     match result {
@@ -302,75 +227,49 @@ fn run_sp1_real_backend(
     inject_kind: Option<&str>,
     inject_step: u64,
 ) -> Result<RealRunnerResponse, String> {
-    let prover: SP1Prover = SP1Prover::new();
     let program = build_sp1_program(words)?;
     let mut executor = Executor::new(program, SP1CoreOpts::default());
     executor.executor_mode = ExecutorMode::Trace;
     executor.run().map_err(|e| format!("sp1 executor run failed: {e}"))?;
 
-    let mut records = std::mem::take(&mut executor.records);
+    let records = std::mem::take(&mut executor.records);
     let observed_injection_sites = collect_observed_injection_sites(&records);
-    let baseline_trace = Sp1Trace::from_execution_records(words, &records)?;
-    let bool_bucket_seen = baseline_trace
-        .bucket_hits()
-        .iter()
-        .any(|hit| hit.bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id);
-    let timestamp_bucket_seen = baseline_trace
-        .bucket_hits()
-        .iter()
-        .any(|hit| hit.bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id);
-    let store_bucket_seen = baseline_trace.trace_signals().contains(&TraceSignal::HasStore);
-    let supports_official_trace_path =
-        bool_bucket_seen || (timestamp_bucket_seen && store_bucket_seen);
-    let inject_base_kind = inject_kind.map(base_inject_kind);
-    let inject_mode = inject_kind.and_then(inject_variant_mode);
-    let use_official_trace_path = supports_official_trace_path
-        && (inject_kind.is_none()
-            || (inject_base_kind == Some(BOOL_INJECT_KIND)
-                && inject_mode == Some("padding_alias"))
-            || (inject_base_kind == Some(TIMESTAMP_INJECT_KIND)
-                && inject_mode == Some("padding_zero_ts")));
+    let trace = Sp1Trace::from_execution_records(words, &records)?;
+    if !supports_official_injection(inject_kind) {
+        let mut regs = [0u32; 32];
+        for i in 0..32usize {
+            regs[i] = executor.register(Register::from_u8(i as u8));
+        }
+        return Ok(RealRunnerResponse {
+            final_regs: Some(regs),
+            micro_op_count: trace.instruction_count(),
+            bucket_hits: trace.bucket_hits().to_vec(),
+            trace_signals: trace.trace_signals().to_vec(),
+            prove_ok: false,
+            verify_ok: false,
+            error: Some(format!(
+                "sp1 official prove path only supports baseline plus {BOOL_INJECT_KIND}::mode=padding_alias and {TIMESTAMP_INJECT_KIND}::mode=padding_zero_ts; requested {} still depended on the removed raw-record shortcut",
+                inject_kind.unwrap_or_default()
+            )),
+            observed_injection_sites,
+            injection_applied: false,
+        });
+    }
 
-    let (trace, prove_ok, verify_ok, prove_verify_error, injection_applied) =
-        if use_official_trace_path {
-            let inject_bool_padding_alias = bool_padding_injection_requested(
-                inject_kind,
-                inject_step,
-                &observed_injection_sites,
-            );
-            let inject_timestamp_padding_zero = timestamp_padding_injection_requested(
-                inject_kind,
-                inject_step,
-                &observed_injection_sites,
-            );
-            let (prove_ok, verify_ok, prove_verify_error) = run_sp1_official_trace_prove_verify(
-                &executor.program,
-                inject_bool_padding_alias,
-                inject_timestamp_padding_zero,
-            );
-            (
-                baseline_trace,
-                prove_ok,
-                verify_ok,
-                prove_verify_error,
-                inject_bool_padding_alias || inject_timestamp_padding_zero,
-            )
-        } else {
-            let injection_applied = apply_injection_to_records(
-                &mut records,
-                inject_kind,
-                inject_step,
-                &observed_injection_sites,
-            );
-            let trace = Sp1Trace::from_execution_records(words, &records)?;
-            let (prove_ok, verify_ok, prove_verify_error) =
-                run_sp1_prove_verify_with_prover(&prover, &executor.program, &records);
-            (trace, prove_ok, verify_ok, prove_verify_error, injection_applied)
-        };
+    let inject_bool_padding_alias =
+        bool_padding_injection_requested(inject_kind, inject_step, &observed_injection_sites);
+    let inject_timestamp_padding_zero =
+        timestamp_padding_injection_requested(inject_kind, inject_step, &observed_injection_sites);
+    let injection_applied = inject_bool_padding_alias || inject_timestamp_padding_zero;
+    let (prove_ok, verify_ok, prove_verify_error) = run_sp1_official_trace_prove_verify(
+        &executor.program,
+        inject_bool_padding_alias,
+        inject_timestamp_padding_zero,
+    );
 
     let mut regs = [0u32; 32];
     for i in 0..32usize {
-        regs[i] = executor.register(Register::from_u32(i as u32));
+        regs[i] = executor.register(Register::from_u8(i as u8));
     }
 
     Ok(RealRunnerResponse {
@@ -384,38 +283,6 @@ fn run_sp1_real_backend(
         observed_injection_sites,
         injection_applied,
     })
-}
-
-fn run_sp1_prove_verify_with_prover(
-    prover: &SP1Prover,
-    program: &sp1_core_executor::Program,
-    records: &[ExecutionRecord],
-) -> (bool, bool, Option<String>) {
-    let (pk, vk) = prover.core_prover.setup(program);
-    let mut prove_challenger = prover.core_prover.config().challenger();
-    let mut prove_records = records.to_vec();
-    for (idx, shard) in prove_records.iter_mut().enumerate() {
-        shard.public_values.shard = (idx + 1) as u32;
-    }
-
-    let proof = match prover.core_prover.prove(
-        &pk,
-        prove_records,
-        &mut prove_challenger,
-        SP1CoreOpts::default(),
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            return (false, false, Some(format!("sp1 core prove failed: {e}")));
-        }
-    };
-
-    let mut verify_challenger = prover.core_prover.config().challenger();
-    if let Err(e) = prover.core_prover.machine().verify(&vk, &proof, &mut verify_challenger) {
-        return (true, false, Some(format!("sp1 core verify failed: {e}")));
-    }
-
-    (true, true, None)
 }
 
 pub fn run_backend_once(
@@ -536,27 +403,11 @@ impl Sp1Backend {
     }
 
     fn timestamp_variant_specs() -> Vec<String> {
-        let mut specs = Vec::new();
-        for rank in 0..1600u32 {
-            specs.push(format!("mode=noop_prefix,rank={rank}"));
-        }
-        specs.push("mode=padding_zero_ts".to_string());
-        specs.push("mode=clk_only_wrap".to_string());
-        specs.push("mode=prev_only_zero".to_string());
-        specs.push("mode=legacy_wrap".to_string());
-        specs
+        vec!["mode=padding_zero_ts".to_string()]
     }
 
     fn bool_variant_specs() -> Vec<String> {
-        let mut specs = Vec::new();
-        for rank in 0..1600u32 {
-            specs.push(format!("mode=noop_prefix,rank={rank}"));
-        }
-        specs.push("mode=padding_alias".to_string());
-        specs.push("mode=write_timestamp_bias".to_string());
-        specs.push("mode=write_value_bias".to_string());
-        specs.push("mode=legacy_flip".to_string());
-        specs
+        vec!["mode=padding_alias".to_string()]
     }
 
     fn inject_kinds_for_base(inject_kind: &str) -> Vec<String> {

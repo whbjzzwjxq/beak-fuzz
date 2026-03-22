@@ -2,20 +2,20 @@ use beak_core::fuzz::benchmark::{
     BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::trace::{Trace, TraceSignal, semantic};
+use beak_core::trace::{semantic, Trace, TraceSignal};
 
 use crate::trace::OpenVMTrace;
 use openvm_circuit::arch::VmExecutor;
-use openvm_instructions::LocalOpcode;
-use openvm_instructions::SystemOpcode;
 use openvm_instructions::exe::VmExe;
 use openvm_instructions::instruction::Instruction;
 use openvm_instructions::program::Program;
 use openvm_instructions::riscv::RV32_REGISTER_AS;
+use openvm_instructions::LocalOpcode;
+use openvm_instructions::SystemOpcode;
 use openvm_rv32im_transpiler::{Rv32ITranspilerExtension, Rv32MTranspilerExtension};
 use openvm_sdk::config::{AppConfig, SdkVmConfig};
 use openvm_sdk::prover::AppProver;
-use openvm_sdk::{F, Sdk, StdIn};
+use openvm_sdk::{Sdk, StdIn, F};
 use openvm_stark_backend::p3_field::PrimeField32;
 use openvm_transpiler::transpiler::Transpiler;
 use serde::{Deserialize, Serialize};
@@ -96,20 +96,25 @@ fn base_inject_kind(kind: &str) -> &str {
 }
 
 fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
-    if variant.is_empty() { kind.to_string() } else { format!("{kind}::{variant}") }
+    if variant.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind}::{variant}")
+    }
 }
 
 pub fn run_backend_once(
     request_id: u64,
     words: &[u32],
-    current_iteration: u64,
+    _current_iteration: u64,
     inject_kind: Option<&str>,
     inject_step: u64,
 ) -> Result<WorkerResponse, String> {
-    let t_total = Instant::now();
     let mut eval = BackendEval::default();
     match inject_kind {
-        Some(kind) if base_inject_kind(kind) == "openvm.audit_o8.loadstore_imm_sign" => {
+        Some(kind)
+            if base_inject_kind(kind) == "openvm.semantic.memory.immediate_sign_consistency" =>
+        {
             std::env::set_var("BEAK_OPENVM_ENABLE_O8", "1");
         }
         _ => {
@@ -117,9 +122,6 @@ pub fn run_backend_once(
         }
     }
     fuzzer_utils::configure_witness_injection(inject_kind, inject_step);
-    if let Some(kind) = inject_kind {
-        eprintln!("[beak-inject-arm] kind={} step={}", kind, inject_step);
-    }
     let _ = fuzzer_utils::take_json_logs();
 
     let t0 = Instant::now();
@@ -127,7 +129,7 @@ pub fn run_backend_once(
         eval.backend_error = Some(e.clone());
         e
     })?;
-    let ms_build_exe = t0.elapsed().as_millis();
+    let _ms_build_exe = t0.elapsed().as_millis();
 
     let t1 = Instant::now();
     let sdk = Sdk;
@@ -151,7 +153,7 @@ pub fn run_backend_once(
             msg
         })?;
     let app_vm = VmExecutor::new(app_pk.app_vm_pk.vm_config.clone());
-    let ms_instance = t1.elapsed().as_millis();
+    let _ms_instance = t1.elapsed().as_millis();
 
     let t2 = Instant::now();
     let input = StdIn::default();
@@ -162,7 +164,7 @@ pub fn run_backend_once(
             eval.backend_error = Some(msg.clone());
             msg
         })?;
-    let ms_trace_only = t2.elapsed().as_millis();
+    let _ms_trace_only = t2.elapsed().as_millis();
 
     let t3 = Instant::now();
     let state = vm_result.final_memory.as_ref().ok_or_else(|| "no final state".to_string())?;
@@ -173,50 +175,26 @@ pub fn run_backend_once(
         regs[i as usize] = u32::from_le_bytes(bytes);
     }
     eval.final_regs = Some(regs);
-    let ms_read_regs = t3.elapsed().as_millis();
+    let _ms_read_regs = t3.elapsed().as_millis();
 
     let t4 = Instant::now();
     let observed_injection_sites = fuzzer_utils::take_observed_witness_sites();
     let mut applied_injection_sites = fuzzer_utils::take_applied_witness_sites();
-    let mut injection_applied = false;
-    if let Some(kind) = inject_kind {
-        let observed =
-            observed_injection_sites.get(base_inject_kind(kind)).cloned().unwrap_or_default();
-        let applied =
-            applied_injection_sites.get(base_inject_kind(kind)).cloned().unwrap_or_default();
-        eprintln!(
-            "[beak-inject-observed] kind={} requested_step={} observed_steps={:?} applied_steps={:?} applied={}",
-            kind, inject_step, observed, applied, injection_applied
-        );
-    }
     let logs = fuzzer_utils::take_json_logs();
-    let ms_take_logs = t4.elapsed().as_millis();
-    let logs_len = logs.len();
+    let _ms_take_logs = t4.elapsed().as_millis();
+    let _logs_len = logs.len();
 
     let t5 = Instant::now();
     match OpenVMTrace::from_logs(logs) {
         Ok(trace) => {
-            let insn_count = trace.instructions().len();
-            let row_count = trace.chip_rows().len();
-            let hit_count = trace.bucket_hits().len();
             eval.micro_op_count = trace.instruction_count();
             eval.bucket_hits = trace.bucket_hits().to_vec();
             eval.trace_signals = trace.trace_signals().to_vec();
-            let ms_parse = t5.elapsed().as_millis();
-            eprintln!(
-                "[openvm-backend-worker] iter={} logs_len={logs_len} insn_count={insn_count} chip_rows={row_count} bucket_hits={hit_count} build_exe_ms={ms_build_exe} instance_ms={ms_instance} trace_only_ms={ms_trace_only} read_regs_ms={ms_read_regs} take_logs_ms={ms_take_logs} parse_ms={ms_parse} total_ms={}",
-                current_iteration,
-                t_total.elapsed().as_millis()
-            );
+            let _ms_parse = t5.elapsed().as_millis();
         }
         Err(e) => {
-            let ms_parse = t5.elapsed().as_millis();
+            let _ms_parse = t5.elapsed().as_millis();
             eval.backend_error = Some(e.clone());
-            eprintln!(
-                "[openvm-backend-worker] iter={} ERROR parse_logs ({e}); logs_len={logs_len} build_exe_ms={ms_build_exe} instance_ms={ms_instance} trace_only_ms={ms_trace_only} read_regs_ms={ms_read_regs} take_logs_ms={ms_take_logs} parse_ms={ms_parse} total_ms={}",
-                current_iteration,
-                t_total.elapsed().as_millis()
-            );
         }
     }
 
@@ -243,11 +221,7 @@ pub fn run_backend_once(
                 Some(format!("verify_app_proof_without_continuations failed: {e:?}"));
         }
     }
-    let ms_prove_verify = t6.elapsed().as_millis();
-    eprintln!(
-        "[openvm-backend-worker] iter={} prove_verify_ms={ms_prove_verify}",
-        current_iteration
-    );
+    let _ms_prove_verify = t6.elapsed().as_millis();
     let prove_phase_applied = fuzzer_utils::take_applied_witness_sites();
     for (kind, steps) in prove_phase_applied {
         applied_injection_sites.entry(kind).or_default().extend(steps);
@@ -256,16 +230,17 @@ pub fn run_backend_once(
         steps.sort_unstable();
         steps.dedup();
     }
-    injection_applied = inject_kind
-        .and_then(|kind| applied_injection_sites.get(base_inject_kind(kind)))
-        .map(|steps| {
-            if inject_step == u64::MAX {
-                !steps.is_empty()
-            } else {
-                steps.contains(&inject_step)
-            }
-        })
-        .unwrap_or(false);
+    let injection_applied =
+        inject_kind
+            .and_then(|kind| applied_injection_sites.get(base_inject_kind(kind)))
+            .map(|steps| {
+                if inject_step == u64::MAX {
+                    !steps.is_empty()
+                } else {
+                    steps.contains(&inject_step)
+                }
+            })
+            .unwrap_or(false);
 
     Ok(WorkerResponse {
         request_id,
@@ -483,23 +458,23 @@ impl OpenVmBackend {
 
     fn inject_kinds_for_base(inject_kind: &str) -> Vec<String> {
         match inject_kind {
-            "openvm.audit_o1.bitwise_mult_p_plus_1" => Self::o1_variant_specs()
+            "openvm.semantic.lookup.xor_multiplicity_consistency" => Self::o1_variant_specs()
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
-            "openvm.audit_o2.timestamp_shift" => Self::o2_variant_specs()
+            "openvm.semantic.memory.timestamped_load_path" => Self::o2_variant_specs()
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
-            "openvm.audit_o5.rs2_imm_limbs" => Self::o5_variant_specs()
+            "openvm.semantic.alu.immediate_limb_consistency" => Self::o5_variant_specs()
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
-            "openvm.audit_o7.auipc_pc_limbs" => Self::o7_variant_specs()
+            "openvm.semantic.control.auipc_pc_limb_consistency" => Self::o7_variant_specs()
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
-            "openvm.audit_o15.divrem_special_case_on_invalid" => Self::o15_variant_specs()
+            "openvm.semantic.arithmetic.special_case_consistency" => Self::o15_variant_specs()
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
@@ -517,14 +492,14 @@ impl OpenVmBackend {
             if bucket_id == semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id {
                 (
                     semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.semantic_class,
-                    "openvm.audit_o5.rs2_imm_limbs",
+                    "openvm.semantic.alu.immediate_limb_consistency",
                     InjectionSchedule::AroundAnchor(anchor),
                     true,
                 )
             } else if bucket_id == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id {
                 (
                     semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.semantic_class,
-                    "openvm.audit_o1.bitwise_mult_p_plus_1",
+                    "openvm.semantic.lookup.xor_multiplicity_consistency",
                     InjectionSchedule::Exact(0),
                     false,
                 )
@@ -533,35 +508,35 @@ impl OpenVmBackend {
             {
                 (
                     semantic::memory::TIMESTAMPED_LOAD_PATH.semantic_class,
-                    "openvm.audit_o2.timestamp_shift",
+                    "openvm.semantic.memory.timestamped_load_path",
                     InjectionSchedule::Exact(u64::MAX),
                     false,
                 )
             } else if bucket_id == semantic::control::AUIPC_PC_LIMB_CONSISTENCY.id {
                 (
                     semantic::control::AUIPC_PC_LIMB_CONSISTENCY.semantic_class,
-                    "openvm.audit_o7.auipc_pc_limbs",
+                    "openvm.semantic.control.auipc_pc_limb_consistency",
                     InjectionSchedule::AroundAnchor(anchor),
                     true,
                 )
             } else if bucket_id == semantic::memory::IMMEDIATE_SIGN_CONSISTENCY.id {
                 (
                     semantic::memory::IMMEDIATE_SIGN_CONSISTENCY.semantic_class,
-                    "openvm.audit_o8.loadstore_imm_sign",
+                    "openvm.semantic.memory.immediate_sign_consistency",
                     InjectionSchedule::AroundAnchor(anchor),
                     true,
                 )
             } else if bucket_id == semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.id {
                 (
                     semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.semantic_class,
-                    "openvm.audit_o15.divrem_special_case_on_invalid",
+                    "openvm.semantic.arithmetic.special_case_consistency",
                     InjectionSchedule::AroundAnchor(anchor),
                     true,
                 )
             } else if bucket_id == semantic::row::PADDING_INTERACTION_SEND.id {
                 (
                     semantic::row::PADDING_INTERACTION_SEND.semantic_class,
-                    "openvm.audit_o3.invalid_row_rs2_read",
+                    "openvm.semantic.row.padding_interaction_send",
                     InjectionSchedule::Exact(u64::MAX),
                     false,
                 )
@@ -575,7 +550,7 @@ impl OpenVmBackend {
                 InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor))
             })
             .unwrap_or(fallback_schedule);
-        let inject_kinds = if inject_kind == "openvm.audit_o8.loadstore_imm_sign" {
+        let inject_kinds = if inject_kind == "openvm.semantic.memory.immediate_sign_consistency" {
             Self::o8_variant_specs_for_hit(hit)
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
@@ -590,7 +565,7 @@ impl OpenVmBackend {
                 trigger_signal_id: None,
                 semantic_class: semantic_class.to_string(),
                 inject_kind: kind.clone(),
-                schedule: if inject_kind == "openvm.audit_o15.divrem_special_case_on_invalid"
+                schedule: if inject_kind == "openvm.semantic.arithmetic.special_case_consistency"
                     && kind.contains("search=wildcard")
                 {
                     InjectionSchedule::Exact(u64::MAX)
@@ -599,7 +574,7 @@ impl OpenVmBackend {
                 },
             })
             .collect();
-        if inject_kind == "openvm.audit_o8.loadstore_imm_sign" {
+        if inject_kind == "openvm.semantic.memory.immediate_sign_consistency" {
             candidates.extend(
                 inject_kinds
                     .iter()
@@ -617,7 +592,7 @@ impl OpenVmBackend {
                     }),
             );
         }
-        if inject_kind == "openvm.audit_o15.divrem_special_case_on_invalid" {
+        if inject_kind == "openvm.semantic.arithmetic.special_case_consistency" {
             candidates.extend(
                 inject_kinds.iter().filter(|kind| kind.contains("mode=flag_zero_divisor")).map(
                     |kind| SemanticInjectionCandidate {

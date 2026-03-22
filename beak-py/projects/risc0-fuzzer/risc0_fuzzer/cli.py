@@ -34,6 +34,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _install(args: argparse.Namespace) -> int:
     from risc0_fuzzer.utils_install import clone_and_checkout_risc0
+    from risc0_fuzzer.passes import pass1_infrastructure, pass2_bypass_checks, pass3_collection
 
     resolved = resolve_risc0_commit(args.commit_or_branch)
     dest = (args.out_root / f"risc0-{resolved}" / "risc0-src").expanduser().resolve()
@@ -42,6 +43,17 @@ def _install(args: argparse.Namespace) -> int:
         commit_or_branch=resolved,
         zkvm_src=args.zkvm_src,
     )
+
+    print("Applying Pass 1/3 (infrastructure)...")
+    pass1_infrastructure.apply(risc0_install_path=dest, commit_or_branch=resolved)
+
+    print("Applying Pass 2/3 (bypass checks)...")
+    pass2_bypass_checks.apply(risc0_install_path=dest, commit_or_branch=resolved)
+
+    print("Applying Pass 3/3 (collection)...")
+    pass3_collection.apply(risc0_install_path=dest, commit_or_branch=resolved)
+
+    print("RISC0 snapshot patched for prove hooks and executor-layer injection.")
     print(dest)
     return 0
 

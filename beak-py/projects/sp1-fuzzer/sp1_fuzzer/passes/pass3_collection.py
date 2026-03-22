@@ -16,6 +16,16 @@ def _runtime_mod_candidates(sp1_install_path: Path) -> list[Path]:
     return out
 
 
+def _executor_candidates(sp1_install_path: Path) -> list[Path]:
+    out: list[Path] = []
+    for p in [
+        sp1_install_path / "crates" / "core" / "executor" / "src" / "executor.rs",
+    ]:
+        if p.exists():
+            out.append(p)
+    return out
+
+
 def _insert_after(contents: str, *, anchor: str, insert: str, guard: str) -> str:
     if guard in contents:
         return contents
@@ -44,7 +54,7 @@ def _patch_runtime_mod(path: Path) -> None:
         insert="""
  // BEAK-INSERT: sp1.mr_cpu.witness_inject
         let beak_step = fuzzer_utils::next_witness_step();
-        if fuzzer_utils::should_inject_witness("sp1.audit_timestamp.mem_row_wraparound", beak_step) {
+        if fuzzer_utils::should_inject_witness("sp1.semantic.memory.timestamped_load_path", beak_step) {
             record.prev_timestamp = record.timestamp;
             record.timestamp = 0;
         }
@@ -95,12 +105,12 @@ def _patch_runtime_mod(path: Path) -> None:
         insert="""
         // BEAK-INSERT: sp1.mw_cpu.witness_inject
         let beak_step = fuzzer_utils::next_witness_step();
-        if fuzzer_utils::should_inject_witness("sp1.audit_timestamp.mem_row_wraparound", beak_step) {
+        if fuzzer_utils::should_inject_witness("sp1.semantic.memory.timestamped_load_path", beak_step) {
             record.prev_timestamp = record.timestamp;
             record.timestamp = 0;
         }
         if fuzzer_utils::should_inject_witness(
-            "sp1.audit_multiplicity_bool_constraint.local_event_row",
+            "sp1.semantic.lookup.boolean_multiplicity",
             beak_step,
         ) {
             record.value ^= 1;
@@ -209,7 +219,161 @@ def _patch_runtime_mod(path: Path) -> None:
     path.write_text(c)
 
 
+def _patch_executor(path: Path) -> None:
+    _ensure_use_fuzzer_utils(path)
+    c = path.read_text()
+
+    c = _insert_after(
+        c,
+        anchor="pub const UNUSED_PC: u32 = 1;\n",
+        guard="// BEAK-INSERT: sp1.executor.control_flow_injection.helpers",
+        insert="""
+
+const BEAK_CONTROL_FLOW_INJECT_KIND: &str = "sp1.semantic.exec.control_flow_binding";
+
+// BEAK-INSERT: sp1.executor.control_flow_injection.helpers
+fn beak_inject_variant_value<'a>(kind: &'a str, key: &str) -> Option<&'a str> {
+    let (_, variant) = kind.split_once("::")?;
+    for field in variant.split(',') {
+        let (field_key, field_value) = field.split_once('=')?;
+        if field_key == key {
+            return Some(field_value);
+        }
+    }
+    None
+}
+
+fn beak_control_flow_family_for_opcode(opcode: Opcode) -> Option<&'static str> {
+    match opcode {
+        Opcode::BEQ | Opcode::BNE | Opcode::BLT | Opcode::BGE | Opcode::BLTU | Opcode::BGEU => {
+            Some("branch")
+        }
+        Opcode::JAL | Opcode::JALR => Some("jump"),
+        Opcode::ECALL => Some("ecall"),
+        _ => None,
+    }
+}
+
+fn beak_branch_next_pc_mutation(mode: Option<&str>, pc: u32, observed_next_pc: u32) -> Option<u32> {
+    let sequential = pc.wrapping_add(4);
+    match mode {
+        Some("noop_prefix") => None,
+        Some("force_fallthrough") => Some(sequential),
+        Some("force_taken_near") => {
+            let near_taken = if observed_next_pc == sequential {
+                pc.wrapping_add(8)
+            } else {
+                sequential
+            };
+            Some(near_taken)
+        }
+        _ => Some(pc.wrapping_add(0x10000)),
+    }
+}
+
+fn beak_jump_next_pc_mutation(mode: Option<&str>, pc: u32, observed_next_pc: u32) -> Option<u32> {
+    let sequential = pc.wrapping_add(4);
+    match mode {
+        Some("noop_prefix") => None,
+        Some("force_sequential") => Some(if observed_next_pc == sequential {
+            pc.wrapping_add(8)
+        } else {
+            sequential
+        }),
+        Some("force_near_jump") => Some(if observed_next_pc == pc.wrapping_add(8) {
+            pc.wrapping_add(12)
+        } else {
+            pc.wrapping_add(8)
+        }),
+        _ => Some(pc.wrapping_add(0x10000)),
+    }
+}
+
+fn beak_ecall_next_pc_mutation(mode: Option<&str>, pc: u32, observed_next_pc: u32) -> Option<u32> {
+    match mode {
+        Some("noop_prefix") => None,
+        Some("near_jump") => Some(if observed_next_pc == pc.wrapping_add(8) {
+            pc.wrapping_add(12)
+        } else {
+            pc.wrapping_add(8)
+        }),
+        Some("mid_jump") => Some(if observed_next_pc == pc.wrapping_add(0x40) {
+            pc.wrapping_add(0x44)
+        } else {
+            pc.wrapping_add(0x40)
+        }),
+        _ => Some(pc.wrapping_add(0x10000)),
+    }
+}
+
+fn beak_mutated_control_flow_next_pc(
+    kind: &str,
+    opcode: Opcode,
+    pc: u32,
+    observed_next_pc: u32,
+) -> Option<u32> {
+    let family = beak_inject_variant_value(kind, "family")
+        .or_else(|| beak_control_flow_family_for_opcode(opcode));
+    let mode = beak_inject_variant_value(kind, "mode");
+    match family {
+        Some("branch")
+            if matches!(
+                opcode,
+                Opcode::BEQ | Opcode::BNE | Opcode::BLT | Opcode::BGE | Opcode::BLTU | Opcode::BGEU
+            ) =>
+        {
+            beak_branch_next_pc_mutation(mode, pc, observed_next_pc)
+        }
+        Some("jump") if matches!(opcode, Opcode::JAL | Opcode::JALR) => {
+            beak_jump_next_pc_mutation(mode, pc, observed_next_pc)
+        }
+        Some("ecall") if opcode == Opcode::ECALL => {
+            beak_ecall_next_pc_mutation(mode, pc, observed_next_pc)
+        }
+        None if opcode == Opcode::ECALL => beak_ecall_next_pc_mutation(mode, pc, observed_next_pc),
+        _ => None,
+    }
+}
+
+fn beak_maybe_inject_control_flow_next_pc(
+    opcode: Opcode,
+    pc: u32,
+    observed_next_pc: u32,
+    step: u64,
+) -> Option<u32> {
+    let kind = fuzzer_utils::matching_injection_kind(BEAK_CONTROL_FLOW_INJECT_KIND, step)?;
+    beak_mutated_control_flow_next_pc(kind.as_str(), opcode, pc, observed_next_pc)
+}
+// BEAK-INSERT-END
+""",
+    )
+
+    c = _insert_after(
+        c,
+        anchor="        // If the destination register is x0, then we need to make sure that a's value is 0.\n",
+        guard="// BEAK-INSERT: sp1.execute_instruction.control_flow_injection",
+        insert="""
+        // BEAK-INSERT: sp1.execute_instruction.control_flow_injection
+        let beak_exec_step = fuzzer_utils::next_executor_step();
+        if let Some(beak_next_pc) = beak_maybe_inject_control_flow_next_pc(
+            instruction.opcode,
+            self.state.pc,
+            next_pc,
+            beak_exec_step,
+        ) {
+            next_pc = beak_next_pc;
+        }
+        // BEAK-INSERT-END
+
+""",
+    )
+
+    path.write_text(c)
+
+
 def apply(*, sp1_install_path: Path, commit_or_branch: str) -> None:
     _ = commit_or_branch
     for path in _runtime_mod_candidates(sp1_install_path):
         _patch_runtime_mod(path)
+    for path in _executor_candidates(sp1_install_path):
+        _patch_executor(path)

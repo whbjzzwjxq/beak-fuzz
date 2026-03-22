@@ -34,6 +34,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _install(args: argparse.Namespace) -> int:
     from nexus_fuzzer.utils_install import clone_and_checkout_nexus
+    from nexus_fuzzer.passes import pass1_infrastructure, pass2_bypass_checks, pass3_collection
 
     resolved = resolve_nexus_commit(args.commit_or_branch)
     dest = (args.out_root / f"nexus-{resolved}" / "nexus-src").expanduser().resolve()
@@ -42,6 +43,17 @@ def _install(args: argparse.Namespace) -> int:
         commit_or_branch=resolved,
         zkvm_src=args.zkvm_src,
     )
+
+    print("Applying Pass 1/3 (infrastructure)...")
+    pass1_infrastructure.apply(nexus_install_path=dest, commit_or_branch=resolved)
+
+    print("Applying Pass 2/3 (bypass checks)...")
+    pass2_bypass_checks.apply(nexus_install_path=dest, commit_or_branch=resolved)
+
+    print("Applying Pass 3/3 (collection)...")
+    pass3_collection.apply(nexus_install_path=dest, commit_or_branch=resolved)
+
+    print("Nexus snapshot staged for beak.")
     print(dest)
     return 0
 

@@ -11,9 +11,7 @@ use crate::fuzz::jsonl::{BugRecord, CorpusRecord, JsonlWriter, RunRecord};
 use crate::fuzz::seed::FuzzingSeed;
 use crate::rv32im::instruction::RV32IMInstruction;
 use crate::rv32im::oracle::{OracleConfig, RISCVOracle};
-use crate::trace::{
-    sorted_signatures_from_hits, sorted_signatures_from_signals, BucketHit, TraceSignal,
-};
+use crate::trace::{sorted_signatures_from_hits, sorted_signatures_from_signals, BucketHit};
 
 pub use crate::fuzz::loop1::{BackendEval, DEFAULT_RNG_SEED};
 
@@ -93,10 +91,8 @@ pub trait BenchmarkBackend {
 struct EvalStats {
     bucket_hits_sig: String,
     signal_sig: String,
-    bucket_hits_detail_sig: String,
     micro_op_count: usize,
     bucket_hits: Vec<BucketHit>,
-    trace_signals: Vec<TraceSignal>,
     mismatch_regs: Vec<(u32, u32, u32)>,
     backend_error: Option<String>,
     oracle_error: Option<String>,
@@ -211,56 +207,6 @@ fn canonical_bucket_sig(sigs: &[String]) -> String {
     out.join(";")
 }
 
-fn canonical_bucket_detail_sig(hits: &[BucketHit]) -> String {
-    let mut out: Vec<String> = hits
-        .iter()
-        .map(|hit| {
-            let details = canonical_json_value(&serde_json::json!(hit.details));
-            format!("{}|{}", hit.bucket_id, details)
-        })
-        .collect();
-    out.sort();
-    out.join(";")
-}
-
-fn canonical_json_value(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => {
-            serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
-        }
-        serde_json::Value::Array(items) => {
-            let mut out = String::from("[");
-            for (idx, item) in items.iter().enumerate() {
-                if idx > 0 {
-                    out.push(',');
-                }
-                out.push_str(&canonical_json_value(item));
-            }
-            out.push(']');
-            out
-        }
-        serde_json::Value::Object(map) => {
-            let mut entries: Vec<(&str, &serde_json::Value)> =
-                map.iter().map(|(k, v)| (k.as_str(), v)).collect();
-            entries.sort_by(|a, b| a.0.cmp(b.0));
-            let mut out = String::from("{");
-            for (idx, (key, value)) in entries.into_iter().enumerate() {
-                if idx > 0 {
-                    out.push(',');
-                }
-                out.push_str(&serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string()));
-                out.push(':');
-                out.push_str(&canonical_json_value(value));
-            }
-            out.push('}');
-            out
-        }
-    }
-}
-
 fn eval_once<B: BenchmarkBackend>(
     cfg: &BenchmarkConfig,
     timeout: Duration,
@@ -303,7 +249,6 @@ fn eval_once<B: BenchmarkBackend>(
     let signal_sigs = sorted_signatures_from_signals(&eval.trace_signals);
     let sig = canonical_bucket_sig(&bucket_sigs);
     let signal_sig = canonical_bucket_sig(&signal_sigs);
-    let detail_sig = canonical_bucket_detail_sig(&eval.bucket_hits);
     let backend_timed_out =
         backend_error.as_deref().map(|e| e.contains("timed out")).unwrap_or(false);
     let timed_out = start.elapsed() > timeout || backend_timed_out;
@@ -311,10 +256,8 @@ fn eval_once<B: BenchmarkBackend>(
     EvalStats {
         bucket_hits_sig: sig,
         signal_sig,
-        bucket_hits_detail_sig: detail_sig,
         micro_op_count: eval.micro_op_count,
         bucket_hits: eval.bucket_hits,
-        trace_signals: eval.trace_signals,
         mismatch_regs: mismatches,
         backend_error,
         oracle_error,
