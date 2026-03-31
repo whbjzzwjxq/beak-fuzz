@@ -53,6 +53,7 @@ def _patch_core_dependency(*, sp1_install_path: Path) -> None:
         (sp1_install_path / "crates" / "core" / "Cargo.toml", "../fuzzer_utils"),
         (sp1_install_path / "crates" / "core" / "executor" / "Cargo.toml", "../../fuzzer_utils"),
         (sp1_install_path / "crates" / "core" / "machine" / "Cargo.toml", "../../fuzzer_utils"),
+        (sp1_install_path / "recursion" / "core" / "Cargo.toml", "../../crates/fuzzer_utils"),
     ]
 
     for core_cargo, rel_path in core_candidates:

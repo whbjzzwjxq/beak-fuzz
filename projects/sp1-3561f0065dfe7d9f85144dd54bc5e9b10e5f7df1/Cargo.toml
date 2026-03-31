@@ -1,0 +1,24 @@
+[package]
+name = "beak-sp1-3561f006"
+version = "0.1.0"
+edition = "2021"
+description = "SP1 uint256-div benchmark runner (commit 3561f006)"
+publish = false
+
+[lib]
+path = "src/lib/mod.rs"
+
+[[bin]]
+name = "beak-fuzz"
+path = "src/bin/fuzz.rs"
+
+[[bin]]
+name = "beak-trace"
+path = "src/bin/trace.rs"
+
+[dependencies]
+beak-core = { path = "../../crates/beak-core" }
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sp1-sdk = { path = "../../beak-py/out/sp1-3561f0065dfe7d9f85144dd54bc5e9b10e5f7df1/sp1-src/sdk", default-features = false }

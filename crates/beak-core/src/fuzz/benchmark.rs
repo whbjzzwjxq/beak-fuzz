@@ -108,6 +108,13 @@ struct EvalStats {
     semantic_injection_applied: bool,
 }
 
+fn injection_kind_is_noop_prefix(kind: Option<&str>) -> bool {
+    let Some((_, variant)) = kind.and_then(|kind| kind.split_once("::")) else {
+        return false;
+    };
+    variant.split(',').any(|field| field.trim() == "mode=noop_prefix")
+}
+
 fn now_ts_millis() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_millis()
 }
@@ -653,7 +660,8 @@ pub fn run_benchmark<B: BenchmarkBackend>(
                 injected.underconstrained_candidate = injected.backend_error.is_none()
                     && injected.oracle_error.is_none()
                     && !injected.timed_out
-                    && injected.semantic_injection_applied;
+                    && injected.semantic_injection_applied
+                    && !injection_kind_is_noop_prefix(injected.inject_kind.as_deref());
 
                 eval_id = eval_id.saturating_add(1);
                 write_run_record(
@@ -752,5 +760,19 @@ mod tests {
 
         injected.mismatch_regs = vec![(1, 2, 3)];
         assert_eq!(bug_kind(&injected), Some("underconstrained_candidate"));
+    }
+
+    #[test]
+    fn noop_prefix_variants_are_not_treated_as_mutations() {
+        assert!(super::injection_kind_is_noop_prefix(Some(
+            "sp1.semantic.memory.load_value_binding::mode=noop_prefix,rank=7"
+        )));
+        assert!(!super::injection_kind_is_noop_prefix(Some(
+            "sp1.semantic.memory.load_value_binding::mode=xor_low_bit"
+        )));
+        assert!(!super::injection_kind_is_noop_prefix(Some(
+            "sp1.semantic.memory.load_value_binding"
+        )));
+        assert!(!super::injection_kind_is_noop_prefix(None));
     }
 }

@@ -59,6 +59,13 @@ fn is_baseline_mismatch(stats: &RunStats) -> bool {
     !stats.injected_phase && !stats.mismatch_regs.is_empty()
 }
 
+fn injection_kind_is_noop_prefix(kind: Option<&str>) -> bool {
+    let Some((_, variant)) = kind.and_then(|kind| kind.split_once("::")) else {
+        return false;
+    };
+    variant.split(',').any(|field| field.trim() == "mode=noop_prefix")
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct BackendEval {
     /// Backend-defined trace size metric used for reporting.
@@ -701,7 +708,8 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
                     injected.underconstrained_candidate = baseline.backend_error.is_none()
                         && baseline.oracle_error.is_none()
                         && injected.backend_error.is_none()
-                        && injected.oracle_error.is_none();
+                        && injected.oracle_error.is_none()
+                        && !injection_kind_is_noop_prefix(injected.direct_injection_kind.as_deref());
 
                     if injected.underconstrained_candidate {
                         // Mark resolved only for true underconstrained signals.

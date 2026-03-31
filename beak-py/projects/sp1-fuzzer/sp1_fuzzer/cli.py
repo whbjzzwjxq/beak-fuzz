@@ -6,6 +6,8 @@ from pathlib import Path
 from sp1_fuzzer.settings import (
     SP1_AVAILABLE_COMMITS_OR_BRANCHES,
     SP1_AUDIT_V4_39AB_COMMIT,
+    SP1_RECURSION_KALOS_FB38_COMMIT,
+    SP1_UINT256_DIV_3561_COMMIT,
     resolve_sp1_commit,
 )
 
@@ -38,6 +40,8 @@ def _install(args: argparse.Namespace) -> int:
         pass2_bypass_checks,
         pass3_collection,
         pass4_v4_is_memory,
+        pass5_legacy_recursion,
+        pass6_uint256_div,
     )
 
     resolved = resolve_sp1_commit(args.commit_or_branch)
@@ -55,6 +59,13 @@ def _install(args: argparse.Namespace) -> int:
 
     print("Applying Pass 4/4 (v4 is_memory hook)...")
     pass4_v4_is_memory.apply(sp1_install_path=dest, commit_or_branch=resolved)
+
+    if resolved == SP1_RECURSION_KALOS_FB38_COMMIT:
+        print("Applying Legacy Recursion pass...")
+        pass5_legacy_recursion.apply(sp1_install_path=dest, commit_or_branch=resolved)
+    if resolved == SP1_UINT256_DIV_3561_COMMIT:
+        print("Applying uint256 div pass...")
+        pass6_uint256_div.apply(sp1_install_path=dest, commit_or_branch=resolved)
 
     print("SP1 snapshot patched for witness injection and collection.")
     print(dest)

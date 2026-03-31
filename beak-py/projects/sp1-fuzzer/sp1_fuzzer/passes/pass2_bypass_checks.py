@@ -12,6 +12,8 @@ def _runtime_files(sp1_install_path: Path) -> list[Path]:
         sp1_install_path / "core" / "src" / "runtime" / "utils.rs",
         sp1_install_path / "crates" / "core" / "src" / "runtime" / "mod.rs",
         sp1_install_path / "crates" / "core" / "src" / "runtime" / "utils.rs",
+        sp1_install_path / "recursion" / "core" / "src" / "runtime" / "mod.rs",
+        sp1_install_path / "recursion" / "core" / "src" / "memory" / "mod.rs",
     ]:
         if p.exists():
             out.append(p)

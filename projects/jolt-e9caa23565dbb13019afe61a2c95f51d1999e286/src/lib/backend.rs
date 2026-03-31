@@ -11,6 +11,12 @@ use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
 use common::constants::RAM_START_ADDRESS;
 use common::rv_trace::{CircuitFlags, MemoryConfig, RVTraceRow};
+use jolt::jolt_core::jolt::instruction::beq::BEQInstruction;
+use jolt::jolt_core::jolt::instruction::bge::BGEInstruction;
+use jolt::jolt_core::jolt::instruction::bgeu::BGEUInstruction;
+use jolt::jolt_core::jolt::instruction::bne::BNEInstruction;
+use jolt::jolt_core::jolt::instruction::slt::SLTInstruction;
+use jolt::jolt_core::jolt::instruction::sltu::SLTUInstruction;
 use jolt::jolt_core::jolt::instruction::virtual_advice::ADVICEInstruction;
 use jolt::jolt_core::jolt::vm::rv32i_vm::{C, M};
 use jolt::jolt_core::jolt::vm::JoltTraceStep;
@@ -21,6 +27,7 @@ use crate::trace::JoltTrace;
 
 const UPPER_IMMEDIATE_INJECT_KIND: &str = "jolt.semantic.decode.upper_immediate_materialization";
 const ENTRYPOINT_INJECT_KIND: &str = "jolt.semantic.control.entrypoint_binding";
+const CONTROL_FLOW_INJECT_KIND: &str = "jolt.semantic.exec.control_flow_binding";
 const LOOP_FOREVER_WORD: u32 = 0x0000_006f;
 const T0_REG: u32 = 5;
 const T1_REG: u32 = 6;
@@ -272,12 +279,61 @@ fn is_real_lui_step(step: &JoltTraceStep<RV32I>) -> bool {
         && !step.circuit_flags[CircuitFlags::Virtual as usize]
 }
 
+fn is_branch_step(step: &JoltTraceStep<RV32I>) -> bool {
+    step.circuit_flags[CircuitFlags::Branch as usize]
+        && !step.circuit_flags[CircuitFlags::Virtual as usize]
+}
+
+fn branch_mode_matches(mode: Option<&str>, family: &str) -> bool {
+    match mode {
+        None | Some("paired_flip") => true,
+        Some("eq_flip") => family == "eq",
+        Some("signed_cmp_flip") => family == "signed",
+        Some("unsigned_cmp_flip") => family == "unsigned",
+        _ => false,
+    }
+}
+
+fn mutate_branch_lookup(step_row: &mut JoltTraceStep<RV32I>, mode: Option<&str>) -> bool {
+    let next_lookup = match step_row.instruction_lookup {
+        Some(RV32I::BEQ(insn)) if branch_mode_matches(mode, "eq") => {
+            Some(RV32I::BNE(BNEInstruction::<32>(insn.0, insn.1)))
+        }
+        Some(RV32I::BNE(insn)) if branch_mode_matches(mode, "eq") => {
+            Some(RV32I::BEQ(BEQInstruction::<32>(insn.0, insn.1)))
+        }
+        Some(RV32I::SLT(insn)) if branch_mode_matches(mode, "signed") => {
+            Some(RV32I::BGE(BGEInstruction::<32>(insn.0, insn.1)))
+        }
+        Some(RV32I::BGE(insn)) if branch_mode_matches(mode, "signed") => {
+            Some(RV32I::SLT(SLTInstruction::<32>(insn.0, insn.1)))
+        }
+        Some(RV32I::SLTU(insn)) if branch_mode_matches(mode, "unsigned") => {
+            Some(RV32I::BGEU(BGEUInstruction::<32>(insn.0, insn.1)))
+        }
+        Some(RV32I::BGEU(insn)) if branch_mode_matches(mode, "unsigned") => {
+            Some(RV32I::SLTU(SLTUInstruction::<32>(insn.0, insn.1)))
+        }
+        _ => None,
+    };
+
+    if let Some(next_lookup) = next_lookup {
+        step_row.instruction_lookup = Some(next_lookup);
+        true
+    } else {
+        false
+    }
+}
+
 fn collect_observed_injection_sites(trace: &[JoltTraceStep<RV32I>]) -> BTreeMap<String, Vec<u64>> {
     let mut sites = BTreeMap::<String, Vec<u64>>::new();
     if !trace.is_empty() {
         record_site(&mut sites, ENTRYPOINT_INJECT_KIND, 0);
     }
     for (idx, step) in trace.iter().enumerate() {
+        if is_branch_step(step) {
+            record_site(&mut sites, CONTROL_FLOW_INJECT_KIND, idx as u64);
+        }
         if is_real_lui_step(step) {
             record_site(&mut sites, UPPER_IMMEDIATE_INJECT_KIND, idx as u64);
         }
@@ -317,6 +373,32 @@ fn apply_injection_to_trace(
         }
         trace.drain(0..prefix_len);
         return true;
+    }
+    if base_kind == CONTROL_FLOW_INJECT_KIND {
+        if inject_step != u64::MAX
+            && !observed_injection_sites
+                .get(base_kind)
+                .map(|steps| steps.contains(&inject_step))
+                .unwrap_or(false)
+        {
+            return false;
+        }
+
+        let target_step = if inject_step == u64::MAX { None } else { Some(inject_step) };
+        for (idx, step_row) in trace.iter_mut().enumerate() {
+            if !is_branch_step(step_row) {
+                continue;
+            }
+            let step = idx as u64;
+            let step_match = target_step.map(|s| s == step).unwrap_or(true);
+            if !step_match {
+                continue;
+            }
+            if mutate_branch_lookup(step_row, inject_variant_mode(kind)) {
+                return true;
+            }
+        }
+        return false;
     }
     if base_kind != UPPER_IMMEDIATE_INJECT_KIND {
         return false;
@@ -498,9 +580,22 @@ impl JoltBackend {
         specs
     }
 
+    fn control_flow_variant_specs() -> Vec<String> {
+        vec![
+            "mode=paired_flip".to_string(),
+            "mode=eq_flip".to_string(),
+            "mode=signed_cmp_flip".to_string(),
+            "mode=unsigned_cmp_flip".to_string(),
+        ]
+    }
+
     fn inject_kinds_for_base(inject_kind: &str) -> Vec<String> {
         match inject_kind {
             ENTRYPOINT_INJECT_KIND => Self::entrypoint_variant_specs()
+                .into_iter()
+                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
+                .collect(),
+            CONTROL_FLOW_INJECT_KIND => Self::control_flow_variant_specs()
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
@@ -517,6 +612,8 @@ impl JoltBackend {
         let (semantic_class, inject_kind) =
             if hit.bucket_id == semantic::control::ENTRYPOINT_BINDING.id {
                 (semantic::control::ENTRYPOINT_BINDING.semantic_class, ENTRYPOINT_INJECT_KIND)
+            } else if hit.bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id {
+                (semantic::exec::CONTROL_FLOW_BINDING.semantic_class, CONTROL_FLOW_INJECT_KIND)
             } else if hit.bucket_id == semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.id {
                 (
                     semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.semantic_class,

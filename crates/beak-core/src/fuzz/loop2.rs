@@ -31,6 +31,13 @@ struct DirectRunStats {
     timed_out: bool,
 }
 
+fn injection_kind_is_noop_prefix(kind: Option<&str>) -> bool {
+    let Some((_, variant)) = kind.and_then(|kind| kind.split_once("::")) else {
+        return false;
+    };
+    variant.split(',').any(|field| field.trim() == "mode=noop_prefix")
+}
+
 fn ansi_enabled() -> bool {
     std::env::var_os("NO_COLOR").is_none()
         && std::env::var("TERM").map(|term| term != "dumb").unwrap_or(true)
@@ -268,32 +275,34 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
             .map(|h| h.bucket_id.clone())
             .collect();
         let has_direct_injection_target = !target_buckets.is_empty();
-        let mut phases = vec![("baseline", false, baseline_probe.clone())];
+        let mut phases = vec![("baseline", false, None::<String>, baseline_probe.clone())];
         if has_direct_injection_target {
             let filtered_hits: Vec<BucketHit> = phases[0]
-                .2
+                .3
                 .bucket_hits
                 .iter()
                 .filter(|h| target_buckets.iter().any(|b| b == &h.bucket_id))
                 .cloned()
                 .collect();
-            if backend.arm_direct_injection_from_hits(&filtered_hits).is_some() {
+            if let Some(inject_kind) = backend.arm_direct_injection_from_hits(&filtered_hits) {
                 let injected = run_single_eval(&cfg, &mut backend, &words);
                 let injected_found_bug = !injected.mismatch_regs.is_empty()
                     || injected.backend_error.is_some()
                     || injected.oracle_error.is_some()
                     || injected.timed_out
-                    || (injected.backend_error.is_none() && injected.oracle_error.is_none());
+                    || (injected.backend_error.is_none()
+                        && injected.oracle_error.is_none()
+                        && !injection_kind_is_noop_prefix(Some(inject_kind.as_str())));
                 if injected_found_bug {
                     for bucket_id in &target_buckets {
                         resolved_direct_buckets.insert(bucket_id.clone());
                     }
                 }
-                phases.push(("injected", true, injected));
+                phases.push(("injected", true, Some(inject_kind), injected));
             }
         }
         backend.clear_direct_injection();
-        for (phase_name, is_injected_phase, stats) in phases {
+        for (phase_name, is_injected_phase, inject_kind, stats) in phases {
             let baseline_mismatch = !is_injected_phase && !stats.mismatch_regs.is_empty();
             let mut metadata = match seed_meta.clone() {
                 serde_json::Value::Object(m) => m,
@@ -303,6 +312,7 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
             metadata.insert("phase".to_string(), json!(phase_name));
             metadata.insert("seed_index".to_string(), json!(seed_idx));
             metadata.insert("injected_phase".to_string(), json!(is_injected_phase));
+            metadata.insert("direct_injection_kind".to_string(), json!(inject_kind));
             metadata.insert(
                 "has_direct_injection_target".to_string(),
                 json!(has_direct_injection_target),
@@ -323,7 +333,8 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
             let underconstrained_candidate = is_injected_phase
                 && has_direct_injection_target
                 && stats.backend_error.is_none()
-                && stats.oracle_error.is_none();
+                && stats.oracle_error.is_none()
+                && !injection_kind_is_noop_prefix(inject_kind.as_deref());
             let has_exception = !is_injected_phase
                 && (stats.backend_error.is_some() || stats.oracle_error.is_some());
             if baseline_mismatch || has_exception || underconstrained_candidate {

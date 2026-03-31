@@ -34,7 +34,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _install(args: argparse.Namespace) -> int:
     from jolt_fuzzer.utils_install import clone_and_checkout_jolt
-    from jolt_fuzzer.passes import pass1_infrastructure, pass2_bypass_checks, pass3_collection
+    from jolt_fuzzer.passes import (
+        pass1_infrastructure,
+        pass2_bypass_checks,
+        pass3_collection,
+    )
 
     resolved = resolve_jolt_commit(args.commit_or_branch)
     dest = (args.out_root / f"jolt-{resolved}" / "jolt-src").expanduser().resolve()
