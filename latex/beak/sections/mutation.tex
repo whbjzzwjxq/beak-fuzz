@@ -1,0 +1,128 @@
+\section{Boundary-Driven Semantic Fuzzing}\label{sec:fuzzing-framework}
+
+Building on the semantic model of \autoref{sec:trace-ir}, this section presents \tool's fuzzing framework. The framework operates in two phases: \emph{Phase~1} performs signature-guided mutational fuzzing to explore the semantic space, and \emph{Phase~2} applies targeted witness injection to probe underconstrained circuits. Together, the phases form a closed loop: the semantic model drives mutation toward underexplored boundary conditions, and witness injection validates whether those conditions correspond to actual constraint gaps.
+
+\subsection{Framework Architecture}\label{sec:framework-arch}
+
+The framework instantiates the two-phase architecture described in \autoref{sec:framework-overview}. The main loop (\autoref{alg:fuzzing}) repeats four steps: (1)~select and mutate an input via the bandit-guided strategy (\autoref{sec:bandit-mutation}), (2)~execute it on both the reference oracle and the target backend, (3)~project the backend trace through the semantic model to produce a category signature (\autoref{eq:signature}), and (4)~update the corpus and bandit based on signature novelty. Inputs producing an oracle--backend register mismatch are flagged as semantic divergences. Phase~2 then probes activated categories via witness injection (\autoref{sec:witness-search}) to detect underconstrained circuits. The remainder of this section details each component.
+
+\subsection{Signature Novelty Feedback}\label{sec:signature-feedback}
+
+Traditional coverage-guided fuzzers (e.g., AFL~\cite{afl}) use edge coverage in the compiled binary as feedback. For zkVM testing, this is inadequate: the interesting behaviors lie not in the Rust source code implementing the zkVM, but in the \emph{constraint-level semantics} of the execution trace. A fuzzer may achieve high edge coverage without ever exercising the trace-level boundary conditions (e.g., an immediate crossing a limb boundary, or a memory access at an address-space boundary) where constraint bugs manifest.
+
+\tool replaces edge coverage with \emph{signature novelty}: an input is considered interesting if and only if it produces a category signature not previously observed. Formally, let $\mathit{Seen}$ denote the set of signatures observed so far; an input $x$ with signature $\sigma(x)$ is added to the corpus whenever $\sigma(x) \notin \mathit{Seen}$.
+
+In addition to the binary novel/not-novel signal, \tool computes a fine-grained reward for each evaluation:
+\[
+\mathit{reward}(x) = \mathbb{1}[\sigma(x) \notin \mathit{Seen}] + 0.25 \cdot |\sigma(x) \setminus \mathit{SeenCats}|
+\]
+where $\sigma(x)$ is the category signature of input $x$ (\autoref{eq:signature}) and $\mathit{SeenCats}$ tracks individual category IDs observed across all runs. The first term rewards novel signature combinations (weight 1.0); the second term provides a gentler signal for inputs that activate previously unseen individual categories (weight 0.25 each). This reward drives the multi-armed bandit described in \autoref{sec:bandit-mutation}.
+
+\subsection{ISA-Aware Bandit-Guided Mutation}\label{sec:bandit-mutation}
+
+\paragraph{Mutation strategies}
+\tool employs eight mutation strategies, each operating at the RISC-V instruction level rather than the byte level. \autoref{tbl:mutation-arms} summarizes all eight arms. Unlike generic byte-level mutations (e.g., bit flips, byte swaps), these strategies understand the RV32IM encoding format: they decode instructions into fields (opcode, rd, rs1, rs2, funct3, funct7, immediate), mutate semantically meaningful components, and re-encode valid instructions. This ISA awareness is critical because random byte-level mutations on 32-bit instruction words almost never produce valid RISC-V instructions, let alone programs that exercise interesting constraint behaviors.
+
+\begin{table}[t]
+\caption{ISA-aware mutation strategies. Each arm operates on decoded RISC-V instruction fields, maintaining encoding validity while targeting specific semantic dimensions.}
+\label{tbl:mutation-arms}
+\centering
+\small
+\begin{tabular}{clp{4.8cm}}
+\toprule
+\textbf{Arm} & \textbf{Strategy} & \textbf{Description} \\
+\midrule
+0 & Splice & Cross two corpus entries at a random point \\
+1 & Register swap & Replace rd/rs1/rs2 with a register already used in the program \\
+2 & Constant mutation & Replace immediate with boundary value (0, $\pm$1, 127, $-$128, etc.) \\
+3 & Insert instruction & Append a random instruction; prefer memory ops when address-producing registers exist \\
+4 & Delete instruction & Remove one instruction from the sequence \\
+5 & Duplicate instruction & Copy an instruction to increase data locality \\
+6 & Swap adjacent & Exchange two neighboring instructions \\
+7 & Mnemonic replace & Substitute with a same-format mnemonic (e.g., \icode{add}$\leftrightarrow$\icode{sub}, \icode{lw}$\leftrightarrow$\icode{lh}) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ISA-aware encoder/decoder is validated against the official \icode{riscv-tests} suite (all RV32IM encodings round-trip correctly), ensuring mutations produce only valid instruction words. Key design choices: Arm~2 (constant mutation) targets arithmetic boundary values ($0, \pm 1, 127, -128$) that stress limb decomposition and overflow; Arm~3 (insert instruction) biases toward memory operations when address-producing registers exist; Arm~7 (mnemonic replace) tests opcode-selector constraints by substituting same-format instructions.
+
+\paragraph{UCB1 bandit}
+To adaptively allocate mutation effort across the eight arms, \tool uses a UCB1 multi-armed bandit~\cite{ucb1}. At each iteration, the bandit selects the arm with the highest upper confidence bound:
+\[
+\mathit{arm}^* = \arg\max_{a \in [8]} \left( \bar{r}_a + \alpha \sqrt{\frac{\ln n}{n_a}} \right)
+\]
+where $\bar{r}_a$ is the mean reward of arm $a$, $n_a$ is the number of times arm $a$ has been pulled, $n$ is the total number of pulls, and $\alpha = 1.5$ is the exploration constant. With probability $\varepsilon = 0.05$, a uniformly random arm is selected instead. This hybrid of UCB1's confidence-bound exploration with epsilon-greedy randomization is non-standard but practical: the epsilon term ensures exploration of all arms even when UCB1's confidence bounds have converged, at negligible cost to exploitation. The reward signal is the $\mathit{reward}(x)$ function defined in \autoref{sec:signature-feedback}, closing the loop between semantic feedback and mutation strategy selection.
+
+Phase~1 discovers register-level semantic divergences, but some constraint bugs do not manifest as register mismatches at all---they admit alternative witnesses that the circuit accepts without error. Phase~2 addresses this gap through targeted witness injection.
+
+\paragraph{Algorithm}
+\autoref{alg:fuzzing} presents the complete fuzzing loop. Lines~1--3 initialize the corpus, the set of seen signatures, and the bandit. The main loop (starting at line~4) selects an input, mutates it, evaluates it on both the oracle and the backend, and updates the corpus and bandit based on the semantic feedback. Phase~2 (starting at line~19) optionally probes activated categories via witness injection.
+
+\begin{algorithm}[t]
+    \caption{The \tool Fuzzing Loop}
+    \begin{algorithmic}[1]
+        \Procedure{\textsc{Fuzz}}{seeds $S$, backend $B$, oracle $O$, iterations $N$}
+            \State $\mathit{corpus} \leftarrow S$; $\mathit{Seen} \leftarrow \emptyset$; $\mathit{bugs} \leftarrow \emptyset$
+            \State Initialize bandit $\mathcal{B}$ with 8 arms
+            \For{$i = 1$ \textbf{to} $N$}
+                \State $x \leftarrow \text{select from } \mathit{corpus}$
+                \State $a \leftarrow \mathcal{B}.\text{select}()$ \Comment{UCB1 arm selection}
+                \State $x' \leftarrow \text{mutate}(x, a)$ \Comment{ISA-aware mutation}
+                \State $r_O \leftarrow O.\text{execute}(x')$ \Comment{Oracle registers}
+                \State $r_B, \mathit{eval} \leftarrow B.\text{execute\_and\_collect}(x')$
+                \State $C \leftarrow \mathit{eval}.\text{categories}$; $\sigma \leftarrow \text{signature}(C)$
+                \If{$r_O \neq r_B$}
+                    \State $\mathit{bugs} \leftarrow \mathit{bugs} \cup \{(x', \texttt{"mismatch"})\}$
+                \EndIf
+                \State $\mathit{reward} \leftarrow 0$
+                \If{$\sigma \notin \mathit{Seen}$}
+                    \State $\mathit{Seen} \leftarrow \mathit{Seen} \cup \{\sigma\}$; $\mathit{corpus} \leftarrow \mathit{corpus} \cup \{x'\}$
+                    \State $\mathit{reward} \leftarrow \mathit{reward} + 1.0$
+                \EndIf
+                \State $\mathit{reward} \mathrel{+}= 0.25 \cdot |\text{new individual category IDs}|$
+                \State $\mathcal{B}.\text{update}(a, \mathit{reward})$ \Comment{Bandit reward}
+                \For{\textbf{each} candidate $(b, s) \in \text{injection\_candidates}(C)$}
+                    \State $B.\text{arm\_injection}(b, s)$
+                    \State $r'_B \leftarrow B.\text{execute}(x')$
+                    \If{injection applied $\land$ no error}
+                        \State $\mathit{bugs} \leftarrow \mathit{bugs} \cup \{(x', \texttt{"underconstrained"})\}$
+                    \EndIf
+                \EndFor
+            \EndFor
+            \State \Return $\mathit{bugs}$
+        \EndProcedure
+    \end{algorithmic}
+    \label{alg:fuzzing}
+\end{algorithm}
+
+The function $\textit{injection\_candidates}(C)$ maps activated categories to $(b, s)$ pairs (category and anchor trace step). Not all categories support injection---those monitoring read-only properties (e.g., PC consistency) are excluded. In practice, 24 of 32 categories support injection.
+
+\subsection{Semantic Witness Search}\label{sec:witness-search}
+
+Phase~1 discovers inputs that activate interesting category signatures and detects register-level mismatches. However, some constraint bugs do not manifest as register mismatches: they allow the prover to substitute an \emph{alternative witness} that the circuit accepts without verification failure. To detect such \emph{underconstrained} circuits, Phase~2 performs targeted witness injection.
+
+The key idea is simple: given a category activation from a baseline run, \tool modifies the backend's internal witness at the corresponding constraint step and checks whether the constraint system still accepts. Concretely, \tool evaluates the constraint polynomials on the modified trace: each backend exposes a constraint-check function that evaluates its AIR/RAP constraints and returns whether all constraints are satisfied (i.e., all constraint polynomials evaluate to zero). The check evaluates both \emph{boundary constraints} (single-row conditions such as range checks and boolean constraints) and \emph{transition constraints} (adjacent-row conditions such as register-file consistency and memory timestamp ordering) by supplying the modified row along with its neighbors. This is a \emph{direct algebraic check} on the constraint system---it does not require generating a full proof (which would take minutes), only evaluating the local constraint window (which takes microseconds). Cross-table constraints enforced via lookup or permutation arguments (e.g., Lasso in Jolt, LogUp in Plonky3-based backends) are \emph{not} checked by injection, since verifying these requires a global accumulator pass over the entire trace. This means Phase~2 may produce false positives for modifications that satisfy local and transition constraints but violate a lookup argument; in practice, such cases are rare (the post-injection output comparison filters most of them) and we flag this as a known limitation. The injection type is determined by the category's semantic class: flipping a limb value for ALU categories, altering an address for memory categories, or toggling a boolean for lookup categories. If the injection succeeds (the constraint check passes and the modification is non-trivial), the circuit is flagged as an \emph{underconstrained candidate}.
+
+To locate the right constraint step, \tool probes a window of steps centered on the observation's anchor point (by default, 16~steps before and 64~steps after, with a maximum of 64~trials per category). This targeted approach is fundamentally different from blind witness mutation: by leveraging the semantic model's classification, \tool knows \emph{which} constraint to probe and \emph{where} in the trace to inject, dramatically reducing the search space.
+
+% PLACEHOLDER-FIGURE: Diagram showing the witness injection process (Phase 2).
+% Left: a baseline execution trace as a vertical sequence of rows, with one row
+% highlighted (anchor step s) where a category activation occurred (e.g.,
+% alu.imm_limb). Center: a search window [s-16, s+64] shown as a bracket
+% around the anchor, with probing arrows at each candidate step. Right: two
+% outcomes -- (a) circuit rejects (constraint violation icon) and (b) circuit
+% accepts altered witness (checkmark with "underconstrained" label).
+% Intended message: witness injection is targeted (not random) -- the semantic
+% model identifies WHERE to inject, and the category determines WHAT to inject.
+% PLACEHOLDER-FIGURE: witness-injection (Phase 2 diagram) — removed to save space
+
+\paragraph{Soundness classification and limitations}
+An injection is a true positive if: (1)~the modification is non-trivial ($w' \neq w$), (2)~the constraint system accepts $w'$, and (3)~$w'$ encodes a computation different from RISC-V semantics. Condition~(3) is satisfied by design: each injection type produces a semantically different result (flipped limbs change integer values, toggled booleans change control flow). Rare semantically-equivalent alternatives are filtered by post-injection output comparison.
+
+The patterns are heuristic single-field perturbations (limb flips, address alterations, boolean toggles) at individual constraint steps. The 8 missed bugs (\autoref{sec:eval-threats}) require \emph{multi-field, cross-component} modifications beyond current patterns. Injection tests only local effects; propagated effects are caught only if downstream divergence manifests in Phase~1 or triggers a separate injection.
+
+\subsection{Differential Oracle}\label{sec:oracle}
+
+The oracle is an \icode{rrs-lib}-based RV32IM instruction-level simulator, validated against the official \icode{riscv-tests} compliance suite. It supports two memory models (\icode{SharedCodeData} and \icode{SplitCodeData}), selected per backend to match the backend's architecture and avoid false positives. Edge cases follow the RISC-V specification: \icode{ECALL} is a no-op recording arguments, \icode{EBREAK} traps, \icode{FENCE} is a no-op, and misaligned accesses trap (flagged as Type~I divergence if the backend handles them silently).
+
+After execution, \tool compares all 32 architectural registers. We compare registers rather than full memory to avoid normalizing heterogeneous address-space layouts; memory-only divergences are partially addressed by Phase~2 witness injection at memory-related constraint steps. The oracle also pre-filters inputs exceeding a configurable step limit.

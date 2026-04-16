@@ -1,0 +1,1152 @@
+@techreport{riscvspec,
+  author    = {Andrew Waterman and Krste Asanovi\'{c}},
+  title     = {The {RISC-V} Instruction Set Manual, Volume {I}: User-Level {ISA}, Document Version 20191213},
+  institution = {RISC-V Foundation},
+  year      = {2019},
+  url       = {https://riscv.org/specifications/},
+}
+
+@inproceedings{ben2016interactive,
+  author    = {Eli Ben-Sasson and Alessandro Chiesa and Nicholas Spooner},
+  title     = {Interactive Oracle Proofs},
+  booktitle = {Theory of Cryptography Conference (TCC)},
+  pages     = {31--60},
+  year      = {2016},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-662-53644-5_2},
+}
+
+@misc{arguzz,
+      title={Arguzz: Testing zkVMs for Soundness and Completeness Bugs}, 
+      author={Christoph Hochrainer and Valentin Wüstholz and Maria Christakis},
+      year={2025},
+      eprint={2509.10819},
+      archivePrefix={arXiv},
+      primaryClass={cs.SE},
+      url={https://arxiv.org/abs/2509.10819}, 
+}
+
+@misc{clippy,
+  author       = {The Rust Project Developers},
+  title        = {{clippy}: A collection of lints to catch common mistakes and improve your Rust code},
+  howpublished = {\url{https://github.com/rust-lang/rust-clippy}},
+  note         = {Accessed: 2025-06-24}
+}
+
+@InProceedings{plusti21,
+  author       = {F. Wolff and A. BÃ­lÃ½ and C. Matheja and P. M\"uller and A. J. Summers},
+  title        = {Modular Specification and Verification of Closures in Rust},
+  booktitle    = {Object-Oriented Programming Systems, Languages, and Applications (OOPSLA)},
+  journal      = {Proc. ACM Program. Lang.},
+  year         = {2021},
+  issue_date   = {October 2021},
+  publisher    = {ACM},
+  address      = {New York, NY, USA},
+  volume       = {5},
+  number       = {OOPSLA},
+  doi          = {10.1145/3485522},
+  month        = {oct},
+  articleno    = {145},
+  numpages     = {29},
+  url          = {https://www.youtube.com/watch?v=7PRtJWPl2eA},
+  urltext      = {[Talk]}
+}
+
+@InProceedings{plusti19,
+  title = {Leveraging {R}ust Types for Modular Specification and Verification},
+  author = {V. Astrauskas and P. M\"uller and F. Poli and A. J. Summers},
+  booktitle = {Object-Oriented Programming Systems, Languages, and Applications (OOPSLA)},
+  journal = {Proc. ACM Program. Lang.},
+  issue_date = {October 2019},
+  volume = {3},
+  number = {OOPSLA},
+  year = {2019},
+  pages = {147:1--147:30},
+  url = {http://doi.acm.org/10.1145/3360573},
+  urltext = {[Publisher]},
+  doi = {10.1145/3360573},
+  publisher = {ACM},
+  url = {https://www.youtube.com/watch?v=lfc08mntlB0},
+  urltext = {[Talk]}
+}
+
+@INPROCEEDINGS{Klomp2018-vf,
+  title = "On Symbolic Verification of Bitcoin's script Language",
+  author = "Klomp, Rick and Bracciali, Andrea",
+  editor = "Garcia-Alfaro, Joaquin and Herrera-Joancomartí, Jordi and Livraga, Giovanni and Rios, Ruben",
+  booktitle = "Data Privacy Management, Cryptocurrencies and Blockchain Technology",
+  publisher = "Springer International Publishing",
+  address = "Cham",
+  pages = "38--56",
+  abstract = "Validation of Bitcoin transactions rely upon the successful execution of scripts written in a simple and effective, non-Turing-complete by design language, simply called script. This makes the validation of closed scripts, i.e. those associated to actual transactions and bearing full information, straightforward. Here we address the problem of validating open scripts, i.e. we address the validation of redeeming scripts against the whole set of possible inputs, i.e. under which general conditions can Bitcoins be redeemed? Even if likely not one of the most complex languages and demanding verification problems, we advocate the merit of formal verification for the Bitcoin validation framework. We propose a symbolic verification theory for open script, a verifier tool-kit, and illustrate examples of use on Bitcoin transactions. Contributions include (1) a formalisation of (a fragment of script) the language; (2) a novel symbolic approach to script verification, suitable, e.g. for the verification of newly defined and non-standard payment schemes; and (3) building blocks for a larger verification theory for the developing area of Bitcoin smart contracts. The verification of smart contracts, i.e. agreements built as transaction-based protocols, is currently a problem that is difficult to formalise and computationally demanding.",
+  year =  2018
+}
+
+
+@ARTICLE{numpy,
+  title = "Array programming with {NumPy}",
+  author = "Harris, Charles R and Millman, K Jarrod and van der Walt, Stéfan J and Gommers, Ralf and Virtanen, Pauli and Cournapeau, David and Wieser, Eric and Taylor, Julian and Berg, Sebastian and Smith, Nathaniel J and Kern, Robert and Picus, Matti and Hoyer, Stephan and van Kerkwijk, Marten H and Brett, Matthew and Haldane, Allan and del Río, Jaime Fernández and Wiebe, Mark and Peterson, Pearu and Gérard-Marchant, Pierre and Sheppard, Kevin and Reddy, Tyler and Weckesser, Warren and Abbasi, Hameer and Gohlke, Christoph and Oliphant, Travis E",
+  journal = "Nature",
+  publisher = "Springer Science and Business Media LLC",
+  volume =  585,
+  number =  7825,
+  pages = "357--362",
+  month =  sep,
+  year =  2020
+}
+
+
+@INPROCEEDINGS{houdini,
+  title = "Houdini, an Annotation Assistant for {ESC}/Java",
+  author = "Flanagan, Cormac and Leino, K Rustan M",
+  booktitle = "Proceedings of the International Symposium of Formal Methods Europe on Formal Methods for Increasing Software Productivity",
+  publisher = "Springer-Verlag",
+  address = "Berlin, Heidelberg",
+  pages = "500–517",
+  abstract = "A static program checker that performs modular checking can check one program module for errors without needing to analyze the entire program. Modular checking requires that each module be accompanied by annotations that specify the module. To help reduce the cost of writing specifications, this paper presents Houdini, an annotation assistant for the modular checker ESC/Java. To infer suitable ESC/Java annotations for a given program, Houdini generates a large number of candidate annotations and uses ESC/Java to verify or refute each of these annotations. The paper describes the design, implementation, and preliminary evaluation of Houdini.",
+  series = "FME '01",
+  year =  2001
+}
+
+
+@INPROCEEDINGS{qbs,
+  title = "Optimizing database-backed applications with query synthesis",
+  author = "Cheung, Alvin and Solar-Lezama, Armando and Madden, Samuel",
+  booktitle = "Proceedings of the 34th ACM SIGPLAN Conference on Programming Language Design and Implementation",
+  publisher = "Association for Computing Machinery",
+  address = "New York, NY, USA",
+  pages = "3–14",
+  abstract = "Object-relational mapping libraries are a popular way for applications to interact with databases because they provide transparent access to the database using the same language as the application. Unfortunately, using such frameworks often leads to poor performance, as modularity concerns encourage developers to implement relational operations in application code. Such application code does not take advantage of the optimized relational implementations that database systems provide, such as efficient implementations of joins or push down of selection predicates. In this paper we present QBS, a system that automatically transforms fragments of application logic into SQL queries. QBS differs from traditional compiler optimizations as it relies on synthesis technology to generate invariants and postconditions for a code fragment. The postconditions and invariants are expressed using a new theory of ordered relations that allows us to reason precisely about both the contents and order of the records produced complex code fragments that compute joins and aggregates. The theory is close in expressiveness to SQL, so the synthesized postconditions can be readily translated to SQL queries. Using 75 code fragments automatically extracted from over 120k lines of open-source code written using the Java Hibernate ORM, we demonstrate that our approach can convert a variety of imperative constructs into relational specifications and significantly improve application performance asymptotically by orders of magnitude.",
+  series = "PLDI '13",
+  year =  2013,
+  keywords = "performance, program optimization, program synthesis"
+}
+
+
+@INPROCEEDINGS{z3,
+  title = "{Z3}: An Efficient {SMT} Solver",
+  author = "de Moura, Leonardo and Bjørner, Nikolaj",
+  booktitle = "Tools and Algorithms for the Construction and Analysis of Systems",
+  publisher = "Springer Berlin Heidelberg",
+  pages = "337--340",
+  abstract = "Satisfiability Modulo Theories (SMT) problem is a decision problem for logical first order formulas with respect to combinations of background theories such as: arithmetic, bit-vectors, arrays, and uninterpreted functions. Z3 is a new and efficient SMT Solver freely available from Microsoft Research. It is used in various software verification and analysis applications.",
+  year =  2008
+}
+
+
+@INPROCEEDINGS{asplos22-hecate,
+  title = "Tree Traversal Synthesis Using Domain-Specific Symbolic Compilation",
+  author = "Chen, Yanju and Liu, Junrui and Feng, Yu and Bodik, Rastislav",
+  booktitle = "Proceedings of the 27th ACM International Conference on Architectural Support for Programming Languages and Operating Systems",
+  publisher = "Association for Computing Machinery",
+  address = "New York, NY, USA",
+  pages = "1030–1042",
+  abstract = "Efficient computation on tree data structures is important in compilers, numeric computations, and web browser layout engines. Efficiency is achieved by statically scheduling the computation into a small number of tree traversals and by performing the traversals in parallel when possible. Manual design of such traversals leads to bugs, as observed in web browsers. Automatic schedulers avoid these bugs but they currently cannot explore a space of legal traversals, which prevents exploring the trade-offs between parallelism and minimizing the number of traversals. We describe Hecate, a synthesizer of tree traversals that can produce both serial and parallel traversals. A key feature is that the synthesizer is extensible by the programmer who can define a template for new kinds of traversals. Hecate is constructed as a solver-aided domain-specific language, meaning that the synthesizer is generated automatically by translating the tree traversal DSL to an SMT solver that synthesizes the traversals. We improve on the general-purpose solver-aided architecture with a scheduling-specific symbolic evaluation that maintains the engineering advantages solver-aided design but generates efficient ILP encoding that is much more efficient to solve than SMT constraints. On the set of Grafter problems, Hecate synthesizes traversals that trade off traversal fusion to exploit parallelism. Additionally, Hecate allows defining a tree data structure with an arbitrary number of children. Together, parallelism and data structure improvements accelerate the computation 2× on a tree rendering problem. Finally, Hecate’s domain-specific symbolic compilation accelerates synthesis 3× compared to the general-purpose compilation to an SMT solver; when scheduling a CSS engine traversal, this ILP-based synthesis executes orders of magnitude faster.",
+  series = "ASPLOS '22",
+  year =  2022,
+  keywords = "tree traversal, program synthesis, symbolic compilation"
+}
+
+
+@INPROCEEDINGS{rosette,
+  title = "A Lightweight Symbolic Virtual Machine for Solver-Aided Host Languages",
+  author = "Torlak, Emina and Bodik, Rastislav",
+  booktitle = "Proceedings of the 35th ACM SIGPLAN Conference on Programming Language Design and Implementation",
+  publisher = "Association for Computing Machinery",
+  address = "New York, NY, USA",
+  pages = "530–541",
+  abstract = "Solver-aided domain-specific languages (SDSLs) are an emerging class of computer-aided programming systems. They ease the construction of programs by using satisfiability solvers to automate tasks such as verification, debugging, synthesis, and non-deterministic execution. But reducing programming tasks to satisfiability problems involves translating programs to logical constraints, which is an engineering challenge even for domain-specific languages.We have previously shown that translation to constraints can be avoided if SDSLs are implemented by (traditional) embedding into a host language that is itself solver-aided. This paper describes how to implement a symbolic virtual machine (SVM) for such a host language. Our symbolic virtual machine is lightweight because it compiles to constraints only a small subset of the host's constructs, while allowing SDSL designers to use the entire language, including constructs for DSL embedding. This lightweight compilation employs a novel symbolic execution technique with two key properties: it produces compact encodings, and it enables concrete evaluation to strip away host constructs that are outside the subset compilable to constraints. Our symbolic virtual machine architecture is at the heart of Rosette, a solver-aided language that is host to several new SDSLs.",
+  series = "PLDI '14",
+  year =  2014,
+  keywords = "solver-aided languages, symbolic virtual machine"
+}
+
+
+@INPROCEEDINGS{smff,
+  title = "Satisfiability Modulo Finite Fields",
+  author = "Ozdemir, Alex and Kremer, Gereon and Tinelli, Cesare and Barrett, Clark",
+  editor = "Enea, Constantin and Lal, Akash",
+  booktitle = "Computer Aided Verification",
+  publisher = "Springer Nature Switzerland",
+  address = "Cham",
+  pages = "163--186",
+  abstract = "We study satisfiability modulo the theory of finite fields and give a decision procedure for this theory. We implement our procedure for prime fields inside the cvc5 SMT solver. Using this theory, we construct SMT queries that encode translation validation for various zero knowledge proof compilers applied to Boolean computations. We evaluate our procedure on these benchmarks. Our experiments show that our implementation is superior to previous approaches (which encode field arithmetic using integers or bit-vectors).",
+  year =  2023
+}
+
+@INPROCEEDINGS{cvc5,
+  title = "{cvc5}: A Versatile and Industrial-Strength {SMT} Solver",
+  author = "Barbosa, Haniel and Barrett, Clark and Brain, Martin and Kremer, Gereon and Lachnitt, Hanna and Mann, Makai and Mohamed, Abdalrhman and Mohamed, Mudathir and Niemetz, Aina and Nötzli, Andres and Ozdemir, Alex and Preiner, Mathias and Reynolds, Andrew and Sheng, Ying and Tinelli, Cesare and Zohar, Yoni",
+  editor = "Fisman, Dana and Rosu, Grigore",
+  booktitle = "Tools and Algorithms for the Construction and Analysis of Systems",
+  publisher = "Springer International Publishing",
+  address = "Cham",
+  pages = "415--442",
+  abstract = "cvc5 is the latest SMT solver in the cooperating validity checker series and builds on the successful code base of CVC4. This paper serves as a comprehensive system description of cvc5 's architectural design and highlights the major features and components introduced since CVC4 1.8. We evaluate cvc5 's performance on all benchmarks in SMT-LIB and provide a comparison against CVC4 and Z3.",
+  year =  2022
+}
+
+
+@MISC{plonk,
+  title = "{PLONK}: Permutations over Lagrange-bases for Oecumenical Noninteractive arguments of Knowledge",
+  author = "Gabizon, Ariel and Williamson, Zachary J and Ciobotaru, Oana",
+  year =  2019,
+  howpublished = "Cryptology ePrint Archive, Paper 2019/953"
+}
+
+
+@MISC{bitvm2,
+  title = "{BitVM2}: Bridging Bitcoin to Second Layers",
+  author = "Linus, Robin and Aumayr, Lukas and Zamyatin, Alexei and Pelosi, Andrea and Avarikioti, Zeta and Maffei, Matteo",
+  month =  aug,
+  year =  2024
+}
+
+
+@INPROCEEDINGS{bitwuzla,
+  title = "Bitwuzla",
+  author = "Niemetz, Aina and Preiner, Mathias",
+  editor = "Enea, Constantin and Lal, Akash",
+  booktitle = "Computer Aided Verification",
+  publisher = "Springer Nature Switzerland",
+  address = "Cham",
+  pages = "3--17",
+  abstract = "Bitwuzla is a new SMT solver for the quantifier-free and quantified theories of fixed-size bit-vectors, arrays, floating-point arithmetic, and uninterpreted functions. This paper serves as a comprehensive system description of its architecture and components. We evaluate Bitwuzla's performance on all benchmarks of supported logics in SMT-LIB and provide a comparison against other state-of-the-art SMT solvers.",
+  year =  2023
+}
+
+@INPROCEEDINGS{bitvector,
+  title = "A decision procedure for bit-vector arithmetic",
+  author = "Barrett, Clark W and Dill, David L and Levitt, Jeremy R",
+  booktitle = "Proceedings of the 35th Annual Design Automation Conference",
+  publisher = "Association for Computing Machinery",
+  address = "New York, NY, USA",
+  pages = "522–527",
+  abstract = "Bit-v ector theories with concatenation and extraction have been shown to be useful and important for hardware verification. We have implemented an extended theory which includes arithmetic. Although deciding equality in suc h a theory is NP-hard, our implementation is efficient for many practical examples. We believ e this to be the first such implementation which is efficient, automatic, and complete.",
+  series = "DAC '98",
+  year =  1998,
+  keywords = "voltage scaling, synthesis, placement, low power, level converters, flip-flops, design automatian, codec, MPEG4"
+}
+
+
+@misc{ecne,
+  author = {Franklyn Wang},
+  title = {Ecne},
+  year = {2022},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/franklynwang/EcneProject}},
+  commit = {25935352ca30705ad47363dcf200822635edc1c7}
+}
+
+@misc{stacks,
+  title = {Stacks (STX)},
+  author = {{Hiro Systems PBC}},
+  howpublished = {\url{https://stacks.co}},
+  note = {Bitcoin Layer 2 enabling smart contracts and DeFi using Clarity},
+  year = {2025}
+}
+
+@misc{rsk,
+  title = {Rootstock (RSK)},
+  author = {{IOV Labs}},
+  howpublished = {\url{https://rootstock.io}},
+  note = {EVM-compatible Bitcoin sidechain secured by BTC hash power},
+  year = {2025}
+}
+
+@misc{sovryn,
+  title = {Sovryn},
+  author = {{Sovryn Community}},
+  howpublished = {\url{https://www.sovryn.app}},
+  note = {Bitcoin-native DeFi protocol built on RSK},
+  year = {2025}
+}
+
+
+@techreport{racket-lang,
+  title       = {Reference: Racket},
+  author      = {Matthew Flatt and PLT},
+  number      = {PLT-TR-2010-1},
+  institution = {PLT Design Inc.},
+  year        = {2010},
+  note        = {\url{https://racket-lang.org/tr1/}}
+}
+
+@inproceedings{poseidon,
+author = {Lorenzo Grassi and Dmitry Khovratovich and Christian Rechberger and Arnab Roy and Markus Schofnegger},
+title = {Poseidon: A New Hash Function for {Zero-Knowledge} Proof Systems},
+booktitle = {30th USENIX Security Symposium (USENIX Security 21)},
+year = {2021},
+isbn = {978-1-939133-24-3},
+pages = {519--535},
+url = {https://www.usenix.org/conference/usenixsecurity21/presentation/grassi},
+publisher = {USENIX Association},
+month = aug,
+}
+
+@misc{groth16,
+      author = {Jens Groth},
+      title = {On the Size of Pairing-based Non-interactive Arguments},
+      howpublished = {Cryptology ePrint Archive, Paper 2016/260},
+      year = {2016},
+      note = {\url{https://eprint.iacr.org/2016/260}},
+      url = {https://eprint.iacr.org/2016/260}
+}
+
+@misc{r1cs, title={R1CS}, url={https://www.zeroknowledgeblog.com/index.php/the-pinocchio-protocol/r1cs}, journal={The Zero Knowledge Blog}, author={Binello, Maurizio}, year={2019}}
+
+@misc{buterin_2016, title={Quadratic arithmetic programs: From zero to hero}, url={https://medium.com/@VitalikButerin/quadratic-arithmetic-programs-from-zero-to-hero-f6d558cea649}, journal={Medium}, publisher={Medium}, author={Buterin, Vitalik}, year={2016}, month={Dec}}
+
+@misc{pinnochio,
+      author = {Bryan Parno and Craig Gentry and Jon Howell and Mariana Raykova},
+      title = {Pinocchio: Nearly Practical Verifiable Computation},
+      howpublished = {Cryptology ePrint Archive, Paper 2013/279},
+      year = {2013},
+      note = {\url{https://eprint.iacr.org/2013/279}},
+      url = {https://eprint.iacr.org/2013/279}
+}
+
+@misc{forge, title={Disclosure of recent vulnerabilities}, url={https://hackmd.io/@aztec-network/disclosure-of-recent-vulnerabilities}, journal={HackMD}, author={Connor, Michael}, year={2021}}
+
+@misc{steal, title={Tornado.cash got hacked. by Us.}, url={https://tornado-cash.medium.com/tornado-cash-got-hacked-by-us-b1e012a3c9a8}, author={Tornado.cash}, journal={Medium}, publisher={Medium}, year={2019}, month={Oct}}
+
+@misc{mint, title={Tornado.cash got hacked. by Us.}, url={https://tornado-cash.medium.com/tornado-cash-got-hacked-by-us-b1e012a3c9a8}, journal={Medium}, publisher={Medium}, year={2019}, month={Oct}} 
+
+@misc{babyadd, title={Circomlib/babyjub.circom at CFF5AB6288B55EF23602221694A6A38A0239DCC0 · Iden3/circomlib}, url={https://github.com/iden3/circomlib/blob/cff5ab6288b55ef23602221694a6a38a0239dcc0/circuits/babyjub.circom#L45}, journal={GitHub}, author={Baylina, Jordi}, year={2021}, month={Oct}}
+
+@misc{bernstein,
+      author = {Daniel J.  Bernstein and Tanja Lange},
+      title = {Faster addition and doubling on elliptic curves},
+      howpublished = {Cryptology ePrint Archive, Paper 2007/286},
+      year = {2007},
+      note = {\url{https://eprint.iacr.org/2007/286}},
+      url = {https://eprint.iacr.org/2007/286}
+}
+
+%ZERO KNOWLEDGE
+
+@inproceedings{goldwasser,
+author = {Goldwasser, S and Micali, S and Rackoff, C},
+title = {The Knowledge Complexity of Interactive Proof-Systems},
+year = {1985},
+isbn = {0897911512},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/22145.22178},
+doi = {10.1145/22145.22178},
+booktitle = {Proceedings of the Seventeenth Annual ACM Symposium on Theory of Computing},
+pages = {291–304},
+numpages = {14},
+location = {Providence, Rhode Island, USA},
+series = {STOC '85}
+}
+
+
+@inproceedings{fiore,
+author = {fiore, Dario and Tucker, Ida},
+title = {Efficient Zero-Knowledge Proofs on Signed Data with Applications to Verifiable Computation on Data Streams},
+year = {2022},
+isbn = {9781450394505},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/3548606.3560630},
+doi = {10.1145/3548606.3560630},
+booktitle = {Proceedings of the 2022 ACM SIGSAC Conference on Computer and Communications Security},
+pages = {1067–1080},
+numpages = {14},
+keywords = {homomorphic signatures, verifiable computation, zero-knowledge proofs, data stream},
+location = {Los Angeles, CA, USA},
+series = {CCS '22}
+}
+
+@misc{onur,
+author = {Onur, Ceyhun and Yurdakul, Arda},
+year = {2022},
+month = {03},
+pages = {},
+title = {ElectAnon: A Blockchain-Based, Anonymous, Robust and Scalable Ranked-Choice Voting Protocol}
+}
+
+@misc{weijiek,
+author = {Jie, Wei Koh},
+year = {2019},
+month = {12},
+pages = {},
+title = {Private voting and whistleblowing on Ethereum using Semaphore},
+howpublished = {\url{https://weijiek.medium.com/private-voting-and-whistleblowing-in-ethereum-using-semaphore-449b376808e}}
+}
+
+@INPROCEEDINGS{zokrates,
+  author={Eberhardt, Jacob and Tai, Stefan},
+  booktitle={2018 IEEE International Conference on Internet of Things (iThings) and IEEE Green Computing and Communications (GreenCom) and IEEE Cyber, Physical and Social Computing (CPSCom) and IEEE Smart Data (SmartData)}, 
+  title={ZoKrates - Scalable Privacy-Preserving Off-Chain Computations}, 
+  year={2018},
+  volume={},
+  number={},
+  pages={1084-1091},
+  doi={10.1109/Cybermatics_2018.2018.00199}}
+
+@ARTICLE{circom,
+  author={Bellés-Muñoz, Marta and Baylina, Jordi and Daza, Vanesa and Muñoz-Tapia, José L.},
+  journal={IEEE Software}, 
+  title={New Privacy Practices for Blockchain Software}, 
+  year={2022},
+  volume={39},
+  number={3},
+  pages={43-49},
+  doi={10.1109/MS.2021.3086718}}
+  
+@INPROCEEDINGS{zcash,
+  author={Ben Sasson, Eli and Chiesa, Alessandro and Garman, Christina and Green, Matthew and Miers, Ian and Tromer, Eran and Virza, Madars},
+  booktitle={2014 IEEE Symposium on Security and Privacy}, 
+  title={Zerocash: Decentralized Anonymous Payments from Bitcoin}, 
+  year={2014},
+  volume={},
+  number={},
+  pages={459-474},
+  doi={10.1109/SP.2014.36}}
+
+
+@misc{tornadocash,
+author = {TornadoCash},
+year = {2019},
+month = {08},
+pages = {},
+title = {Introducing Private Transactions On Ethereum NOW!},
+howpublished = {\url{https://tornado-cash.medium.com/introducing-private-transactions-on-ethereum-now-42ee915babe0}}
+}
+
+@misc{tornadocashhack,
+author = {TornadoCash},
+year = {2019},
+month = {12},
+pages = {},
+title = {Tornado.cash got hacked. By us.},
+howpublished = {\url{https://tornado-cash.medium.com/tornado-cash-got-hacked-by-us-b1e012a3c9a8}}
+}
+
+@misc{aztechack,
+author = {Aztec},
+year = {2022},
+month = {02},
+pages = {},
+title = {Disclosure of recent vulnerabilities},
+howpublished = {\url{https://hackmd.io/@aztec-network/disclosure-of-recent-vulnerabilities}}
+}
+
+
+@misc{circomspect,
+author = {Dahlgren, Fredrick},
+year = {2022},
+month = 09,
+title = {It pays to be Circomspect},
+howpublished = {\url{https://blog.trailofbits.com/2022/09/15/it-pays-to-be-circomspect/}}
+}
+
+@misc{snarkjs,
+  author = {Iden3},
+  title = {SnarkJS},
+  year = {2018},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/iden3/snarkjs}}
+}
+
+@misc{zinc,
+  author = {Matter-Labs},
+  title = {Zinc},
+  year = {2022},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/matter-labs/zinc}}
+}
+
+@misc{snarky,
+  author = {o1-Labs},
+  title = {Snarky: Write efficient, beautiful, safe zk-SNARK code},
+  year = {2022},
+  publisher = {GitHub},
+  journal = {GitHub Webpage},
+  howpublished = {\url{https://o1-labs.github.io/snarky/}}
+}
+
+@misc{leo,
+  author = {Chin, Collin},
+  title = {LEO: A Programming Language for Formally Verified,
+Zero-Knowledge Applications},
+  year = {2021},
+  publisher = {ZKProof.org},
+  howpublished = {\url{https://docs.zkproof.org/pages/standards/accepted-workshop4/proposal-leo.pdf}}
+}
+
+@misc{circ,
+      author = {Alex Ozdemir and Fraser Brown and Riad S.  Wahby},
+      title = {CirC: Compiler infrastructure for proof systems, software verification, and more},
+      howpublished = {Cryptology ePrint Archive, Paper 2020/1586},
+      year = {2020},
+      note = {\url{https://eprint.iacr.org/2020/1586}},
+      url = {https://eprint.iacr.org/2020/1586}
+}
+
+@article{halo2,
+  title={Halo: Recursive Proof Composition without a Trusted Setup},
+  author={Sean Bowe and Jack Grigg and Daira Hopwood},
+  journal={IACR Cryptol. ePrint Arch.},
+  year={2019},
+  volume={2019},
+  pages={1021}
+}
+
+@article{cairo,
+  title={Cairo - a Turing-complete STARK-friendly CPU architecture},
+  author={Lior Goldberg and Shahar Papini and Michael Riabzev},
+  journal={IACR Cryptol. ePrint Arch.},
+  year={2021},
+  volume={2021},
+  pages={1063}
+}
+
+% PROOF SYSTEMS
+
+@inproceedings {zksnark,
+author = {Eli Ben-Sasson and Alessandro Chiesa and Eran Tromer and Madars Virza},
+title = {Succinct {Non-Interactive} Zero Knowledge for a von Neumann Architecture},
+booktitle = {23rd USENIX Security Symposium (USENIX Security 14)},
+year = {2014},
+isbn = {978-1-931971-15-7},
+address = {San Diego, CA},
+pages = {781--796},
+url = {https://www.usenix.org/conference/usenixsecurity14/technical-sessions/presentation/ben-sasson},
+publisher = {USENIX Association},
+month = aug,
+}
+
+@article{stark,
+  author    = {Eli Ben{-}Sasson and
+               Iddo Bentov and
+               Yinon Horesh and
+               Michael Riabzev},
+  title     = {Scalable, transparent, and post-quantum secure computational integrity},
+  journal   = {{IACR} Cryptol. ePrint Arch.},
+  pages     = {46},
+  year      = {2018},
+  url       = {http://eprint.iacr.org/2018/046},
+  timestamp = {Mon, 11 May 2020 15:53:57 +0200},
+  biburl    = {https://dblp.org/rec/journals/iacr/Ben-SassonBHR18.bib},
+  bibsource = {dblp computer science bibliography, https://dblp.org}
+}
+
+
+
+
+@article{ecdsa,
+author = {Johnson, Don and Menezes, Alfred and Vanstone, Scott},
+title = {The Elliptic Curve Digital Signature Algorithm (ECDSA)},
+year = {2001},
+issue_date = {August 2001},
+publisher = {Springer-Verlag},
+address = {Berlin, Heidelberg},
+volume = {1},
+number = {1},
+issn = {1615-5262},
+url = {https://doi.org/10.1007/s102070100002},
+doi = {10.1007/s102070100002},
+abstract = {The Elliptic Curve Digital Signature Algorithm (ECDSA) is the elliptic curve analogue of the Digital Signature Algorithm (DSA). It was accepted in 1999 as an ANSI standard and in 2000 as IEEE and NIST standards. It was also accepted in 1998 as an ISO standard and is under consideration for inclusion in some other ISO standards. Unlike the ordinary discrete logarithm problem and the integer factorization problem, no subexponential-time algorithm is known for the elliptic curve discrete logarithm problem. For this reason, the strength-per-key-bit is substantially greater in an algorithm that uses elliptic curves. This paper describes the ANSI X9.62 ECDSA, and discusses related security, implementation, and interoperability issues.},
+journal = {Int. J. Inf. Secur.},
+month = {aug},
+pages = {36–63},
+numpages = {28},
+keywords = {Key words: Signature schemes --- Elliptic curve cryptography --- DSA --- ECDSA}
+}
+
+@article{bls,
+author = {Boneh, Dan and Lynn, Ben and Shacham, Hovav},
+title = {Short Signatures from the Weil Pairing},
+year = {2004},
+issue_date = {September 2004},
+publisher = {Springer-Verlag},
+address = {Berlin, Heidelberg},
+volume = {17},
+number = {4},
+issn = {0933-2790},
+url = {https://doi.org/10.1007/s00145-004-0314-9},
+doi = {10.1007/s00145-004-0314-9},
+abstract = {We introduce a short signature scheme based on the Computational Diffie–Hellman assumption on certain elliptic and hyperelliptic curves. For standard security parameters, the signature length is about half that of a DSA signature with a similar level of security. Our short signature scheme is designed for systems where signatures are typed in by a human or are sent over a low-bandwidth channel. We survey a number of properties of our signature scheme such as signature aggregation and batch verification.},
+journal = {J. Cryptol.},
+month = {sep},
+pages = {297–319},
+numpages = {23},
+keywords = {Elliptic curves, Short signatures, Bilinear maps, Pairings, Digital signatures}
+}
+
+@misc{CdH06,
+  title={A Probabilistic Hoare-style logic for Game-based Cryptographic Proofs (Extended Version)},
+  booktitle={IACR Eprint archive},
+  keywords={Games, Hoare logic, Programming languages},
+  url={http://eprint.iacr.org/2005/467},
+  note={To appear in ICALP 2006 Track C corin@cs.utwente.nl 13264 received 23 Dec 2005, last revised 26 Apr 2006},
+  author={Ricardo Corin and Jerry den Hartog},
+  year=2005
+}
+
+
+@misc{GLL13,
+      author = {Martin Gagné and Pascal Lafourcade and Yassine Lakhnech},
+      title = {Automated Security Proofs for Almost-Universal Hash for MAC verification},
+      howpublished = {Cryptology ePrint Archive, Paper 2013/407},
+      year = {2013},
+      note = {\url{https://eprint.iacr.org/2013/407}},
+      url = {https://eprint.iacr.org/2013/407}
+}
+
+@inproceedings{TGD15,
+  author    = {Ashish Tiwari and Adria Gascon and Bruno Dutertre},
+  title     = {Program Synthesis Using Dual Interpretation},
+  booktitle = {Automated Deduction - {CADE-25} - 25th International Conference on
+               Automated Deduction, Berlin, Germany, August 1-7, 2015, Proceedings},
+  series    = {LNCS},
+  volume    = 9195,
+  pages     = {482--497},
+  year      = {2015},
+  url       = {http://dx.doi.org/10.1007/978-3-319-21401-6_33},
+  doi       = {10.1007/978-3-319-21401-6_33},
+}
+
+@inproceedings{easycrypt,
+  title={EasyCrypt: A Tutorial},
+  author={Gilles Barthe and François Dupressoir and Benjamin Gr{\'e}goire and C{\'e}sar Kunz and Benedikt Schmidt and Pierre-Yves Strub},
+  booktitle={FOSAD},
+  year={2013}
+}
+
+@inproceedings{zkcompiler,
+author = {Almeida, José and Bangerter, Endre and Barbosa, Manuel and Krenn, Stephan and Sadeghi, Ahmad-Reza and Schneider, Thomas},
+year = {2010},
+month = {09},
+pages = {151-167},
+title = {A Certifying Compiler for Zero-Knowledge Proofs of Knowledge Based on Sigma-Protocols.},
+volume = {6345},
+doi = {10.1007/978-3-642-15497-3_10}
+}
+
+@inproceedings{isabelle,
+  title={Isabelle/HOL: A Proof Assistant for Higher-Order Logic},
+  author={Tobias Nipkow and Markus Wenzel and Lawrence Charles Paulson},
+  year={2002}
+}
+
+@INPROCEEDINGS{sidorenco,
+  author={Sidorenco, Nikolaj and Oechsner, Sabine and Spitters, Bas},
+  booktitle={2021 IEEE 34th Computer Security Foundations Symposium (CSF)}, 
+  title={Formal security analysis of MPC-in-the-head zero-knowledge protocols}, 
+  year={2021},
+  volume={},
+  number={},
+  pages={1-14},
+  doi={10.1109/CSF51468.2021.00050}}
+  
+@misc{hader,
+  title={Non-linear SMT-reasoning over finite fields},
+  publisher = {Technische Universität Wien},
+  author={Hader,Thomas},
+  year=2022
+}
+
+@misc{cvc5-ff,
+  author = {Ozdemir, Alex},
+  title = {CVC5-ff},
+  year = {2022},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/alex-ozdemir/CVC4/tree/ff}}
+}
+
+@misc{zkbug1,
+  author = {trailofbits},
+  title = {The Frozen Heart vulnerability in Bulletproofs},
+  year = {2022},
+  publisher = {trailofbits},
+  howpublished = {\url{https://blog.trailofbits.com/2022/04/15/the-frozen-heart-vulnerability-in-bulletproof}}
+}
+
+@misc{zkbug2,
+  author = {aztec},
+  title = {Disclosure of recent vulnerabilities},
+  year = {2022},
+  howpublished = {\url{https://hackmd.io/@aztec-network/disclosure-of-recent-vulnerabilities}}
+}
+
+@misc{zkbug3,
+  author = {electriccoin},
+  title = {Zcash Counterfeiting Vulnerability Successfully Remediated},
+  year = {2019},
+  howpublished = {\url{https://electriccoin.co/blog/zcash-counterfeiting-vulnerability-successfully-remediated}}
+}
+
+@inproceedings{pedersen,
+author = {Pedersen, Torben P.},
+title = {Non-Interactive and Information-Theoretic Secure Verifiable Secret Sharing},
+year = {1991},
+isbn = {3540551883},
+publisher = {Springer-Verlag},
+address = {Berlin, Heidelberg},
+abstract = {It is shown how to distribute a secret to n persons such that each person can verify that he has received correct information about the secret without talking with other persons. Any k of these persons can later find the secret (1 k n ), whereas fewer than k persons get no (Shannon) information about the secret. The information rate of the scheme is 1/2 and the distribution as well as the verification requires approximately 2 k modular multiplications pr. bit of the secret. It is also shown how a number of persons can choose a secret "in the well" and distribute it veritably among themselves.},
+booktitle = {Proceedings of the 11th Annual International Cryptology Conference on Advances in Cryptology},
+pages = {129–140},
+numpages = {12},
+series = {CRYPTO '91}
+}
+
+@article{edwards,
+author = {Boudabra, Maher and Nitaj, Abderrahmane},
+year = {2019},
+month = {04},
+pages = {1-20},
+title = {A New Public Key Cryptosystem Based on Edwards Curves},
+volume = {61},
+journal = {Journal of Applied Mathematics and Computing},
+doi = {10.1007/s12190-019-01257-y}
+}
+
+@misc{montgomery,
+      author = {Craig Costello and Benjamin Smith},
+      title = {Montgomery curves and their arithmetic: The case of large characteristic fields},
+      howpublished = {Cryptology ePrint Archive, Paper 2017/212},
+      year = {2017},
+      note = {\url{https://eprint.iacr.org/2017/212}},
+      url = {https://eprint.iacr.org/2017/212}
+}
+
+@misc{compilerbug1,
+  author = {Aleo},
+  title = {Leo code translates to invalid Aleo instruction code},
+  year = {2022},
+  howpublished = {\url{https://github.com/AleoHQ/leo/issues/2042}}
+}
+
+@misc{compilerbug2,
+  author = {Noir},
+  title = {Proof verification fails with a simple example},
+  year = {2022},
+  howpublished = {\url{https://github.com/noir-lang/noir/issues/358}}
+}
+
+@inproceedings{yanju,
+  author = {Yanju Chen and Shankara Pailoor and Clara Rodriguez and Franklyn Wang and Jacob Van Gaffen and Jason Morton and Michael Chu and Brian Gu and Yu Feng and Isil Dillig},
+  title        = {Automated Detection of Underconstrained Circuits 
+                   in Zero-Knowledge Proofs},
+  year         = 2023,
+  publisher    = {Zenodo},
+  month        = mar,
+  doi          = {10.5281/zenodo.7776035},
+  url          = {https://doi.org/10.5281/zenodo.7776035}
+}
+
+@misc{qed2,
+      author = {Shankara Pailoor and Yanju Chen and Franklyn Wang and Clara Rodríguez and Jacob Van Gaffen and Jason Morton and Michael Chu and Brian Gu and Yu Feng and Isil Dillig},
+      title = {Automated Detection of Underconstrained Circuits for Zero-Knowledge Proofs},
+      howpublished = {Cryptology ePrint Archive, Paper 2023/512},
+      year = {2023},
+      doi = {10.1145/3591282},
+      note = {\url{https://eprint.iacr.org/2023/512}},
+      url = {https://eprint.iacr.org/2023/512}
+}
+
+@inproceedings{zkap,
+  author       = {Hongbo Wen and
+                  Jon Stephens and
+                  Yanju Chen and
+                  Kostas Ferles and
+                  Shankara Pailoor and
+                  Kyle Charbonnet and
+                  Isil Dillig and
+                  Yu Feng},
+  editor       = {Davide Balzarotti and
+                  Wenyuan Xu},
+  title        = {Practical Security Analysis of Zero-Knowledge Proof Circuits},
+  booktitle    = {33rd {USENIX} Security Symposium, {USENIX} Security 2024, Philadelphia,
+                  PA, USA, August 14-16, 2024},
+  publisher    = {{USENIX} Association},
+  year         = {2024},
+  url          = {https://www.usenix.org/conference/usenixsecurity24/presentation/wen},
+  timestamp    = {Mon, 22 Jul 2024 17:10:49 +0200},
+  biburl       = {https://dblp.org/rec/conf/uss/WenSCFPCD024.bib},
+  bibsource    = {dblp computer science bibliography, https://dblp.org}
+}
+
+@inproceedings{coda,
+  author       = {Junrui Liu and
+                  Ian Kretz and
+                  Hanzhi Liu and
+                  Bryan Tan and
+                  Jonathan Wang and
+                  Yi Sun and
+                  Luke Pearson and
+                  Anders Miltner and
+                  Isil Dillig and
+                  Yu Feng},
+  title        = {Certifying Zero-Knowledge Circuits with Refinement Types},
+  booktitle    = {{IEEE} Symposium on Security and Privacy, {SP} 2024, San Francisco,
+                  CA, USA, May 19-23, 2024},
+  pages        = {1741--1759},
+  publisher    = {{IEEE}},
+  year         = {2024},
+  url          = {https://doi.org/10.1109/SP54263.2024.00078},
+  doi          = {10.1109/SP54263.2024.00078},
+  timestamp    = {Sat, 21 Sep 2024 14:24:56 +0200},
+  biburl       = {https://dblp.org/rec/conf/sp/LiuKLTWSPMDF24.bib},
+  bibsource    = {dblp computer science bibliography, https://dblp.org}
+}
+
+@inproceedings{OzdemirKTB23,
+  author       = {Alex Ozdemir and
+                  Gereon Kremer and
+                  Cesare Tinelli and
+                  Clark W. Barrett},
+  editor       = {Constantin Enea and
+                  Akash Lal},
+  title        = {Satisfiability Modulo Finite Fields},
+  booktitle    = {Computer Aided Verification - 35th International Conference, {CAV}
+                  2023, Paris, France, July 17-22, 2023, Proceedings, Part {II}},
+  series       = {Lecture Notes in Computer Science},
+  volume       = {13965},
+  pages        = {163--186},
+  publisher    = {Springer},
+  year         = {2023},
+  url          = {https://doi.org/10.1007/978-3-031-37703-7\_8},
+  doi          = {10.1007/978-3-031-37703-7\_8},
+  timestamp    = {Tue, 12 Sep 2023 07:57:21 +0200},
+  biburl       = {https://dblp.org/rec/conf/cav/OzdemirKTB23.bib},
+  bibsource    = {dblp computer science bibliography, https://dblp.org}
+}
+
+@article{nelson-oppen,
+ author = {Nelson, Greg and Oppen, Derek C.},
+ title = {Fast Decision Procedures Based on Congruence Closure},
+ journal = {J. ACM},
+ issue_date = {April 1980},
+ volume = {27},
+ number = {2},
+ month = apr,
+ year = {1980},
+ issn = {0004-5411},
+ pages = {356--364},
+ numpages = {9},
+ url = {http://doi.acm.org/10.1145/322186.322198},
+ doi = {10.1145/322186.322198},
+ acmid = {322198},
+ publisher = {ACM},
+ address = {New York, NY, USA},
+} 
+
+@inproceedings{cvc4,
+ author = {Barrett, Clark and Conway, Christopher L. and Deters, Morgan and Hadarean, Liana and Jovanovi\'{c}, Dejan and King, Tim and Reynolds, Andrew and Tinelli, Cesare},
+ title = {CVC4},
+ booktitle = {Proceedings of the 23rd International Conference on Computer Aided Verification},
+ series = {CAV'11},
+ year = {2011},
+ isbn = {978-3-642-22109-5},
+ location = {Snowbird, UT},
+ pages = {171--177},
+ numpages = {7},
+ url = {http://dl.acm.org/citation.cfm?id=2032305.2032319},
+ acmid = {2032319},
+ publisher = {Springer-Verlag},
+ address = {Berlin, Heidelberg},
+} 
+
+@misc{gurobi,
+  author = "Gurobi Optimization, LLC",
+  title = "Gurobi Optimizer Reference Manual",
+  year = 2019,
+  url = "http://www.gurobi.com"
+}
+
+@inproceedings{smten,
+ author = {Uhler, Richard and Dave, Nirav},
+ title = {Smten with Satisfiability-based Search},
+ booktitle = {Proceedings of the 2014 ACM International Conference on Object Oriented Programming Systems Languages \& Applications},
+ series = {OOPSLA '14},
+ year = {2014},
+ isbn = {978-1-4503-2585-1},
+ location = {Portland, Oregon, USA},
+ pages = {157--176},
+ numpages = {20},
+ url = {http://doi.acm.org/10.1145/2660193.2660208},
+ doi = {10.1145/2660193.2660208},
+ acmid = {2660208},
+ publisher = {ACM},
+ address = {New York, NY, USA},
+ keywords = {domain-specific language, haskell, satisfiability, satisfiability modulo theories},
+} 
+
+
+@phdthesis{sketch,
+ author = {Solar-Lezama, Armando},
+ advisor = {Bodik, Rastislav},
+ title = {Program Synthesis by Sketching},
+ year = {2008},
+ isbn = {978-1-109-09745-0},
+ note = {AAI3353225},
+ publisher = {University of California at Berkeley},
+ address = {Berkeley, CA, USA},
+} 
+
+@inproceedings{dafny,
+ author = {Leino, K. Rustan M.},
+ title = {Dafny: An Automatic Program Verifier for Functional Correctness},
+ booktitle = {Proceedings of the 16th International Conference on Logic for Programming, Artificial Intelligence, and Reasoning},
+ series = {LPAR'10},
+ year = {2010},
+ isbn = {3-642-17510-4, 978-3-642-17510-7},
+ location = {Dakar, Senegal},
+ pages = {348--370},
+ numpages = {23},
+ url = {http://dl.acm.org/citation.cfm?id=1939141.1939161},
+ acmid = {1939161},
+ publisher = {Springer-Verlag},
+ address = {Berlin, Heidelberg},
+} 
+
+@inproceedings{stoke,
+ author = {Schkufza, Eric and Sharma, Rahul and Aiken, Alex},
+ title = {Stochastic Superoptimization},
+ booktitle = {Proceedings of the Eighteenth International Conference on Architectural Support for Programming Languages and Operating Systems},
+ series = {ASPLOS '13},
+ year = {2013},
+ isbn = {978-1-4503-1870-9},
+ location = {Houston, Texas, USA},
+ pages = {305--316},
+ numpages = {12},
+ url = {http://doi.acm.org/10.1145/2451116.2451150},
+ doi = {10.1145/2451116.2451150},
+ acmid = {2451150},
+ publisher = {ACM},
+ address = {New York, NY, USA},
+ keywords = {64-bit, binary, markov chain monte carlo, mcmc, smt, stochastic search, superoptimization, x86, x86-64},
+} 
+
+@inproceedings{cheung2013,
+  author       = {Alvin Cheung and
+                  Armando Solar{-}Lezama and
+                  Samuel Madden},
+  editor       = {Hans{-}Juergen Boehm and
+                  Cormac Flanagan},
+  title        = {Optimizing database-backed applications with query synthesis},
+  booktitle    = {{ACM} {SIGPLAN} Conference on Programming Language Design and Implementation,
+                  {PLDI} '13, Seattle, WA, USA, June 16-19, 2013},
+  pages        = {3--14},
+  publisher    = {{ACM}},
+  year         = {2013}
+}
+
+@misc{hermez,
+author = {Polygon},
+year = {2022},
+title = {Scalable payments, with Zero-Knowledge Rollups},
+howpublished = {\url{https://hermez.io}}
+}
+
+@article{hoare,
+  author       = {C. A. R. Hoare},
+  title        = {An Axiomatic Basis for Computer Programming},
+  journal      = {Commun. {ACM}},
+  volume       = {12},
+  number       = {10},
+  pages        = {576--580},
+  year         = {1969},
+  url          = {https://doi.org/10.1145/363235.363259},
+  doi          = {10.1145/363235.363259},
+  timestamp    = {Wed, 14 Nov 2018 10:22:34 +0100},
+  biburl       = {https://dblp.org/rec/journals/cacm/Hoare69.bib},
+  bibsource    = {dblp computer science bibliography, https://dblp.org}
+}
+
+@article{bitcoin,
+  title={Bitcoin: A peer-to-peer electronic cash system},
+  author={Nakamoto, Satoshi},
+  journal={Satoshi Nakamoto},
+  year={2008}
+}
+
+@article{ethereum,
+  title={A next-generation smart contract and decentralized application platform},
+  author={Buterin, Vitalik and others},
+  journal={white paper},
+  volume={3},
+  number={37},
+  pages={2--1},
+  year={2014}
+}
+
+@misc{bscript,
+author = {Bitcoin},
+year = {2022},
+title = {Bitcoin Script},
+howpublished = {\url{https://en.bitcoin.it/wiki/Script}}
+}
+
+% === Added references for BEAK paper ===
+
+@misc{openvm,
+  author = {{OpenVM Contributors}},
+  title = {{OpenVM}: A Modular zkVM Framework},
+  year = {2024},
+  howpublished = {\url{https://github.com/openvm-org/openvm}}
+}
+
+@misc{sp1,
+  author = {{Succinct Labs}},
+  title = {{SP1}: The Fastest zkVM},
+  year = {2024},
+  howpublished = {\url{https://github.com/succinctlabs/sp1}}
+}
+
+@misc{risc0,
+  author = {{RISC Zero}},
+  title = {{RISC Zero}: General-Purpose Verifiable Computing},
+  year = {2024},
+  howpublished = {\url{https://github.com/risc0/risc0}}
+}
+
+@inproceedings{jolt,
+  title = {Jolt: {SNARKs} for Virtual Machines via Lookups},
+  author = {Arun, Arasu and Setty, Srinath and Thaler, Justin},
+  booktitle = {Advances in Cryptology -- EUROCRYPT 2024},
+  year = {2024}
+}
+
+@misc{nexus,
+  author = {{Nexus Labs}},
+  title = {{Nexus zkVM}},
+  year = {2024},
+  howpublished = {\url{https://github.com/nexus-xyz/nexus-zkvm}}
+}
+
+@misc{pico,
+  author = {{Web3 Foundation}},
+  title = {{Pico}: A zkVM},
+  year = {2024},
+  howpublished = {\url{https://github.com/w3f/pico}}
+}
+
+@article{ucb1,
+  title = {Finite-time analysis of the multiarmed bandit problem},
+  author = {Auer, Peter and Cesa-Bianchi, Nicol{\`o} and Fischer, Paul},
+  journal = {Machine Learning},
+  volume = {47},
+  number = {2--3},
+  pages = {235--256},
+  year = {2002}
+}
+
+@inproceedings{picus,
+  title = {Automated Detection of Under-Constrained Circuits in Zero-Knowledge Proofs},
+  author = {Wen, Shankara Pailoor and Yanju Chen and Frankle, Jonathan and Dillig, Isil},
+  booktitle = {Proceedings of the ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI)},
+  year = {2023}
+}
+
+@inproceedings{foray,
+  title = {{FORAY}: Towards Effective Attack Synthesis against Deep Logical Vulnerabilities in {DeFi} Protocols},
+  author = {Wen, Hongbo and Liu, Hanzhi and Song, Jiaxin and Chen, Yanju and Guo, Wenbo and Feng, Yu},
+  booktitle = {Proceedings of the ACM SIGSAC Conference on Computer and Communications Security (CCS)},
+  year = {2024}
+}
+
+@inproceedings{tabby,
+  title = {Tabby: A Synthesis-Aided Compiler for High-Performance Zero-Knowledge Proof Circuits},
+  author = {Liu, Junrui and Song, Jiaxin and Chen, Yanning and Liu, Hanzhi and Wen, Hongbo and Pearson, Luke and Chen, Yanju and Feng, Yu},
+  booktitle = {Proceedings of the ACM on Programming Languages (OOPSLA)},
+  year = {2025}
+}
+
+@article{mckeeman1998differential,
+  title = {Differential testing for software},
+  author = {McKeeman, William M.},
+  journal = {Digital Technical Journal},
+  volume = {10},
+  number = {1},
+  pages = {100--107},
+  year = {1998}
+}
+
+@inproceedings{csmith,
+  title = {Finding and understanding bugs in {C} compilers},
+  author = {Yang, Xuejun and Chen, Yang and Eide, Eric and Regehr, John},
+  booktitle = {Proceedings of the ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI)},
+  year = {2011}
+}
+
+@misc{afl,
+  author = {Zalewski, Micha{\l}},
+  title = {American Fuzzy Lop ({AFL})},
+  year = {2014},
+  howpublished = {\url{https://lcamtuf.coredump.cx/afl/}}
+}
+
+@misc{libfuzzer,
+  author = {{LLVM Project}},
+  title = {{LibFuzzer} -- a library for coverage-guided fuzz testing},
+  year = {2015},
+  howpublished = {\url{https://llvm.org/docs/LibFuzzer.html}}
+}
+
+@misc{honggfuzz,
+  author = {Swiecki, Robert},
+  title = {honggfuzz},
+  year = {2016},
+  howpublished = {\url{https://honggfuzz.dev/}}
+}
+
+@inproceedings{nautilus,
+  title = {{NAUTILUS}: Fishing for Deep Bugs with Grammars},
+  author = {Aschermann, Cornelius and Frassetto, Tommaso and Holz, Thorsten and Jauernig, Patrick and Sadeghi, Ahmad-Reza and Teber, Daniel},
+  booktitle = {Proceedings of the Network and Distributed System Security Symposium (NDSS)},
+  year = {2019}
+}
+
+@inproceedings{gramatron,
+  title = {{Gramatron}: Effective Grammar-Aware Fuzzing},
+  author = {Srivastava, Prashast and Payer, Mathias},
+  booktitle = {Proceedings of the ACM SIGSOFT International Symposium on Software Testing and Analysis (ISSTA)},
+  year = {2021}
+}
+
+@inproceedings{mopt,
+  title = {{MOpt}: Optimized Mutation Scheduling for Fuzzers},
+  author = {Lyu, Chenyang and Ji, Shouling and Zhang, Chao and Li, Yuwei and Lee, Wei-Han and Song, Yu and Beyah, Raheem},
+  booktitle = {Proceedings of the USENIX Security Symposium},
+  year = {2019}
+}
+
+@inproceedings{ecofuzz,
+  title = {{EcoFuzz}: Adaptive Energy-Saving Greybox Fuzzing as a Variant of the Adversarial Multi-Armed Bandit},
+  author = {Yue, Tai and Wang, Pengfei and Tang, Yong and Wang, Enze and Yu, Bo and Lu, Kai and Zhou, Xu},
+  booktitle = {Proceedings of the USENIX Security Symposium},
+  year = {2020}
+}
+
+@inproceedings{nezha,
+  title = {{NEZHA}: Efficient Domain-Independent Differential Testing},
+  author = {Petsios, Theofilos and Tang, Adrian and Stolfo, Salvatore and Keromytis, Angelos D. and Jana, Suman},
+  booktitle = {Proceedings of the IEEE Symposium on Security and Privacy (S\&P)},
+  year = {2017}
+}
+
+@inproceedings{semfuzz,
+  title = {{SemFuzz}: Semantics-based Automatic Generation of Proof-of-Concept Exploits},
+  author = {You, Wei and Zong, Peiyuan and Chen, Kai and Wang, XiaoFeng and Liao, Xiaojing and Bian, Pan and Liang, Bin},
+  booktitle = {Proceedings of the ACM SIGSAC Conference on Computer and Communications Security (CCS)},
+  year = {2017}
+}
+
+@inproceedings{klees2018evaluating,
+  title = {Evaluating Fuzz Testing},
+  author = {Klees, George and Ruef, Andrew and Cooper, Benji and Wei, Shiyi and Hicks, Michael},
+  booktitle = {Proceedings of the ACM SIGSAC Conference on Computer and Communications Security (CCS)},
+  pages = {2123--2138},
+  year = {2018},
+  doi = {10.1145/3243734.3243804}
+}

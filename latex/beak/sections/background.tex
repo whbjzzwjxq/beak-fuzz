@@ -1,0 +1,32 @@
+\section{Background}\label{sec:background}
+
+\subsection{Zero-Knowledge Virtual Machines}\label{sec:bg-zkvm}
+
+A zero-knowledge virtual machine (zkVM) enables a \emph{prover} to execute a program and produce a succinct cryptographic proof of correct execution, which a \emph{verifier} checks without re-executing. RISC-V is the dominant zkVM ISA; production systems include OpenVM~\cite{openvm}, SP1~\cite{sp1}, RISC Zero~\cite{risc0}, Jolt~\cite{jolt}, Nexus~\cite{nexus}, and Pico~\cite{pico}.
+
+\paragraph{Execution pipeline}
+A RISC-V zkVM processes a program through four stages: (1)~\emph{execution} produces a trace recording registers, memory, and internal signals at each step; (2)~\emph{trace generation} organizes rows as an Algebraic Intermediate Representation (AIR) or Randomized AIR with Preprocessing (RAP); (3)~\emph{arithmetization} encodes the trace as polynomial constraints over a finite field---e.g., an \icode{add} instruction requires the destination column to equal the sum of source columns modulo the field prime; and (4)~\emph{proof generation} via a polynomial commitment scheme (FRI or KZG) produces a proof the verifier checks in polylogarithmic time.
+
+\paragraph{Key components}
+A typical trace comprises an \emph{instruction decoder} (correct field extraction from 32-bit words), an \emph{ALU} (arithmetic/logic with limb decomposition), a \emph{memory subsystem} (load/store consistency), \emph{lookup tables} (range checks, XOR), and \emph{cross-component interactions} (e.g., ALU output matches register write-back).
+
+\subsection{Challenges in zkVM Vulnerability Detection}\label{sec:bg-challenges}
+
+\paragraph{Semantic heterogeneity}
+Each zkVM encodes RISC-V semantics differently: OpenVM uses modular chips with bus arguments, SP1 uses a monolithic STARK machine, and Jolt replaces arithmetization with lookup-based verification. A detection approach for one backend does not transfer.
+
+\paragraph{Boundary conditions}
+Constraint bugs cluster at \emph{semantic boundary conditions}---limb-crossing immediates, address-space boundaries, division by zero, signed overflow---that are rare in typical executions and hard to reach by random testing.
+
+\paragraph{Oracle gap}
+A zkVM's output cannot serve as ground truth (a soundness bug means incorrect executions verify), so an external reference executor must establish correct RISC-V semantics.
+
+\subsection{Threat Model}\label{sec:bg-threat}
+
+We adopt a \emph{malicious prover} model: the prover knows the zkVM source, witness generation, and constraint system, and aims to produce a proof accepted by an honest verifier for an execution trace deviating from correct RISC-V semantics.
+
+\paragraph{Soundness}
+Let $O$ denote a reference RISC-V oracle and $B$ a zkVM backend with arithmetization $A$ over $\mathbb{F}_p$. Backend $B$ is \emph{sound} if, for all efficient provers and inputs $x$, any accepted proof encodes a valid execution of $x$ under $O$. A \emph{soundness bug} is an input $x$ with a witness $w$ such that $A(w)$ accepts but $w$ encodes a register state $r \neq O(x)$. Our definition targets \emph{knowledge soundness}: Type~II bugs (\autoref{sec:formal-properties}) mean the constraint system is too permissive, not that the IOP or PCS is broken. \tool targets bugs in the arithmetization $A$, not the proof backend; the six backends use three distinct proof systems (FRI-based STARKs, Plonky3-based STARKs, Lasso-based lookups), but constraint-level bugs are independent of the proof backend.
+
+\paragraph{ISA scope}
+\tool models RV32IM as specified in the RISC-V ISA manual~\cite{riscvspec}. Misaligned accesses trap; division follows the spec exactly (division by zero yields $-1$/dividend; signed overflow $-2^{31} \div -1$ yields $-2^{31}$/$0$). These corner cases are where several benchmark bugs manifest (\autoref{sec:eval-rq1}). We target soundness vulnerabilities---missing constraints, incorrect constraints, and cross-component inconsistencies---not completeness bugs or performance issues.

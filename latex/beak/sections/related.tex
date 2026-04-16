@@ -1,0 +1,31 @@
+\section{Related Work}\label{sec:related}
+
+\paragraph{Zero-knowledge proof security}
+\zkap~\cite{zkap} applies static analysis (circuit dependence graphs) to Circom circuits; Picus~\cite{picus} verifies Circom witness uniqueness. Both target the Circom ecosystem, not RISC-V zkVMs. FORAY~\cite{foray} synthesizes DeFi attacks at the application level. Tabby~\cite{tabby} optimizes circuit \emph{efficiency} via program synthesis, complementary to \tool's focus on \emph{correctness}.
+
+\arguzz~\cite{arguzz} is the closest work: it applies metamorphic testing with fault injection to zkVMs. However, \arguzz lacks a semantic model of constraint-level boundary conditions and operates exclusively in a differential-testing paradigm (analogous to Phase~1). Our two-phase characterization (\autoref{sec:formal-properties}) shows this is inherently limited to Type~I bugs. On our benchmark, \arguzz detects 11/44 bugs (25\%) while \tool detects 36/44 (81.8\%), a strict superset; 23 of the 25 additional bugs are Type~II, confirming that witness injection---not just better mutation---drives the improvement. \autoref{tbl:approach-comparison} summarizes key differences.
+
+\begin{table}[t]
+\caption{Comparison of zkVM vulnerability detection approaches.}
+\label{tbl:approach-comparison}
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+\textbf{Dimension} & \textbf{\zkap} & \textbf{\arguzz} & \textbf{\tool} \\
+\midrule
+Approach & Static & Dynamic & Dynamic \\
+Target & Circom & zkVM & zkVM \\
+Feedback & None & Metamorphic & Signature novelty \\
+ISA-aware & No & No & Yes \\
+Witness inject & No & No & Yes \\
+Cross-backend & No & Partial & 6 backends \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Differential testing and fuzzing}
+Differential testing~\cite{mckeeman1998differential} (Csmith~\cite{csmith} for compilers) compares outputs of multiple implementations; \tool adapts this to zkVMs with signature-novelty feedback instead of random generation. Coverage-guided fuzzers (AFL~\cite{afl}, LibFuzzer~\cite{libfuzzer}, honggfuzz~\cite{honggfuzz}) use edge coverage, which is inadequate for zkVMs where interesting behaviors are at the constraint level. Grammar-aware fuzzers (Nautilus~\cite{nautilus}, Gramatron~\cite{gramatron}) ensure structural validity; \tool's ISA-aware mutations additionally incorporate semantic boundary awareness.
+
+\paragraph{Adaptive mutation scheduling}
+MOpt~\cite{mopt} and EcoFuzz~\cite{ecofuzz} apply optimization-based scheduling to mutation operators and seeds. \tool's UCB1 bandit schedules \emph{mutation strategies} with rewards from semantic category feedback---a tighter coupling between domain-specific feedback and mutation selection. NEZHA~\cite{nezha} uses $\delta$-diversity guidance; SemFuzz~\cite{semfuzz} extracts semantic information from CVE descriptions. \tool's semantic awareness is rooted in a formal domain-specific model rather than natural-language descriptions, and uniquely provides a formal characterization of the bug space (Type~I/II) with complementary coverage guarantees.

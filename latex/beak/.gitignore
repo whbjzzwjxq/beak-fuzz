@@ -1,0 +1,48 @@
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.idx
+*.ilg
+*.ind
+*.lof
+*.log
+*.lot
+*.out
+main.pdf
+*.run.xml
+*.synctex.gz
+*.toc
+*.xdv
+
+# latexmk / engine outputs
+*.dvi
+*.ps
+
+# minted / pygments cache
+_minted-*/
+*.mintedcmd
+*.mintedmd5
+*.pyg
+*.listing
+*.nav
+*.snm
+*.vrb
+
+# TeX auxiliary caches
+*.acn
+*.acr
+*.alg
+*.glg
+*.glo
+*.gls
+*.ist
+
+# Editor / macOS noise
+.DS_Store
+*.swp
+*.swo
+*~

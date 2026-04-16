@@ -1,0 +1,159 @@
+\section{Cross-zkVM Trace Semantics}\label{sec:trace-ir}
+
+Although each zkVM encodes its execution trace in a radically different format (chip-level AIR rows in OpenVM, STARK columns in SP1, circuit tables in RISC Zero, lookup sequences in Jolt), all these systems must enforce the \emph{same} RISC-V semantic invariants. Register x0 must remain zero. Immediate values must decompose into correctly range-checked limbs. Memory timestamps must increase monotonically. When a backend's constraint system fails to enforce one of these invariants, a soundness bug exists.
+
+This observation is the foundation of \tool's semantic model. Rather than analyzing each backend's constraint system directly---which would require six separate analyses---we define a common vocabulary of \emph{constraint-correctness concerns}: the semantic invariants all backends must enforce. The model operates at two granularities: \emph{observations} extract structured facts from individual trace steps, and \emph{semantic categories} classify these facts into named classes of constraint behavior where bugs cluster.
+
+\subsection{Observations and Semantic Categories}\label{sec:semantic-model}
+
+\paragraph{Observations}
+An observation is a structured fact that \tool extracts from a backend's execution trace at a specific step. Each observation records the step index, the backend component that produced it, and type-specific fields (e.g., register indices, immediate values, memory addresses). Critically, observations are \emph{backend-agnostic}: the same observation type captures the same semantic fact regardless of whether it was extracted from OpenVM's chip rows or SP1's STARK columns.
+
+\paragraph{Running example}
+Consider \icode{addi x1, x0, -1} executed on OpenVM. The ALU chip decomposes the 12-bit immediate ($-1$, encoded as \icode{0xFFF}) into byte-sized limbs for constraint evaluation over a finite field. \tool extracts an \icode{ImmediateLimb} observation recording the chip name, step index, and immediate value. The same observation type applies when SP1 or any other backend processes the same instruction; the observation abstracts away how each backend internally represents the decomposition.
+
+More formally, an observation is a triple $o = (\tau, s, \phi)$ where $\tau \in \mathcal{T}$ is one of 17 observation types (e.g., \icode{ImmediateLimb}, \icode{ZeroRegisterWrite}), $s \in \mathbb{N}$ is the trace step index, and $\phi$ is a type-specific payload (register index, immediate value, memory address, etc.). For instance, the running example produces $o = (\texttt{ImmediateLimb},\; 42,\; \{{\tt chip}{=}\texttt{BaseAluChip},\; {\tt imm}{=}\texttt{0xFFF}\})$.
+
+\paragraph{Semantic categories}
+Observations alone do not indicate \emph{where} bugs are likely to manifest. To provide this structure, \tool classifies observations into \emph{semantic categories}, each naming a specific constraint-correctness concern. A category $c \in \mathcal{C}$ is associated with a predicate $\kappa_c : \mathcal{O} \to \{0, 1\}$ that determines whether an observation activates it. For example, the \icode{alu.imm\_limb} category activates whenever $\tau = \texttt{ImmediateLimb}$ and the immediate value crosses a limb boundary. The \emph{category signature} for input $x$ is then the set of all activated categories:
+\begin{equation}\label{eq:signature}
+\sigma(x) = \bigl\{c \in \mathcal{C} \;\big|\; \exists\, o \in \mathit{Obs}(x) : \kappa_c(o) = 1\bigr\}
+\end{equation}
+where $\mathit{Obs}(x)$ denotes the set of observations emitted by the backend during execution of input $x$ (not to be confused with the reference oracle $O$). As we describe in \autoref{sec:fuzzing-framework}, signature novelty ($\sigma(x) \notin \mathit{Seen}$) serves as the feedback signal for the fuzzing loop.
+
+We derive our categories from a systematic analysis of three sources: (1) 25 professional security audit findings across 6 production zkVMs, (2) 11 known bugs from prior dynamic testing~\cite{arguzz}, and (3) the RISC-V RV32IM specification's boundary cases. We mapped each known bug to the constraint component it violates and abstracted recurring patterns into named categories. \autoref{tbl:categories} summarizes the result: 10 category groups spanning the major functional components of a RISC-V zkVM. As validation, all 6 zero-day vulnerabilities \tool discovered map to existing categories; no new categories were needed (\autoref{sec:eval-rq3}).
+
+\paragraph{Category completeness and extensibility}
+The 32 categories are empirically derived, not formally complete. Empirical sufficiency is validated by 97\% category activation on known bugs (\autoref{sec:eval-rq3}) and all 6 zero-days mapping to existing categories. The set is incrementally extensible: adding a category requires only a new predicate $\kappa_c$ on existing observation types---no changes to the fuzzing loop, bandit, or witness injection. The 8 missed bugs (\autoref{sec:eval-threats}) point to cross-component algebraic interactions as the primary gap.
+
+\paragraph{Category predicate specification}
+Each predicate $\kappa_c$ is a pattern-matching rule on the observation type $\tau$ and the payload $\phi$. \autoref{tbl:category-predicates} gives representative predicates for each category group. In general, predicates combine a type filter ($\tau = \ldots$) with a boundary condition on the payload (e.g., a value crossing a power-of-two boundary, a register index at a special position, or a field near the modulus). The full predicate set contains 32 rules; the table shows one representative per group to illustrate the predicate structure.
+
+\begin{table}[t]
+\caption{Representative category predicates $\kappa_c$. Each predicate matches on observation type $\tau$ and tests a boundary condition on the payload $\phi$. The full set of 32 predicates follows this pattern.}
+\label{tbl:category-predicates}
+\centering
+\footnotesize
+\begin{tabular}{lp{5.3cm}}
+\toprule
+\textbf{Category} & \textbf{Predicate $\kappa_c(o)$} \\
+\midrule
+\icode{decode.zero\_reg} & $\tau = \texttt{ZeroRegisterWrite}$ \\
+\icode{alu.imm\_limb} & $\tau = \texttt{ImmediateLimb} \;\land\; \phi.\mathit{imm} \bmod 256 \in \{0, 255\}$ \\
+\icode{arith.div\_rem} & $\tau = \texttt{DivRemResult} \;\land\; (\phi.\mathit{divisor} = 0 \;\lor\; \phi.\mathit{dividend} = -2^{31})$ \\
+\icode{control.ecall\_arg} & $\tau = \texttt{EcallArgument} \;\land\; \phi.\mathit{arg\_idx} \leq 1$ \\
+\icode{exec.operand\_bind} & $\tau = \texttt{OperandBinding} \;\land\; \phi.\mathit{rs1} = \phi.\mathit{rs2}$ \\
+\icode{mem.addr\_align} & $\tau = \texttt{MemoryAccess} \;\land\; \phi.\mathit{addr} \bmod 4 \neq 0$ \\
+\icode{lookup.boolean\_mult} & $\tau = \texttt{LookupMultiplicity} \;\land\; \phi.\mathit{mult} \notin \{0, 1\}$ \\
+\icode{interaction.digest} & $\tau = \texttt{InteractionDigest} \;\land\; \phi.\mathit{kind}_1 \neq \phi.\mathit{kind}_2$ \\
+\icode{row.padding\_leak} & $\tau = \texttt{PaddingRow} \;\land\; \phi.\mathit{interaction\_count} > 0$ \\
+\icode{time.boundary\_origin} & $\tau = \texttt{TimestampInit} \;\land\; \phi.\mathit{ts} > p/2$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\caption{Semantic categories for constraint-correctness monitoring. Each category names a class of constraint behavior where bugs are known to cluster. Representative observations show what \tool extracts; example bugs show what each category catches.}
+\label{tbl:categories}
+\centering
+\small
+\begin{tabular}{lp{2.9cm}p{2.9cm}}
+\toprule
+\textbf{Category} & \textbf{What It Monitors} & \textbf{Example Bug Caught} \\
+\midrule
+Decode (4) & Instruction encoding invariants: x0 immutability, rd bit decomposition, upper-immediate materialization & x0 register overwrite (ZD-01/02/03) \\
+\midrule
+ALU (1) & Immediate limb decomposition correctness & Missing range check on limbs (motivating example) \\
+\midrule
+Arithmetic (2) & Division remainder bounds, signed overflow edge cases & Jolt MULHSU wrong correction term \\
+\midrule
+Control (4) & PC limb consistency, ecall argument encoding, entrypoint binding & SP1 ECALL next\_pc unconstrained \\
+\midrule
+Execution (6) & Source/dest operand binding, opcode selector, control flow, memory effects, sub-word writes & Jolt LUI immediate not bound to bytecode \\
+\midrule
+Memory (10) & Address alignment, timestamp ordering, address-space routing, sign extension, store-load flow & Pico address aliasing (ZD-05) \\
+\midrule
+Lookup (2) & Boolean and XOR multiplicity constraints & Pico \icode{is\_real} non-boolean (ZD-04) \\
+\midrule
+Interaction (1) & Cross-component digest routing & SP1 digest kind collision \\
+\midrule
+Row (1) & Padding row interaction leakage & SP1 padding row fake writes \\
+\midrule
+Time (1) & Timestamp boundary consistency & Pico timestamp field wrap (ZD-06) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{How the Model Catches Bugs}\label{sec:category-examples}
+
+\autoref{tbl:categories} and \autoref{tbl:category-predicates} illustrate the model's operation across three representative concern types. The \icode{decode.zero\_reg} category fires on any write to x0, catching three independent zero-days across RISC Zero, OpenVM, and Pico (ZD-01/02/03; \autoref{sec:eval-rq4}). The \icode{alu.imm\_limb} category targets boundary immediates ($-1$, $127$, $-128$) that stress limb decomposition, catching the motivating example (\autoref{sec:motivating-example}). The \icode{time.boundary\_origin} category probes timestamp initialization near the field modulus, catching Pico's timestamp wraparound (ZD-06). In each case, the category names the specific boundary condition, Phase~1 discovers inputs activating it, and Phase~2 validates constraint soundness via witness injection.
+
+% PLACEHOLDER-FIGURE: Horizontal pipeline diagram showing the trace semantics
+% data flow in three stages: (1) Backend trace row (labeled with example fields:
+% chip=BaseAluChip, step=42, limb0=0xFF, limb1=0x0F) -> (2) Observation
+% o=(tau, s, phi) showing the structured triple with ImmediateLimb type ->
+% (3) Category match kappa_c(o) producing alu.imm_limb activation ->
+% Signature sigma(x) update into the seen set.
+% Use arrows between stages. Color-code each stage differently.
+% Intended message: heterogeneous backend traces are lifted through a uniform
+% observation layer into a semantic category space that drives fuzzing feedback.
+% PLACEHOLDER-FIGURE: trace-ir-layers (trace semantics data flow diagram) — removed to save space
+
+\subsection{Formal Properties of the Semantic Model}\label{sec:formal-properties}
+
+We now formalize the key properties that underpin the semantic model's bug-detection guarantees. These properties clarify the scope of the approach and the complementary roles of Phases~1 and~2.
+
+\begin{definition}[Semantic Gap]\label{def:semantic-gap}
+Let $B$ be a zkVM backend with executor $E_B$ and constraint system $\mathcal{C}_B$ over field $\mathbb{F}_p$, let $O$ be the reference RISC-V oracle, and let $x$ be an input program. Write $r_t \in \mathbb{Z}_{2^{32}}^{32}$ for the register state after step $t$ and $w_t \in \mathbb{F}_p^m$ for the witness row at step $t$ (where $m$ is the trace width). A \emph{semantic gap} exists at instruction step $t$ of $x$ in $B$ if at least one of the following holds:
+\begin{itemize}
+    \item \textbf{Type~I (Divergence):} The executor computes a register state that differs from the oracle: $E_B(x, t) \neq O(x, t)$, i.e., $\exists\, j \in [32] : r^B_{t,j} \neq r^O_{t,j}$.
+    \item \textbf{Type~II (Underconstraint):} The executor computes the correct state ($E_B(x, t) = O(x, t)$), but the constraint system admits an alternative witness $w' \neq w_t$ at step $t$ such that $\mathcal{C}_B(w') = \mathsf{accept}$ and $\mathit{decode}(w') \neq \mathit{decode}(w_t)$, where $\mathit{decode}: \mathbb{F}_p^m \to \mathbb{Z}_{2^{32}}^{32}$ extracts the register state encoded by a witness row.
+\end{itemize}
+\end{definition}
+
+\noindent Type~I gaps arise from prover-side errors (the executor computes incorrectly); Type~II gaps arise from verifier-side errors (the executor is correct but the constraint system is too permissive). The $\mathit{decode}$ function is backend-specific---e.g., OpenVM extracts 32~field elements and reduces modulo $2^{32}$; Jolt reconstructs from lookup table indices---but the definition is parametric in this mapping. The two types require different detection mechanisms: Type~I via output comparison, Type~II via alternative-witness construction.
+
+\paragraph{Two-phase coverage characterization}
+The two-phase architecture provides the following coverage properties with respect to Definition~\ref{def:semantic-gap}. These are design invariants of the architecture, not deep theorems; we state them precisely to clarify the scope and limitations of each phase.
+
+\begin{enumerate}
+    \item \textbf{Phase~1 covers Type~I gaps.} Differential comparison detects all Type~I gaps whose divergence propagates to the final register state, by construction (register comparison is exact). Type~I gaps that crash the executor are handled via assertion-bypass instrumentation (\autoref{sec:instrumentation}), which converts fatal assertions to logged warnings and allows execution to continue to a (corrupted) final state. On the benchmark, all 8 crash-inducing bugs are detected through this mechanism.
+
+    \item \textbf{Phase~2 covers Type~II gaps within instrumentation reach.} Witness injection can detect Type~II gaps at any step $t$ for which an observation $o \in \mathit{Obs}(x)$ exists with step index $s$ such that $|s - t| \leq \delta$ (the injection search window, default $\delta = 64$). The coverage boundary is twofold: the search window $\delta$ limits spatial reach, and the observation model limits semantic reach---gaps at uninstrumented constraint components are invisible to Phase~2.
+
+    \item \textbf{Neither phase subsumes the other.} Type~I gaps (executor divergences) produce no alternative witness and thus cannot be detected by injection. Type~II gaps (correct executor, permissive constraints) produce no register mismatch and thus cannot be detected by differential comparison. This separation is structural: on the benchmark, of the 36 detected bugs, 5 are Type-I-only and 31 are Type-II-only (the 8 undetected bugs are classified in \autoref{sec:eval-threats}), confirming that divergence detection and underconstraint detection are orthogonal capabilities.\label{item:separation}
+\end{enumerate}
+
+\paragraph{Phase complementarity bound}\label{cor:complementarity}
+On the benchmark of 44~known bugs, removing Phase~2 reduces \tool's recall from 81.8\% (36/44) to at most 11.4\% (5/44). This bound is structural---it holds regardless of time budget, seed corpus, or mutation strategy---because Type~II gaps produce no observable signal in Phase~1. This observation quantifies the precise contribution of witness injection and explains the performance gap between \tool and prior differential-testing approaches such as \arguzz (which operates exclusively in a Phase-1-style paradigm).
+
+\begin{proposition}[Category Separation]\label{prop:category-separation}
+The 10 category groups partition the observation space such that any single-instruction execution activates at most one category per group. This holds by construction: predicates within a group share a common observation-type filter (e.g., all Decode predicates require $\tau = \texttt{ZeroRegisterWrite}$ or one of its variants), and each instruction produces at most one observation of each type per step. Consequently, a single-instruction execution produces at most 10 category activations, and the reachable signature space for $n$-instruction inputs is bounded by $\prod_{g \in G} (|g| + 1)^n$, which is exponentially smaller than $2^{32n}$ for short programs.
+\end{proposition}
+
+\noindent This design invariant ensures that signatures are \emph{informative} (distinct signatures reflect genuinely different constraint behaviors) and that the reachable space is bounded: the benchmark produces fewer than 200 distinct signatures despite $2^{32} \approx 4 \times 10^9$ theoretical possibilities, so the novelty signal is well-founded.
+
+\subsection{Backend Instrumentation}\label{sec:instrumentation}
+
+\tool instruments each backend's trace-generation path via automated source patching in three passes: (1)~\textbf{infrastructure injection} adds a uniform observation-emission API; (2)~\textbf{assertion bypass} replaces Rust \icode{panic!}/\icode{assert!} macros (identified by textual pattern matching on source code) with logged warnings, enabling observation of crash-inducing inputs---sandboxed execution with a watchdog mitigates the UB risk from bypassed assertions (rare: 3/44 benchmark inputs); (3)~\textbf{observation hooks} are inserted at each backend's constraint-component sites (ALU chips emit \icode{ImmediateLimb} at limb-decomposition sites, memory chips emit \icode{MemoryAccess} at address sites, etc.).
+
+The instrumentation is \emph{sound} (observations faithfully reflect computed trace facts) but not \emph{complete} (new constraint components require new hooks). We instrument at the backend's public constraint API level (chip traits, STARK machine interface, circuit tables), covering all registered components. Effort ranges from ${\sim}200$ lines of Rust (Nexus) to ${\sim}600$ (OpenVM). Each backend exposes a uniform interface returning 32 architectural registers and observations. Critically, \tool skips proof generation, reducing per-input evaluation from minutes to milliseconds. \autoref{tbl:backends} lists the six supported backends.
+
+\begin{table}[t]
+\caption{Supported zkVM backends.}
+\label{tbl:backends}
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{zkVM} & \textbf{Proving System} & \textbf{Architecture} \\
+\midrule
+OpenVM & STARK (Plonky3) & Modular chip AIR \\
+SP1 & STARK (Plonky3) & Monolithic STARK machine \\
+RISC Zero & STARK (FRI) & Circuit-rv32im \\
+Jolt & Lookup (Lasso) & Lookup-based verification \\
+Nexus & Nova (IVC) & Incremental verification \\
+Pico & STARK (Plonky3) & Modular chip AIR \\
+\bottomrule
+\end{tabular}
+\end{table}
