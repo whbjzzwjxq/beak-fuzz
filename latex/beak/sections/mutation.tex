@@ -1,6 +1,6 @@
-\section{Boundary-Driven Semantic Fuzzing}\label{sec:fuzzing-framework}
+\section{Invariant-Targeted Semantic Fuzzing}\label{sec:fuzzing-framework}
 
-Building on the semantic model of \autoref{sec:trace-ir}, this section presents \tool's fuzzing framework. The framework operates as a \emph{single unified loop}: each iteration mutates an input, executes it, projects the backend trace through the semantic model, and then runs two detectors---differential register comparison (Type~I) and targeted witness injection (Type~II)---on the same category activations. Categories thus serve a dual role: their novelty steers mutation toward underexplored boundary conditions, and their location anchors witness injection at the constraint steps where underconstraints are most likely. This dual use is the central mechanism of the framework.
+Building on the semantic model of \autoref{sec:trace-ir}, this section presents \tool's fuzzing framework. The framework operates as a \emph{single unified loop}: each iteration mutates an input, executes it, projects the backend trace through the semantic model, and then runs two detectors---differential register comparison (Type~I) and targeted witness injection (Type~II)---on the same category activations. Categories thus serve a dual role: their novelty steers mutation toward underexplored invariant-critical conditions, and their location anchors witness injection at the constraint steps where underconstraints are most likely. This dual use is the central mechanism of the framework.
 
 \subsection{Framework Architecture}\label{sec:framework-arch}
 
@@ -8,7 +8,7 @@ The main loop (\autoref{alg:fuzzing}) repeats five steps per iteration: (1)~sele
 
 \subsection{Signature Novelty Feedback}\label{sec:signature-feedback}
 
-Traditional coverage-guided fuzzers (e.g., AFL~\cite{afl}) use edge coverage in the compiled binary as feedback. For zkVM testing, this is inadequate: the interesting behaviors lie not in the Rust source code implementing the zkVM, but in the \emph{constraint-level semantics} of the execution trace. A fuzzer may achieve high edge coverage without ever exercising the trace-level boundary conditions (e.g., an immediate crossing a limb boundary, or a memory access at an address-space boundary) where constraint bugs manifest.
+Traditional coverage-guided fuzzers (e.g., AFL~\cite{afl}) use edge coverage in the compiled binary as feedback. For zkVM testing, this is inadequate: the interesting behaviors lie not in the Rust source code implementing the zkVM, but in the \emph{constraint-level semantics} of the execution trace. A fuzzer may achieve high edge coverage without ever exercising the trace-level invariant-critical conditions (e.g., an immediate crossing a limb threshold, or a memory access at an address-space limit) where constraint bugs manifest.
 
 \tool replaces edge coverage with \emph{signature novelty}: an input is considered interesting if and only if it produces a category signature not previously observed. Formally, let $\mathit{Seen}$ denote the set of signatures observed so far; an input $x$ with signature $\sigma(x)$ is added to the corpus whenever $\sigma(x) \notin \mathit{Seen}$.
 
@@ -46,7 +46,7 @@ where $\sigma(x)$ is the category signature of input $x$ (\autoref{eq:signature}
 }
 \end{table}
 
-The ISA-aware encoder/decoder is validated against the official \icode{riscv-tests} suite (all RV32IM encodings round-trip correctly), ensuring mutations produce only valid instruction words. Key design choices: Arm~2 (constant mutation) targets arithmetic boundary values ($0, \pm 1, 127, -128$) and $2^n$ boundary values ($2^k, 2^k{-}1$ for $k \in \{8, 12, 16, 24, 31\}$) that stress both limb decomposition and resource-boundary transitions; Arm~3 (insert instruction) biases toward memory operations when address-producing registers exist, driving memory footprint toward $2^n$ thresholds; Arm~7 (mnemonic replace) tests opcode-selector constraints by substituting same-format instructions.
+The ISA-aware encoder/decoder is validated against the official \icode{riscv-tests} suite (all RV32IM encodings round-trip correctly), ensuring mutations produce only valid instruction words. Key design choices: Arm~2 (constant mutation) targets arithmetic boundary values ($0, \pm 1, 127, -128$) and $2^n$ boundary values ($2^k, 2^k{-}1$ for $k \in \{8, 12, 16, 24, 31\}$) that stress both limb decomposition and resource-threshold transitions; Arm~3 (insert instruction) biases toward memory operations when address-producing registers exist, driving memory footprint toward $2^n$ thresholds; Arm~7 (mnemonic replace) tests opcode-selector constraints by substituting same-format instructions.
 
 \paragraph{UCB1 bandit}
 To adaptively allocate mutation effort across the \tbd{8} arms, \tool uses a UCB1 multi-armed bandit~\cite{ucb1}. At each iteration, the bandit selects the arm with the highest upper confidence bound:

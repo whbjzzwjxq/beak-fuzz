@@ -2,7 +2,7 @@
 
 Although each zkVM encodes its execution trace in a radically different format (chip-level AIR rows in OpenVM, STARK columns in SP1, circuit tables in RISC Zero, lookup sequences in Jolt), all these systems must enforce the \emph{same} RISC-V semantic invariants. Register x0 must remain zero. Immediate values must decompose into correctly range-checked limbs. Memory timestamps must increase monotonically. When a backend's constraint system fails to enforce one of these invariants, a soundness bug exists.
 
-This insight is the foundation of \tool's semantic model. Rather than analyzing each backend's constraint system directly---which would require six separate analyses---we define a common vocabulary of \emph{semantic categories}: named classes of constraint-correctness concerns where bugs cluster. Each category is a predicate on trace steps that identifies when a specific boundary condition is exercised.
+This insight is the foundation of \tool's semantic model. Rather than analyzing each backend's constraint system directly---which would require six separate analyses---we define a common vocabulary of \emph{semantic categories}: named classes of constraint-correctness concerns where bugs cluster. Each category is a predicate on trace steps that identifies when a specific invariant-critical condition is exercised.
 
 \subsection{Semantic Categories}\label{sec:semantic-model}
 
@@ -20,9 +20,9 @@ As we describe in \autoref{sec:fuzzing-framework}, signature novelty serves as t
 We derive the \tbd{39} categories from two complementary sources:
 
 \begin{itemize}
-    \item \textbf{Constraint categories (\tbd{32}).} Empirically derived from (1)~\tbd{25} professional security audit findings across 6 production zkVMs, (2)~\tbd{11} known bugs from prior dynamic testing~\cite{arguzz}, and (3)~the RISC-V RV32IM specification's boundary cases. We mapped each known bug to the constraint component it violates and abstracted recurring patterns into named categories. This yields \tbd{10} category groups spanning the major functional components of a RISC-V zkVM (\autoref{tbl:categories}).
+    \item \textbf{Constraint categories (\tbd{32}).} Empirically derived from (1)~\tbd{25} professional security audit findings across 6 production zkVMs, (2)~\tbd{11} known bugs from prior dynamic testing~\cite{arguzz}, and (3)~the RISC-V RV32IM specification's edge cases. We mapped each known bug to the constraint component it violates and abstracted recurring patterns into named categories. This yields \tbd{10} category groups spanning the major functional components of a RISC-V zkVM (\autoref{tbl:categories}).
 
-    \item \textbf{Resource categories (\tbd{7}).} Structurally derived from the $2^n$-sized data structures mandated by STARK arithmetization. Every STARK-based zkVM pads its execution trace to the next power of two; similarly, segment tables, RAM/ROM regions, lookup accumulators, commitment vectors, and range-check tables are all $2^n$-sized due to the FFT/NTT evaluation domain requirement. This creates \emph{structural boundary conditions} at each $2^n$ transition---crossing a power-of-two boundary forces a backend to reallocate, resize, or restructure its arithmetic tables, stressing constraint logic that handles these transitions. Unlike the constraint categories (which are empirical), the \tbd{7} resource categories are an exhaustive enumeration of these $2^n$-sized structures (\autoref{tbl:resource-categories}).
+    \item \textbf{Resource categories (\tbd{7}).} Structurally derived from the $2^n$-sized data structures mandated by STARK arithmetization. Every STARK-based zkVM pads its execution trace to the next power of two; similarly, segment tables, RAM/ROM regions, lookup accumulators, commitment vectors, and range-check tables are all $2^n$-sized due to the FFT/NTT evaluation domain requirement. This creates \emph{structural invariant-critical conditions} at each $2^n$ transition---crossing a power-of-two threshold forces a backend to reallocate, resize, or restructure its arithmetic tables, stressing constraint logic that handles these transitions. Unlike the constraint categories (which are empirical), the \tbd{7} resource categories are an exhaustive enumeration of these $2^n$-sized structures (\autoref{tbl:resource-categories}).
 \end{itemize}
 
 As validation, all \tbd{6} zero-day vulnerabilities \tool discovered map to existing categories; no new categories were needed (\autoref{sec:eval-rq3}).
@@ -31,10 +31,10 @@ As validation, all \tbd{6} zero-day vulnerabilities \tool discovered map to exis
 The \tbd{39} categories combine empirical saturation with structural completeness. Empirical sufficiency of the \tbd{32} constraint categories is validated by \tbd{97\%} category activation on known bugs (\autoref{sec:eval-rq3}) and all \tbd{6} zero-days mapping to existing categories. The \tbd{7} resource categories are structurally complete: they enumerate all $2^n$-sized objects in STARK-based backends (trace rows, segments, memory, bytecode, lookups, commitments, range tables). The set is incrementally extensible: adding a category requires only a new predicate $\kappa_c$ on trace steps---no changes to the fuzzing loop, bandit, or witness injection. The \tbd{10} missed bugs (\autoref{sec:eval-threats}) point to cross-component algebraic interactions as the primary gap.
 
 \paragraph{Category predicate specification}
-Each predicate $\kappa_c$ is a pattern-matching rule on the trace step's instruction class and computed values. \autoref{tbl:category-predicates} gives representative predicates for each category group. In general, predicates combine an instruction-class filter with a boundary condition on the step's computed values (e.g., a value crossing a power-of-two boundary, a register index at a special position, or a field near the modulus). The full predicate set contains \tbd{39} rules; the table shows one representative per group to illustrate the predicate structure.
+Each predicate $\kappa_c$ is a pattern-matching rule on the trace step's instruction class and computed values. \autoref{tbl:category-predicates} gives representative predicates for each category group. In general, predicates combine an instruction-class filter with an invariant-critical condition on the step's computed values (e.g., a value crossing a power-of-two threshold, a register index at a special position, or a field near the modulus). The full predicate set contains \tbd{39} rules; the table shows one representative per group to illustrate the predicate structure.
 
 \begin{table}[t]
-\caption{Representative category predicates $\kappa_c$. Each predicate matches on the trace step's instruction class and tests a boundary condition on computed values. The full set of \tbd{39} predicates follows this pattern.}
+\caption{Representative category predicates $\kappa_c$. Each predicate matches on the trace step's instruction class and tests an invariant-critical condition on computed values. The full set of \tbd{39} predicates follows this pattern.}
 \label{tbl:category-predicates}
 \centering
 \resizebox{\columnwidth}{!}{%
@@ -87,15 +87,15 @@ Interaction (\tbd{1}) & Cross-component digest routing & SP1 digest kind collisi
 \midrule
 Row (\tbd{1}) & Padding row interaction leakage & SP1 padding row fake writes \\
 \midrule
-Time (\tbd{1}) & Timestamp boundary consistency & Pico timestamp field wrap (ZD-06) \\
+Time (\tbd{1}) & Timestamp invariant consistency & Pico timestamp field wrap (ZD-06) \\
 \midrule
-Resource (\tbd{7}) & $2^n$ boundary conditions: trace utilization, segment boundary, memory footprint, bytecode span, lookup volume, commitment length, range-table utilization & Jolt RAM overflow, Nexus memory crash, Risc0 control-done cycle \\
+Resource (\tbd{7}) & $2^n$ threshold conditions: trace utilization, segment threshold, memory footprint, bytecode span, lookup volume, commitment length, range-table utilization & Jolt RAM overflow, Nexus memory crash, Risc0 control-done cycle \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{table}[t]
-\caption{Resource categories derived from STARK $2^n$ algebraic structure. Each category monitors a specific $2^n$-sized data structure whose boundary crossing stresses constraint reallocation logic. These boundaries are structural: all STARK-based backends pad to powers of two due to the FFT/NTT evaluation domain.}
+\caption{Resource categories derived from STARK $2^n$ algebraic structure. Each category monitors a specific $2^n$-sized data structure whose threshold crossing stresses constraint reallocation logic. These thresholds are structural: all STARK-based backends pad to powers of two due to the FFT/NTT evaluation domain.}
 \label{tbl:resource-categories}
 \centering
 \resizebox{\columnwidth}{!}{%
@@ -104,7 +104,7 @@ Resource (\tbd{7}) & $2^n$ boundary conditions: trace utilization, segment bound
 \toprule
 \textbf{Category} & \textbf{$2^n$ Structure Monitored} \\
 \midrule
-\icode{resource.trace\_util} & Execution-trace row count approaching $2^k$ boundary (trace padding threshold) \\
+\icode{resource.trace\_util} & Execution-trace row count approaching $2^k$ threshold (trace padding) \\
 \icode{resource.segment\_boundary} & Segment size crossing $2^k$ rows (segment table resize) \\
 \icode{resource.memory\_footprint} & Distinct memory addresses approaching $2^k$ (RAM/ROM table capacity) \\
 \icode{resource.bytecode\_span} & Bytecode instruction count approaching $2^k$ (program table size) \\
@@ -118,7 +118,7 @@ Resource (\tbd{7}) & $2^n$ boundary conditions: trace utilization, segment bound
 
 \subsection{How the Model Catches Bugs}\label{sec:category-examples}
 
-\autoref{tbl:categories} and \autoref{tbl:category-predicates} illustrate the model's operation. Beyond the motivating example (\autoref{sec:motivating-example}), the resource categories are particularly effective for Type~I bugs: \icode{resource.trace\_util} catches Jolt's RAM-size overflow at $2^k$ boundaries, and \icode{resource.memory\_footprint} catches Nexus's memory-size crash at a $2^k$ address threshold. In each case, the category names the boundary condition and the detector confirms the bug within the same loop iteration. Further zero-day case studies are in \autoref{sec:eval-rq4}.
+\autoref{tbl:categories} and \autoref{tbl:category-predicates} illustrate the model's operation. Beyond the motivating example (\autoref{sec:motivating-example}), the resource categories are particularly effective for Type~I bugs: \icode{resource.trace\_util} catches Jolt's RAM-size overflow at $2^k$ thresholds, and \icode{resource.memory\_footprint} catches Nexus's memory-size crash at a $2^k$ address threshold. In each case, the category names the invariant-critical condition and the detector confirms the bug within the same loop iteration. Further zero-day case studies are in \autoref{sec:eval-rq4}.
 
 \subsection{Formal Properties of the Semantic Model}\label{sec:formal-properties}
 

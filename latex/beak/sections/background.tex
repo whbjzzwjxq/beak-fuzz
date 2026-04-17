@@ -15,8 +15,8 @@ A typical trace comprises an \emph{instruction decoder} (correct field extractio
 \paragraph{Semantic heterogeneity}
 Each zkVM encodes RISC-V semantics differently: OpenVM uses modular chips with bus arguments, SP1 uses a monolithic STARK machine, and Jolt replaces arithmetization with lookup-based verification. A detection approach for one backend does not transfer.
 
-\paragraph{Boundary conditions}
-Constraint bugs cluster at \emph{semantic boundary conditions}---limb-crossing immediates, address-space boundaries, division by zero, signed overflow---that are rare in typical executions and hard to reach by random testing.
+\paragraph{Invariant-critical conditions}
+Constraint bugs cluster at \emph{invariant-critical conditions}---limb-crossing immediates, address-space limits, division by zero, signed overflow---that are rare in typical executions and hard to reach by random testing.
 
 \paragraph{Oracle gap}
 A zkVM's output cannot serve as ground truth (a soundness bug means incorrect executions verify), so an external reference executor must establish correct RISC-V semantics.

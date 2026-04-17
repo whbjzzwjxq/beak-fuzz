@@ -58,10 +58,10 @@ Pico & \tbd{6} & \tbd{4} & \tbd{66.7\%} & \tbd{TBD} & 1 & 16.7\% & \tbd{TBD} & \
 }
 \end{table}
 
-\tool detects \tbd{34} of \tbd{44} bugs (\tbd{77.3\%}), compared to \arguzz's \tbd{11}/44 (\tbd{25.0\%}) and the Random baseline's \tbd{TBD}/44 (\tbd{TBD}\%). On the four backends where \arguzz has full support (Jolt, Nexus, RISC~Zero, Pico), \tool achieves \tbd{$1.5\times$} higher recall (\tbd{17 vs.\ 11}); the remaining detections on OpenVM (\tbd{9}) and SP1 (\tbd{8}) reflect \tool's broader backend coverage. \tool's detections are a \emph{strict superset} of \arguzz's: we verified that all 11~bugs reported by \arguzz are independently detected by \tool, despite using a fundamentally different oracle (differential register comparison plus witness injection vs.\ metamorphic relations). The Random baseline's \tbd{TBD}\% recall confirms that semantic boundary conditions are effectively unreachable by unguided byte-level mutation.
+\tool detects \tbd{34} of \tbd{44} bugs (\tbd{77.3\%}), compared to \arguzz's \tbd{11}/44 (\tbd{25.0\%}) and the Random baseline's \tbd{TBD}/44 (\tbd{TBD}\%). On the four backends where \arguzz has full support (Jolt, Nexus, RISC~Zero, Pico), \tool achieves \tbd{$1.5\times$} higher recall (\tbd{17 vs.\ 11}); the remaining detections on OpenVM (\tbd{9}) and SP1 (\tbd{8}) reflect \tool's broader backend coverage. \tool's detections are a \emph{strict superset} of \arguzz's: we verified that all 11~bugs reported by \arguzz are independently detected by \tool, despite using a fundamentally different oracle (differential register comparison plus witness injection vs.\ metamorphic relations). The Random baseline's \tbd{TBD}\% recall confirms that invariant-critical conditions are effectively unreachable by unguided byte-level mutation.
 
 \paragraph{Per-backend analysis}
-Recall varies with constraint architecture: Jolt and Nexus achieve \tbd{100\%} (bugs in individual instruction semantics); OpenVM (\tbd{75.0\%}) and SP1 (\tbd{80.0\%}) mix localized errors with deeper cross-component issues; RISC Zero (\tbd{50.0\%}) and Pico (\tbd{66.7\%}) are limited by non-canonical witnesses and opcode-selector ambiguities. The \tbd{10}~missed bugs share a structural pattern: they require \emph{cross-component algebraic reasoning} beyond single-instruction boundary conditions (\autoref{sec:eval-threats}).
+Recall varies with constraint architecture: Jolt and Nexus achieve \tbd{100\%} (bugs in individual instruction semantics); OpenVM (\tbd{75.0\%}) and SP1 (\tbd{80.0\%}) mix localized errors with deeper cross-component issues; RISC Zero (\tbd{50.0\%}) and Pico (\tbd{66.7\%}) are limited by non-canonical witnesses and opcode-selector ambiguities. The \tbd{10}~missed bugs share a structural pattern: they require \emph{cross-component algebraic reasoning} beyond single-instruction invariant-critical conditions (\autoref{sec:eval-threats}).
 
 \begin{mdframed}[
     backgroundcolor=gray!10,
@@ -145,7 +145,7 @@ Recall varies with constraint architecture: Jolt and Nexus achieve \tbd{100\%} (
     \node[font=\scriptsize\itshape, Orange!70!black, anchor=south west] at (axis cs:185,11.5) {plateaus at \tbd{11}};
     \end{axis}
     \end{tikzpicture}
-    \caption{Cumulative unique bugs detected over wall-clock time (aggregated across all six backends, \tbd{TBD} data). \tool discovers bugs faster and converges to a higher total than both baselines. Shaded regions indicate 95\% confidence intervals over \tbd{5} independent seeds. \arguzz plateaus early because it detects only Type~I divergences; the Random baseline rarely reaches semantic boundary conditions.}
+    \caption{Cumulative unique bugs detected over wall-clock time (aggregated across all six backends, \tbd{TBD} data). \tool discovers bugs faster and converges to a higher total than both baselines. Shaded regions indicate 95\% confidence intervals over \tbd{5} independent seeds. \arguzz plateaus early because it detects only Type~I divergences; the Random baseline rarely reaches invariant-critical conditions.}
     \label{fig:cumulative-bugs}
 \end{figure}
 
@@ -235,7 +235,7 @@ Recall varies with constraint architecture: Jolt and Nexus achieve \tbd{100\%} (
 \end{figure}
 
 \paragraph{Temporal dynamics}
-\autoref{fig:cumulative-bugs} shows cumulative bug discovery over wall-clock time. \tool's curve rises steeply in the first \tbd{60}~minutes (\tbd{26}/34 bugs)---coinciding with rapid signature expansion (\autoref{fig:signature-growth})---and continues to discover bugs throughout the \tbd{6}-hour budget. \arguzz plateaus after \tbd{180}~minutes at \tbd{11}~bugs, having exhausted the Type~I divergences reachable by metamorphic testing; the Random baseline discovers \tbd{3}~bugs total, confirming that unguided mutation rarely reaches semantic boundaries. \autoref{fig:signature-growth} shows the correlation between signature exploration and bug discovery: the \tbd{182} distinct signatures discovered over \tbd{6}~hours track closely with the timing of bug detections, with most bugs appearing during periods of rapid signature growth. The corpus grows from \tbd{2,172} seeds to \tbd{11,400} inputs, a \tbd{5.2}$\times$ expansion driven by the novelty-based retention policy.
+\autoref{fig:cumulative-bugs} shows cumulative bug discovery over wall-clock time. \tool's curve rises steeply in the first \tbd{60}~minutes (\tbd{26}/34 bugs)---coinciding with rapid signature expansion (\autoref{fig:signature-growth})---and continues to discover bugs throughout the \tbd{6}-hour budget. \arguzz plateaus after \tbd{180}~minutes at \tbd{11}~bugs, having exhausted the Type~I divergences reachable by metamorphic testing; the Random baseline discovers \tbd{3}~bugs total, confirming that unguided mutation rarely reaches invariant-critical conditions. \autoref{fig:signature-growth} shows the correlation between signature exploration and bug discovery: the \tbd{182} distinct signatures discovered over \tbd{6}~hours track closely with the timing of bug detections, with most bugs appearing during periods of rapid signature growth. The corpus grows from \tbd{2,172} seeds to \tbd{11,400} inputs, a \tbd{5.2}$\times$ expansion driven by the novelty-based retention policy.
 
 \paragraph{Execution throughput}
 By skipping proof generation, \tool achieves \tbd{TBD} inputs/second median across the six backends (Nexus/Jolt fastest, OpenVM slowest due to modular architecture). The injection detector adds \tbd{TBD}\% overhead per iteration.
@@ -270,7 +270,7 @@ w/o ISA-Aware Mutation & \tbd{TBD} & \tbd{TBD} & \tbd{TBD} \\
 The injection-detector ablation admits a \emph{structural bound} that holds regardless of time budget or seed corpus. Of the \tbd{44} benchmark bugs, \tbd{31} are verifier-side (the executor computes the correct answer, but the constraint system admits an alternative witness). These bugs produce no register mismatch and are invisible to the differential detector. Of the \tbd{34} bugs \tool detects, \tbd{21} (\tbd{62\%}) are verifier-side; without witness injection, recall drops from \tbd{77.3\%} to at most \tbd{29.5\%} (the \tbd{13} Type~I divergence bugs). This bound also explains the gap with \arguzz: of the \tbd{23} bugs \tool detects but \arguzz misses, \tbd{21} are verifier-side, unreachable by any differential-testing oracle.
 
 \paragraph{Other components}
-ISA-aware mutation ensures encoding validity: random 32-bit mutations produce decodable RV32IM instructions with probability $< \tbd{2^{-7}}$, so byte-level havoc spends most of the budget on decoder-rejected inputs. Category feedback provides structured exploration of the \tbd{39}-dimensional semantic space, distinguishing rare boundary activations from common ones. The UCB1 bandit adapts mutation allocation to each backend's constraint structure (e.g., favoring constant mutation on backends with complex limb logic), primarily affecting efficiency rather than reachability.
+ISA-aware mutation ensures encoding validity: random 32-bit mutations produce decodable RV32IM instructions with probability $< \tbd{2^{-7}}$, so byte-level havoc spends most of the budget on decoder-rejected inputs. Category feedback provides structured exploration of the \tbd{39}-dimensional semantic space, distinguishing rare invariant activations from common ones. The UCB1 bandit adapts mutation allocation to each backend's constraint structure (e.g., favoring constant mutation on backends with complex limb logic), primarily affecting efficiency rather than reachability.
 
 \begin{mdframed}[
     backgroundcolor=gray!10,
@@ -311,7 +311,7 @@ Resource (7) & \tbd{1/7} & \tbd{0/7} & \tbd{1/7} & \tbd{3/7} & \tbd{1/7} & \tbd{
 \end{tabular}
 \end{table}
 
-The \tbd{34} detected bugs activate \tbd{38/39} categories (\tbd{97\%}). Cross-backend reuse is strong: \icode{decode.zero\_reg} catches x0 violations in three backends; memory categories activate across 4/6; resource categories across 5/6 (all STARK-based). Category activation correlates with constraint complexity (OpenVM:~\tbd{13}; Nexus:~\tbd{4}).
+The \tbd{34} detected bugs activate \tbd{38/39} categories (\tbd{97\%}). Cross-backend reuse is strong: \icode{decode.zero\_reg} catches x0 violations in three backends; memory categories activate across 4/6; resource categories across 5/6 (all STARK-based). Category activation correlates with constraint complexity (OpenVM:~\tbd{13}; Nexus:~\tbd{5}).
 
 \begin{mdframed}[
     backgroundcolor=gray!10,
@@ -375,4 +375,4 @@ All tools share the same seed corpus (\tbd{2,172} \icode{riscv-tests} sequences)
 % PLACEHOLDER-EXPERIMENT: 5 seeds × 3 tools × 6 backends × 6h.
 
 \paragraph{Limitations}
-The \tbd{10} missed bugs require \emph{cross-component algebraic reasoning}: LogUp multiplicity wraparound (\tbd{2}~OpenVM, \tbd{1}~SP1), interaction-digest collisions (\tbd{1}~OpenVM), non-canonical witnesses (\tbd{3}~RISC~Zero), and opcode-selector ambiguities (\tbd{2}~Pico, \tbd{1}~SP1). These exploit global protocol-level invariants rather than per-instruction boundaries. In practice, effective bug-finding inputs are short (\tbd{3--12} instructions); scalability is bounded by trace-generation cost and diminishing signature novelty for longer programs.
+The \tbd{10} missed bugs require \emph{cross-component algebraic reasoning}: LogUp multiplicity wraparound (\tbd{2}~OpenVM, \tbd{1}~SP1), interaction-digest collisions (\tbd{1}~OpenVM), non-canonical witnesses (\tbd{3}~RISC~Zero), and opcode-selector ambiguities (\tbd{2}~Pico, \tbd{1}~SP1). These exploit global protocol-level invariants rather than per-instruction invariant-critical conditions. In practice, effective bug-finding inputs are short (\tbd{3--12} instructions); scalability is bounded by trace-generation cost and diminishing signature novelty for longer programs.
