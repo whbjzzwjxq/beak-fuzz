@@ -6,7 +6,8 @@
 	sp1-install-v4 sp1-build-v4 sp1-fuzz-v4 \
 	jolt-install jolt-build jolt-run jolt-fuzz \
 	nexus-install nexus-build nexus-run nexus-fuzz \
-	risc0-install risc0-build risc0-run risc0-fuzz
+	risc0-install risc0-build risc0-run risc0-fuzz \
+	repair-install-roots
 
 # Commit selector (required for OpenVM targets).
 #
@@ -135,6 +136,9 @@ extract-initial-seeds:
 	$(PYTHON) scripts/extract_initial_seeds.py \
 		-i storage/riscv-tests-artifacts \
 		-o storage/fuzzing_seeds/initial.jsonl
+
+repair-install-roots:
+	$(PYTHON) scripts/repair_snapshot_out_roots.py
 
 openvm-install:
 	$(_require_commit)

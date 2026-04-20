@@ -12,6 +12,7 @@ use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic};
 use risc0_binfmt::{MemoryImage, Program};
 use risc0_circuit_rv32im::{
     MAX_INSN_CYCLES,
+    Rv32imV2Claim,
     execute::{
         CycleLimit,
         DEFAULT_SEGMENT_LIMIT_PO2,
@@ -41,19 +42,32 @@ const EXEC_OP_SELECTOR_BINDING_INJECT_KIND: &str = "risc0.semantic.exec.op_selec
 const EXEC_CONTROL_FLOW_BINDING_INJECT_KIND: &str = "risc0.semantic.exec.control_flow_binding";
 const EXEC_MEMORY_EFFECT_BINDING_INJECT_KIND: &str = "risc0.semantic.exec.memory_effect_binding";
 
+#[cfg(test)]
 const EXEC_SOURCE_BINDING_SUFFIX: &str = "::src2_from_src1_word";
+#[cfg(test)]
 const EXEC_DEST_BINDING_SUFFIX: &str = "::rd_plus_one_word";
+#[cfg(test)]
 const EXEC_OP_SELECTOR_BINDING_SUFFIX: &str = "::toggle_selector_word";
+#[cfg(test)]
 const EXEC_CONTROL_FLOW_BINDING_SUFFIX: &str = "::branch_negate_word";
+#[cfg(test)]
 const EXEC_MEMORY_EFFECT_BINDING_SUFFIX: &str = "::memory_route_word";
 
+#[cfg(test)]
 const EXECUTOR_WORD_INJECT_KIND_ENV: &str = "BEAK_RISC0_EXEC_INJECT_KIND";
+#[cfg(test)]
 const EXECUTOR_WORD_INJECT_STEP_ENV: &str = "BEAK_RISC0_EXEC_INJECT_STEP";
+#[cfg(test)]
 const EXECUTOR_WORD_INJECT_HIT_ENV: &str = "BEAK_RISC0_EXEC_INJECT_HIT";
+#[cfg(test)]
 const EXECUTOR_WORD_SOURCE_BINDING_KIND: &str = "source_operand_binding_word";
+#[cfg(test)]
 const EXECUTOR_WORD_DEST_BINDING_KIND: &str = "dest_binding_word";
+#[cfg(test)]
 const EXECUTOR_WORD_OP_SELECTOR_KIND: &str = "op_selector_binding_word";
+#[cfg(test)]
 const EXECUTOR_WORD_CONTROL_FLOW_KIND: &str = "control_flow_binding_word";
+#[cfg(test)]
 const EXECUTOR_WORD_MEMORY_EFFECT_KIND: &str = "memory_effect_binding_word";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +85,7 @@ fn base_inject_kind(kind: &str) -> &str {
     kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
 }
 
+#[cfg(test)]
 fn is_executor_word_injection(kind: &str) -> bool {
     kind.ends_with(EXEC_SOURCE_BINDING_SUFFIX)
         || kind.ends_with(EXEC_DEST_BINDING_SUFFIX)
@@ -79,6 +94,7 @@ fn is_executor_word_injection(kind: &str) -> bool {
         || kind.ends_with(EXEC_MEMORY_EFFECT_BINDING_SUFFIX)
 }
 
+#[cfg(test)]
 fn executor_word_kind_for_inject_kind(kind: &str) -> Option<&'static str> {
     if kind.ends_with(EXEC_SOURCE_BINDING_SUFFIX) {
         Some(EXECUTOR_WORD_SOURCE_BINDING_KIND)
@@ -95,6 +111,7 @@ fn executor_word_kind_for_inject_kind(kind: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(test)]
 fn configure_executor_word_injection(inject_kind: Option<&str>, inject_step: u64) -> bool {
     let Some(kind) = inject_kind else {
         std::env::remove_var(EXECUTOR_WORD_INJECT_KIND_ENV);
@@ -120,12 +137,38 @@ fn configure_executor_word_injection(inject_kind: Option<&str>, inject_step: u64
     true
 }
 
-fn take_executor_word_injection_hit() -> Option<String> {
-    let hit = std::env::var(EXECUTOR_WORD_INJECT_HIT_ENV).ok();
+#[cfg(test)]
+fn current_executor_word_injection_hit() -> Option<String> {
+    std::env::var(EXECUTOR_WORD_INJECT_HIT_ENV).ok()
+}
+
+#[cfg(test)]
+fn clear_executor_word_injection() {
     std::env::remove_var(EXECUTOR_WORD_INJECT_KIND_ENV);
     std::env::remove_var(EXECUTOR_WORD_INJECT_STEP_ENV);
     std::env::remove_var(EXECUTOR_WORD_INJECT_HIT_ENV);
-    hit
+}
+
+fn expected_claim_for_segment(segment: &risc0_circuit_rv32im::execute::Segment) -> Rv32imV2Claim {
+    let mut claim = segment.claim.clone();
+    claim.shutdown_cycle = Some(segment.segment_threshold);
+    claim
+}
+
+fn ensure_seal_matches_segment_claim(
+    segment: &risc0_circuit_rv32im::execute::Segment,
+    seal: &[u32],
+) -> Result<(), String> {
+    let decoded = Rv32imV2Claim::decode(seal)
+        .map_err(|e| format!("risc0 claim decode failed: {e}"))?;
+    let expected = expected_claim_for_segment(segment);
+    if decoded != expected {
+        return Err(format!(
+            "risc0 receipt claim mismatch: expected {:?}, decoded {:?}",
+            expected, decoded
+        ));
+    }
+    Ok(())
 }
 
 fn encode_i(imm: i32, rs1: u32, funct3: u32, rd: u32, opcode: u32) -> u32 {
@@ -310,6 +353,28 @@ fn final_regs_for_oracle(words: &[u32]) -> Result<[u32; 32], String> {
     final_regs_before_termination(words)
 }
 
+fn runtime_source_binding_sites(words: &[u32]) -> Result<BTreeSet<u64>, String> {
+    let mut sites = BTreeSet::<u64>::new();
+    let cfg = OracleConfig {
+        memory_model: OracleMemoryModel::SplitCodeData,
+        code_base: crate::RISC0_ORACLE_CODE_BASE,
+        data_size_bytes: 0,
+    };
+    for (step, &word) in words.iter().enumerate() {
+        let Some(dec) = RV32IMInstruction::decode(word) else {
+            continue;
+        };
+        let (Some(rs1), Some(rs2)) = (dec.rs1, dec.rs2) else {
+            continue;
+        };
+        let regs = RISCVOracle::execute_with_step_limit(words, cfg, step as u32).regs;
+        if regs[rs1 as usize] != regs[rs2 as usize] {
+            sites.insert(step as u64);
+        }
+    }
+    Ok(sites)
+}
+
 fn oracle_fallback_regs(words: &[u32]) -> [u32; 32] {
     RISCVOracle::execute_with_config(
         words,
@@ -323,6 +388,7 @@ fn oracle_fallback_regs(words: &[u32]) -> [u32; 32] {
 
 fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
     let mut sites = BTreeMap::<String, Vec<u64>>::new();
+    let runtime_source_sites = runtime_source_binding_sites(words).ok();
     for (step, &word) in words.iter().enumerate() {
         let Some(dec) = RV32IMInstruction::decode(word) else {
             continue;
@@ -360,7 +426,13 @@ fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
         {
             kinds.insert(RD_BITS_INJECT_KIND);
         }
-        if dec.rs1.is_some() && dec.rs2.is_some() {
+        if dec.rs1.is_some()
+            && dec.rs2.is_some()
+            && runtime_source_sites
+                .as_ref()
+                .map(|steps| steps.contains(&(step as u64)))
+                .unwrap_or(true)
+        {
             kinds.insert(EXEC_SOURCE_BINDING_INJECT_KIND);
         }
         if dec.rd.is_some_and(|rd| rd != 0)
@@ -431,19 +503,19 @@ fn bump_hit_detail(hit: &mut BucketHit, kind: &str, step: u64) {
             details.insert("beak_len_decomposition".to_string(), json!("force_low2_hot_1"));
         }
         EXEC_SOURCE_BINDING_INJECT_KIND => {
-            details.insert("beak_executor_binding".to_string(), json!("src2_from_src1"));
+            details.insert("beak_preflight_binding".to_string(), json!("src2_from_src1"));
         }
         EXEC_DEST_BINDING_INJECT_KIND => {
-            details.insert("beak_executor_binding".to_string(), json!("rd_plus_one"));
+            details.insert("beak_preflight_binding".to_string(), json!("rd_plus_one"));
         }
         EXEC_OP_SELECTOR_BINDING_INJECT_KIND => {
-            details.insert("beak_executor_binding".to_string(), json!("toggle_selector"));
+            details.insert("beak_preflight_binding".to_string(), json!("toggle_selector"));
         }
         EXEC_CONTROL_FLOW_BINDING_INJECT_KIND => {
-            details.insert("beak_executor_binding".to_string(), json!("branch_negate"));
+            details.insert("beak_preflight_binding".to_string(), json!("branch_negate"));
         }
         EXEC_MEMORY_EFFECT_BINDING_INJECT_KIND => {
-            details.insert("beak_executor_binding".to_string(), json!("memory_route"));
+            details.insert("beak_preflight_binding".to_string(), json!("memory_route"));
         }
         _ => {}
     }
@@ -490,15 +562,8 @@ pub fn run_backend_once(
 
     let program = build_program(words);
     let image = risc0_binfmt::MemoryImage::new_kernel(program);
-    let executor_injection_armed = configure_executor_word_injection(inject_kind, inject_step);
-    let (segments, result) = execute_session(image, DEFAULT_SESSION_LIMIT, Vec::new())?;
-    let executor_injection_hit = take_executor_word_injection_hit();
-
-    let plan = if executor_injection_armed {
-        None
-    } else {
-        inject_kind.map(|kind| BeakInjectionPlan { kind: kind.to_string(), step: inject_step })
-    };
+    let (segments, _result) = execute_session(image, DEFAULT_SESSION_LIMIT, Vec::new())?;
+    let plan = inject_kind.map(|kind| BeakInjectionPlan { kind: kind.to_string(), step: inject_step });
     let mut witness_mutation_observed = false;
 
     for segment in &segments {
@@ -506,36 +571,15 @@ pub fn run_backend_once(
             .map_err(|e| format!("risc0 prove failed: {e}"))?;
         risc0_circuit_rv32im::verify(&seal)
             .map_err(|e| format!("risc0 verify failed: {e}"))?;
+        ensure_seal_matches_segment_claim(segment, &seal)?;
         witness_mutation_observed |= applied;
     }
-    let injection_applied = executor_injection_hit.is_some() || witness_mutation_observed;
+    let injection_applied = witness_mutation_observed;
 
     let mut bucket_hits = trace.bucket_hits().to_vec();
     if injection_applied {
         if let Some(kind) = inject_kind {
-            let target_bucket = match base_inject_kind(kind) {
-                ZERO_REGISTER_INJECT_KIND => Some(semantic::decode::ZERO_REGISTER_IMMUTABILITY.id),
-                OPERAND_ROUTE_INJECT_KIND => Some(semantic::decode::OPERAND_INDEX_ROUTING.id),
-                RD_BITS_INJECT_KIND => Some(semantic::decode::RD_BIT_DECOMPOSITION.id),
-                DIV_REM_BOUND_INJECT_KIND => Some(semantic::arithmetic::DIVISION_REMAINDER_BOUND.id),
-                ECALL_ARG_DECOMP_INJECT_KIND => Some(semantic::control::ECALL_ARGUMENT_DECOMPOSITION.id),
-                EXEC_SOURCE_BINDING_INJECT_KIND => Some(semantic::exec::SOURCE_OPERAND_BINDING.id),
-                EXEC_DEST_BINDING_INJECT_KIND => Some(semantic::exec::DEST_BINDING.id),
-                EXEC_OP_SELECTOR_BINDING_INJECT_KIND => Some(semantic::exec::OP_SELECTOR_BINDING.id),
-                EXEC_CONTROL_FLOW_BINDING_INJECT_KIND => Some(semantic::exec::CONTROL_FLOW_BINDING.id),
-                EXEC_MEMORY_EFFECT_BINDING_INJECT_KIND => Some(semantic::exec::MEMORY_EFFECT_BINDING.id),
-                _ => None,
-            };
             apply_injected_hit_details(&mut bucket_hits, kind, inject_step);
-            if let Some(hit) = &executor_injection_hit {
-                for bucket_hit in &mut bucket_hits {
-                    if Some(bucket_hit.bucket_id.as_str()) == target_bucket {
-                        bucket_hit
-                            .details
-                            .insert("beak_executor_word".to_string(), json!(hit));
-                    }
-                }
-            }
         }
     } else if inject_kind.is_some() {
         for hit in &mut bucket_hits {
@@ -543,11 +587,7 @@ pub fn run_backend_once(
         }
     }
 
-    let final_regs = if executor_injection_armed {
-        final_regs_from_post_image(&result.post_image).unwrap_or_else(|_| oracle_fallback_regs(words))
-    } else {
-        final_regs_for_oracle(words).unwrap_or_else(|_| oracle_fallback_regs(words))
-    };
+    let final_regs = final_regs_for_oracle(words).unwrap_or_else(|_| oracle_fallback_regs(words));
 
     Ok(RunResponse {
         final_regs: Some(final_regs),
@@ -623,16 +663,14 @@ impl Risc0Backend {
             return Vec::new();
         };
 
-        let schedule = if self
-            .last_observed_injection_sites
-            .get(base_inject_kind(inject_kind))
-            .map(|steps| steps.iter().any(|step| *step == anchor))
-            .unwrap_or(false)
+        if let Some(observed_steps) = self.last_observed_injection_sites.get(base_inject_kind(inject_kind))
         {
-            InjectionSchedule::Exact(anchor)
-        } else {
-            InjectionSchedule::Exact(anchor)
-        };
+            if !observed_steps.iter().any(|step| *step == anchor) {
+                return Vec::new();
+            }
+        }
+
+        let schedule = InjectionSchedule::Exact(anchor);
 
         vec![SemanticInjectionCandidate {
             bucket_id: hit.bucket_id.clone(),
@@ -701,9 +739,12 @@ impl BenchmarkBackend for Risc0Backend {
 #[cfg(test)]
 mod tests {
     use super::{
-        ECALL_ARG_DECOMP_INJECT_KIND, build_program, nonzero_reg_count, observe_sites_for_words,
-        read_reg_bank,
+        ECALL_ARG_DECOMP_INJECT_KIND, EXEC_SOURCE_BINDING_INJECT_KIND,
+        build_program, clear_executor_word_injection, configure_executor_word_injection,
+        current_executor_word_injection_hit, ensure_seal_matches_segment_claim, execute_session,
+        nonzero_reg_count, observe_sites_for_words, read_reg_bank,
     };
+    use beak_core::trace::BucketHit;
     use risc0_binfmt::MemoryImage;
     use risc0_circuit_rv32im::{
         MAX_INSN_CYCLES,
@@ -712,7 +753,10 @@ mod tests {
             platform::{MACHINE_REGS_ADDR, USER_REGS_ADDR},
             testutil::{DEFAULT_SESSION_LIMIT, execute},
         },
+        prove::beak::prove_segment_with_injection,
     };
+    use serde_json::json;
+    use std::collections::HashMap;
 
     use super::Risc0HostSyscall;
 
@@ -754,5 +798,45 @@ mod tests {
                 user[17],
             );
         }
+    }
+
+    #[test]
+    fn clearing_executor_injection_before_prove_breaks_claim_alignment() {
+        let words = [0xfec0_0593, 0x0060_0613, 0x02c5_c733, 0xffd0_0393, 0x0077_4533];
+        let image = MemoryImage::new_kernel(build_program(&words));
+
+        clear_executor_word_injection();
+        assert!(configure_executor_word_injection(
+            Some(&format!("{EXEC_SOURCE_BINDING_INJECT_KIND}::src2_from_src1_word")),
+            2,
+        ));
+        let (segments, _) = execute_session(image, DEFAULT_SESSION_LIMIT, Vec::new()).unwrap();
+        assert!(current_executor_word_injection_hit().is_some());
+
+        clear_executor_word_injection();
+        let (seal, applied) = prove_segment_with_injection(&segments[0], None).unwrap();
+        assert!(!applied);
+        risc0_circuit_rv32im::verify(&seal).unwrap();
+        let err = ensure_seal_matches_segment_claim(&segments[0], &seal).unwrap_err();
+        assert!(err.contains("receipt claim mismatch"));
+    }
+
+    #[test]
+    fn source_binding_candidates_skip_equal_runtime_operands() {
+        let words = [0xfec0_0593u32, 0x0060_0613, 0x02c5_c733, 0xffd0_0393, 0x0077_4533];
+        let mut backend = super::Risc0Backend::new(16, 0);
+        backend.last_observed_injection_sites = observe_sites_for_words(&words);
+        let hit = BucketHit {
+            bucket_id: super::semantic::exec::SOURCE_OPERAND_BINDING.id.to_string(),
+            details: HashMap::from([
+                ("op_idx".to_string(), json!(4)),
+                ("mnemonic".to_string(), json!("xor")),
+                ("rs1".to_string(), json!(14)),
+                ("rs2".to_string(), json!(7)),
+            ]),
+        };
+
+        let candidates = backend.semantic_candidate_from_hit(&hit);
+        assert!(candidates.is_empty());
     }
 }

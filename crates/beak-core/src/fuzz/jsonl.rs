@@ -12,6 +12,12 @@ pub struct CorpusRecord {
     pub zkvm_commit: String,
     pub rng_seed: u64,
     pub timeout_ms: u64,
+    /// Wall-clock start of the whole fuzz/benchmark run in unix epoch milliseconds.
+    pub run_started_at_ms: u64,
+    /// Wall-clock elapsed time since the run started when this record was written.
+    pub elapsed_ms: u64,
+    /// Wall-clock duration of the individual backend/oracle evaluation that produced this record.
+    pub eval_duration_ms: u64,
     pub timed_out: bool,
     pub mismatch: bool,
     /// Canonical bucket signature for this run (backend-defined or derived from bucket hit signatures).
@@ -26,6 +32,12 @@ pub struct BugRecord {
     pub zkvm_commit: String,
     pub rng_seed: u64,
     pub timeout_ms: u64,
+    /// Wall-clock start of the whole fuzz/benchmark run in unix epoch milliseconds.
+    pub run_started_at_ms: u64,
+    /// Wall-clock elapsed time since the run started when this record was written.
+    pub elapsed_ms: u64,
+    /// Wall-clock duration of the individual backend/oracle evaluation that produced this record.
+    pub eval_duration_ms: u64,
     pub timed_out: bool,
     /// Canonical bucket signature for this run (backend-defined or derived from bucket hit signatures).
     pub bucket_hits_sig: String,
@@ -45,6 +57,12 @@ pub struct RunRecord {
     pub zkvm_commit: String,
     pub rng_seed: u64,
     pub timeout_ms: u64,
+    /// Wall-clock start of the whole fuzz/benchmark run in unix epoch milliseconds.
+    pub run_started_at_ms: u64,
+    /// Wall-clock elapsed time since the run started when this record was written.
+    pub elapsed_ms: u64,
+    /// Wall-clock duration of the individual backend/oracle evaluation that produced this record.
+    pub eval_duration_ms: u64,
     /// Monotonic per-process evaluation id in this run.
     pub eval_id: u64,
     pub timed_out: bool,

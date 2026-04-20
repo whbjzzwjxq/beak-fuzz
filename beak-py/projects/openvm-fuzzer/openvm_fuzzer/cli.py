@@ -8,13 +8,23 @@ from openvm_fuzzer.settings import (
     OPENVM_AVAILABLE_COMMITS_OR_BRANCHES,
     resolve_openvm_commit,
 )
+from openvm_fuzzer.utils_install import clone_and_checkout_openvm
+from zkvm_fuzzer_utils.snapshot_install import (
+    apply_pass_pipeline,
+    default_snapshot_out_root,
+    maybe_warn_on_nondefault_out_root,
+    resolve_snapshot_out_root,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="openvm-fuzzer", description="OpenVM installer/patcher.")
     sp = ap.add_subparsers(dest="command", required=True)
 
-    install = sp.add_parser("install", help="Materialize a snapshot into out/.")
+    install = sp.add_parser(
+        "install",
+        help="Materialize a snapshot into the repo-local beak-py/out/ by default.",
+    )
     install.add_argument(
         "--commit-or-branch",
         type=str,
@@ -23,40 +33,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help="OpenVM commit/alias to install.",
     )
     install.add_argument(
-        "--out-root", type=Path, default=Path("out"), help="Output root (default: ./out)."
+        "--out-root",
+        type=Path,
+        default=None,
+        help=f"Output root (default: {default_snapshot_out_root()}).",
     )
     return ap
 
 
 def _install(args: argparse.Namespace) -> int:
-    # Import heavy deps lazily so `--help` doesn't require optional runtime deps
-    # (e.g. psutil in zkvm_fuzzer_utils).
-    from openvm_fuzzer.utils_install import clone_and_checkout_openvm
-    from openvm_fuzzer.passes import pass1_infrastructure, pass2_bypass_checks, pass3_collection
-
-    # First, resolve the commit or branch to a concrete commit.
     resolved = resolve_openvm_commit(args.commit_or_branch)
-
-    # Then, materialize the snapshot into out/openvm-<commit>/openvm-src.
-    dest = (args.out_root / f"openvm-{resolved}" / "openvm-src").expanduser().resolve()
-
-    dest = clone_and_checkout_openvm(dest=dest, commit_or_branch=resolved)
-
-    # Now, we have the OpenVM snapshot in `dest`.
-    # Then, we modify the OpenVM snapshot to make it suitable for fuzzing.
-
-    print("Applying Pass 1/3 (infrastructure)...")
-    pass1_infrastructure.apply(openvm_install_path=dest, commit_or_branch=resolved)
-
-    print("Applying Pass 2/3 (bypass checks)...")
-    pass2_bypass_checks.apply(openvm_install_path=dest, commit_or_branch=resolved)
-
-    print("Applying Pass 3/3 (collection)...")
-    pass3_collection.apply(openvm_install_path=dest, commit_or_branch=resolved)
-
-    print("OpenVM snapshot patched for JSON trace collection.")
-
-    # Finally, print the destination path.
+    out_root = resolve_snapshot_out_root(args.out_root)
+    if args.out_root is not None:
+        maybe_warn_on_nondefault_out_root(out_root)
+    dest = (out_root / f"openvm-{resolved}" / "openvm-src").expanduser().resolve()
+    clone_and_checkout_openvm(dest=dest, commit_or_branch=resolved)
+    apply_pass_pipeline(
+        package_name="openvm_fuzzer",
+        install_path_kw="openvm_install_path",
+        install_path=dest,
+        commit_or_branch=resolved,
+    )
+    print("OpenVM snapshot staged for beak.")
     print(dest)
     return 0
 

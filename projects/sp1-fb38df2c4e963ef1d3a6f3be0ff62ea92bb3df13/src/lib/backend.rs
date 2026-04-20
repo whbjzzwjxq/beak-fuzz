@@ -19,6 +19,7 @@ pub const BNEINC_UPPER_LIMBS_INJECT_KIND: &str =
 type SC = BabyBearPoseidon2;
 type F = <SC as StarkGenericConfig>::Val;
 type EF = <SC as StarkGenericConfig>::Challenge;
+const A0_SLOT: i32 = -8;
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -122,13 +123,21 @@ fn felt(value: u32) -> F {
     F::from_canonical_u32(value)
 }
 
+fn signed_felt(value: i32) -> F {
+    if value >= 0 {
+        F::from_canonical_u32(value as u32)
+    } else {
+        -F::from_canonical_u32(value.unsigned_abs())
+    }
+}
+
 fn block(values: [u32; 4]) -> Block<F> {
     Block::from(values.map(felt))
 }
 
 fn imm_instruction(
     opcode: Opcode,
-    op_a: u32,
+    op_a: i32,
     op_b: [u32; 4],
     op_c: [u32; 4],
     offset_imm: u32,
@@ -137,7 +146,7 @@ fn imm_instruction(
 ) -> Instruction<F> {
     Instruction::new(
         opcode,
-        felt(op_a),
+        signed_felt(op_a),
         op_b.map(felt),
         op_c.map(felt),
         felt(offset_imm),
@@ -164,17 +173,17 @@ fn scenario_program(scenario: LegacyRecursionScenario) -> (RecursionProgram<F>, 
         LegacyRecursionScenario::Jump => (
             RecursionProgram {
                 instructions: vec![
-                    imm_instruction(Opcode::ADD, 8, zero, zero, 0, 0, "prefix_add"),
+                    imm_instruction(Opcode::ADD, A0_SLOT, zero, zero, 0, 0, "prefix_add"),
                     imm_instruction(
                         Opcode::JAL,
-                        4,
+                        A0_SLOT,
                         [1, 0, 0, 0],
-                        [4, 0, 0, 0],
+                        zero,
                         0,
                         0,
                         "jal",
                     ),
-                    imm_instruction(Opcode::Commit, 0, zero, zero, 0, 0, "commit"),
+                    imm_instruction(Opcode::Commit, A0_SLOT, zero, zero, 0, 0, "commit"),
                 ],
                 traces: vec![None, None, None],
             },

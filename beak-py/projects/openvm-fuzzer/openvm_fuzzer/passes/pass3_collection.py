@@ -861,9 +861,7 @@ def _patch_336f_base_alu_adapter_emit_chip_row(openvm_install_path: Path) -> Non
 
         // Adapter reads/writes are 4-limb values in this snapshot.
         let a_u8: [u8; 4] = write_record.rd.1.map(|x| x.as_canonical_u32() as u8);
-        // Adapter read payload limbs are not exposed publicly on this snapshot.
-        // Keep stable placeholders for b/c and preserve immediate bytes when rs2 is immediate.
-        let b_u8: [u8; 4] = [0u8; 4];
+        let b_u8: [u8; 4] = core::array::from_fn(|i| rs1.data_at(i).as_canonical_u32() as u8);
         let c_u8: [u8; 4] = if read_record.rs2.is_none() {
             let imm_u32 = read_record.rs2_imm.as_canonical_u32();
             [
@@ -873,7 +871,8 @@ def _patch_336f_base_alu_adapter_emit_chip_row(openvm_install_path: Path) -> Non
                 ((imm_u32 >> 24) & 0xff) as u8,
             ]
         } else {
-            [0u8; 4]
+            let rs2 = rs2.expect("rs2 record must exist when rs2 is not immediate");
+            core::array::from_fn(|i| rs2.data_at(i).as_canonical_u32() as u8)
         };
 
         // Opcode-local value is not present in adapter record here; keep 0 as placeholder.
@@ -898,7 +897,6 @@ def _patch_336f_auipc_core_emit_chip_row(openvm_install_path: Path) -> None:
     )
     if not path.exists():
         return
-    _ensure_use_fuzzer_utils(path)
     c = path.read_text()
     try:
         c = _insert_before(
@@ -1144,15 +1142,19 @@ def _patch_336f_loadstore_adapter_witness_injection(openvm_install_path: Path) -
         let spec = beak_variant
             .as_deref()
             .unwrap_or("mode=flip_sign,domain=any,guard=none");
-        let beak_variant_value = |key: &str| -> Option<&str> {
-            spec.split(',').find_map(|part| {
-                let (k, v) = part.split_once('=')?;
-                (k.trim() == key).then_some(v.trim())
-            })
-        };
-        let mode = beak_variant_value("mode").unwrap_or("flip_sign");
-        let domain = beak_variant_value("domain").unwrap_or("any");
-        let guard = beak_variant_value("guard").unwrap_or("none");
+        let mut mode = "flip_sign";
+        let mut domain = "any";
+        let mut guard = "none";
+        for part in spec.split(',') {
+            if let Some((spec_key, spec_value)) = part.split_once('=') {
+                match spec_key.trim() {
+                    "mode" => mode = spec_value.trim(),
+                    "domain" => domain = spec_value.trim(),
+                    "guard" => guard = spec_value.trim(),
+                    _ => {}
+                }
+            }
+        }
         let local_opcode = Rv32LoadStoreOpcode::from_usize(
             opcode.local_opcode_idx(Rv32LoadStoreOpcode::CLASS_OFFSET),
         );
@@ -1326,6 +1328,7 @@ def _patch_336f_bitwise_lookup_shadow_multiplicity_injection(openvm_install_path
     )
     if not path.exists():
         return
+    _ensure_use_fuzzer_utils(path)
     c = path.read_text()
     try:
         c = _insert_before(
@@ -1337,27 +1340,59 @@ def _patch_336f_bitwise_lookup_shadow_multiplicity_injection(openvm_install_path
         // Witness-only shadow multiplicity mutation for audit-o1.
         // This intentionally mutates *prove-side* lookup multiplicity while keeping
         // runtime behavior unchanged.
-        if std::env::var("BEAK_OPENVM_WITNESS_INJECT_KIND").ok().as_deref()
-            == Some("openvm.semantic.lookup.xor_multiplicity_consistency")
+        if let Some(beak_variant) = std::env::var("BEAK_OPENVM_WITNESS_INJECT_KIND")
+            .ok()
+            .and_then(|kind| {
+                kind.strip_prefix("openvm.semantic.lookup.xor_multiplicity_consistency::")
+                    .map(str::to_string)
+                    .or_else(|| {
+                        (kind == "openvm.semantic.lookup.xor_multiplicity_consistency")
+                            .then(String::new)
+                    })
+            })
         {
             // BabyBear prime: 2^31 - 2^27 + 1 = 2013265921.
-            // We inject p+1 as a weak aliasing signal bucket.
-            const BEAK_BABYBEAR_P_PLUS_1: u32 = 2_013_265_922;
+            const BEAK_BABYBEAR_P: u32 = 2_013_265_921;
+            const BEAK_BABYBEAR_P_PLUS_1: u32 = BEAK_BABYBEAR_P + 1;
+            const BEAK_BABYBEAR_2P_PLUS_1: u32 = 2 * BEAK_BABYBEAR_P + 1;
+            let mut mode = "p_plus_one";
+            let mut rank: usize = 0;
+            for part in beak_variant.split(',') {
+                if let Some((key, value)) = part.split_once('=') {
+                    match key {
+                        "mode" => mode = value,
+                        "rank" => rank = value.parse::<usize>().unwrap_or(0),
+                        _ => {}
+                    }
+                }
+            }
+            let inject_mult = match mode {
+                "double_modulus_mask" => BEAK_BABYBEAR_2P_PLUS_1,
+                "p_plus_mask" | "p_plus_one" => BEAK_BABYBEAR_P_PLUS_1,
+                _ => BEAK_BABYBEAR_P_PLUS_1,
+            };
             let mut injected = false;
+            let mut seen_nonzero = 0usize;
             for row in rows.chunks_mut(NUM_BITWISE_OP_LOOKUP_COLS) {
                 let cols: &mut BitwiseOperationLookupCols<F> = row.borrow_mut();
                 if cols.mult_xor != F::ZERO {
-                    cols.mult_xor = F::from_canonical_u32(BEAK_BABYBEAR_P_PLUS_1);
+                    if seen_nonzero != rank {
+                        seen_nonzero += 1;
+                        continue;
+                    }
+                    cols.mult_xor = F::from_canonical_u32(inject_mult);
                     injected = true;
                     eprintln!(
-                        "[beak-witness-inject] kind=openvm.semantic.lookup.xor_multiplicity_consistency mode=shadow_lookup_multiplicity"
+                        "[beak-witness-inject] kind=openvm.semantic.lookup.xor_multiplicity_consistency mode=shadow_lookup_multiplicity variant={}",
+                        beak_variant
                     );
                     break;
                 }
             }
             if !injected {
                 eprintln!(
-                    "[beak-witness-inject] kind=openvm.semantic.lookup.xor_multiplicity_consistency mode=shadow_lookup_multiplicity no_nonzero_xor_row"
+                    "[beak-witness-inject] kind=openvm.semantic.lookup.xor_multiplicity_consistency mode=shadow_lookup_multiplicity variant={} no_ranked_nonzero_xor_row",
+                    beak_variant
                 );
             }
         }
@@ -1600,6 +1635,163 @@ def _patch_witness_step_wildcard_support(openvm_install_path: Path) -> None:
     )
     if old in c and "self.injection_step == u64::MAX" not in c:
         c = c.replace(old, new, 1)
+    path.write_text(c)
+
+
+def _patch_witness_variant_support(openvm_install_path: Path) -> None:
+    path = openvm_install_path / "crates" / "fuzzer_utils" / "src" / "lib.rs"
+    if not path.exists():
+        return
+    c = path.read_text()
+
+    constants_anchor = "pub const LIMB_BITS: usize = 8;\n"
+    helper_block = """
+fn base_injection_kind(kind: &str) -> &str {
+    kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
+}
+
+fn injection_variant(kind: &str) -> Option<&str> {
+    kind.split_once("::").map(|(_, variant)| variant)
+}
+"""
+    if helper_block.strip() not in c and constants_anchor in c:
+        c = c.replace(constants_anchor, constants_anchor + helper_block, 1)
+
+    if "pub applied_witness_sites: BTreeMap<String, Vec<u64>>," not in c:
+        c = c.replace(
+            "    pub observed_witness_sites: BTreeMap<String, Vec<u64>>,\n",
+            "    pub observed_witness_sites: BTreeMap<String, Vec<u64>>,\n"
+            "    pub applied_witness_sites: BTreeMap<String, Vec<u64>>,\n",
+            1,
+        )
+
+    if "applied_witness_sites: BTreeMap::new()," not in c:
+        c = c.replace(
+            "            observed_witness_sites: BTreeMap::new(),\n",
+            "            observed_witness_sites: BTreeMap::new(),\n"
+            "            applied_witness_sites: BTreeMap::new(),\n",
+            1,
+        )
+
+    if "self.applied_witness_sites.clear();" not in c:
+        c = c.replace(
+            "        self.observed_witness_sites.clear();\n",
+            "        self.observed_witness_sites.clear();\n"
+            "        self.applied_witness_sites.clear();\n",
+            1,
+        )
+
+    if "fn note_applied_witness_site(&mut self, kind: &str, step: u64)" not in c:
+        c = c.replace(
+            "    fn note_witness_site(&mut self, kind: &str, step: u64) {\n"
+            "        let sites = self.observed_witness_sites.entry(kind.to_string()).or_default();\n"
+            "        if sites.last().copied() != Some(step) {\n"
+            "            sites.push(step);\n"
+            "        }\n"
+            "    }\n",
+            "    fn note_witness_site(&mut self, kind: &str, step: u64) {\n"
+            "        let sites = self.observed_witness_sites.entry(kind.to_string()).or_default();\n"
+            "        if sites.last().copied() != Some(step) {\n"
+            "            sites.push(step);\n"
+            "        }\n"
+            "    }\n"
+            "\n"
+            "    fn note_applied_witness_site(&mut self, kind: &str, step: u64) {\n"
+            "        let sites = self.applied_witness_sites.entry(kind.to_string()).or_default();\n"
+            "        if sites.last().copied() != Some(step) {\n"
+            "            sites.push(step);\n"
+            "        }\n"
+            "    }\n",
+            1,
+        )
+
+    if "pub fn matching_injection_kind(&self, kind: &str, step: u64) -> Option<String>" not in c:
+        c = c.replace(
+            "    pub fn should_inject_witness(&self, kind: &str, step: u64) -> bool {\n"
+            "        self.injection_enabled && self.injection_kind == kind && self.injection_step == step\n"
+            "    }\n",
+            "    pub fn should_inject_witness(&self, kind: &str, step: u64) -> bool {\n"
+            "        self.injection_enabled\n"
+            "            && base_injection_kind(self.injection_kind.as_str()) == kind\n"
+            "            && (self.injection_step == step || self.injection_step == u64::MAX)\n"
+            "    }\n"
+            "\n"
+            "    pub fn matching_injection_kind(&self, kind: &str, step: u64) -> Option<String> {\n"
+            "        self.should_inject_witness(kind, step)\n"
+            "            .then(|| self.injection_kind.clone())\n"
+            "    }\n"
+            "\n"
+            "    pub fn active_witness_variant(&self, kind: &str) -> Option<String> {\n"
+            "        self.injection_enabled\n"
+            "            .then(|| base_injection_kind(self.injection_kind.as_str()) == kind)\n"
+            "            .filter(|matched| *matched)\n"
+            "            .and_then(|_| injection_variant(self.injection_kind.as_str()))\n"
+            "            .map(str::to_string)\n"
+            "    }\n",
+            1,
+        )
+    elif "pub fn take_applied_witness_sites(&mut self) -> BTreeMap<String, Vec<u64>>" not in c:
+        c = c.replace(
+            "    pub fn take_observed_witness_sites(&mut self) -> BTreeMap<String, Vec<u64>> {\n"
+            "        std::mem::take(&mut self.observed_witness_sites)\n"
+            "    }\n",
+            "    pub fn take_observed_witness_sites(&mut self) -> BTreeMap<String, Vec<u64>> {\n"
+            "        std::mem::take(&mut self.observed_witness_sites)\n"
+            "    }\n"
+            "\n"
+            "    pub fn take_applied_witness_sites(&mut self) -> BTreeMap<String, Vec<u64>> {\n"
+            "        std::mem::take(&mut self.applied_witness_sites)\n"
+            "    }\n",
+            1,
+        )
+
+    if "pub fn active_witness_variant(kind: &str) -> Option<String>" not in c:
+        c = c.replace(
+            "pub fn should_inject_witness(kind: &str, step: u64) -> bool {\n"
+            "    let mut state = GLOBAL_STATE.lock().unwrap();\n"
+            "    state.note_witness_site(kind, step);\n"
+            "    state.should_inject_witness(kind, step)\n"
+            "}\n",
+            "pub fn should_inject_witness(kind: &str, step: u64) -> bool {\n"
+            "    let mut state = GLOBAL_STATE.lock().unwrap();\n"
+            "    state.note_witness_site(kind, step);\n"
+            "    let should_inject = state.should_inject_witness(kind, step);\n"
+            "    if should_inject {\n"
+            "        state.note_applied_witness_site(kind, step);\n"
+            "    }\n"
+            "    should_inject\n"
+            "}\n"
+            "\n"
+            "pub fn matching_injection_kind(kind: &str, step: u64) -> Option<String> {\n"
+            "    let mut state = GLOBAL_STATE.lock().unwrap();\n"
+            "    state.note_witness_site(kind, step);\n"
+            "    state.matching_injection_kind(kind, step)\n"
+            "}\n"
+            "\n"
+            "pub fn active_witness_variant(kind: &str) -> Option<String> {\n"
+            "    let state = GLOBAL_STATE.lock().unwrap();\n"
+            "    state.active_witness_variant(kind)\n"
+            "}\n",
+            1,
+        )
+    elif "pub fn take_applied_witness_sites() -> BTreeMap<String, Vec<u64>>" not in c:
+        c = c.replace(
+            "pub fn take_observed_witness_sites() -> BTreeMap<String, Vec<u64>> {\n"
+            "    let mut state = GLOBAL_STATE.lock().unwrap();\n"
+            "    state.take_observed_witness_sites()\n"
+            "}\n",
+            "pub fn take_observed_witness_sites() -> BTreeMap<String, Vec<u64>> {\n"
+            "    let mut state = GLOBAL_STATE.lock().unwrap();\n"
+            "    state.take_observed_witness_sites()\n"
+            "}\n"
+            "\n"
+            "pub fn take_applied_witness_sites() -> BTreeMap<String, Vec<u64>> {\n"
+            "    let mut state = GLOBAL_STATE.lock().unwrap();\n"
+            "    state.take_applied_witness_sites()\n"
+            "}\n",
+            1,
+        )
+
     path.write_text(c)
 
 
@@ -2262,6 +2454,7 @@ def apply(*, openvm_install_path: Path, commit_or_branch: str) -> None:
         _patch_336f_divrem_core_witness_injection(openvm_install_path)
         _patch_336f_bitwise_lookup_shadow_multiplicity_injection(openvm_install_path)
         _patch_witness_step_wildcard_support(openvm_install_path)
+        _patch_witness_variant_support(openvm_install_path)
         if commit == OPENVM_BENCHMARK_F038_COMMIT:
             _patch_f038_volatile_witness_injection(openvm_install_path)
             _patch_f038_connector_witness_injection(openvm_install_path)

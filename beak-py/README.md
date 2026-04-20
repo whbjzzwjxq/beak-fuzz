@@ -27,11 +27,28 @@ make install
 
 ### 3. Install a zkVM snapshot (OpenVM example)
 
-Beak-py's role is to **materialize and patch** a pinned zkVM snapshot under `out/`.
-For OpenVM, `openvm-fuzzer install` will clone the upstream repo and apply patches automatically.
+Beak-py's role is to **materialize and patch** pinned zkVM snapshots under `beak-py/out/`.
+The installer default is now repo-stable rather than `cwd`-relative, but the repo-level `Makefile`
+is still the preferred entrypoint because the Rust projects are pinned to that install root.
+
+From `beak-fuzz/`:
 
 ```bash
+make openvm-install COMMIT=bmk-regzero
+```
+
+Direct CLI usage from `beak-py/` is also fine:
+
+```bash
+cd beak-py
 uv run openvm-fuzzer install --commit-or-branch bmk-regzero
+```
+
+If you previously installed snapshots into a legacy `out/<zkvm>-<commit>/...` location, migrate them with:
+
+```bash
+cd ..
+make repair-install-roots
 ```
 
 ### 4. Run a seed (via Rust beak-trace)
@@ -57,7 +74,7 @@ make openvm-run COMMIT=bmk-regzero BIN=beak-trace ARGS='--bin "12345017 00000533
 
 1. **`libs/zkvm-fuzzer-utils`**: Shared utilities (git worktrees, record parsing, injection helpers).
 2. **`projects/*-fuzzer`**: Per-zkVM packages that can:
-   - materialize a local zkVM repo snapshot into `out/<zkvm>-<commit>/...`
+   - materialize a local zkVM repo snapshot into `beak-py/out/<zkvm>-<commit>/...`
    - optionally apply instrumentation / fault-injection patches (where supported)
 3. **`crates/beak-core`** (Rust): shared ISA/oracle, seed format, fuzz loop scaffolding, and bucket/feedback traits used by backend runners (e.g. `beak-trace`, `beak-fuzz`).
 

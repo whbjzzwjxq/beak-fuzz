@@ -4,13 +4,23 @@ import argparse
 from pathlib import Path
 
 from risc0_fuzzer.settings import RISC0_BENCHMARK_COMMIT, resolve_risc0_commit
+from risc0_fuzzer.utils_install import clone_and_checkout_risc0
+from zkvm_fuzzer_utils.snapshot_install import (
+    apply_pass_pipeline,
+    default_snapshot_out_root,
+    maybe_warn_on_nondefault_out_root,
+    resolve_snapshot_out_root,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="risc0-fuzzer", description="RISC0 installer entrypoint.")
     sp = ap.add_subparsers(dest="command", required=True)
 
-    install = sp.add_parser("install", help="Materialize RISC0 snapshot into out/.")
+    install = sp.add_parser(
+        "install",
+        help="Materialize RISC0 snapshot into the repo-local beak-py/out/ by default.",
+    )
     install.add_argument(
         "--commit-or-branch",
         type=str,
@@ -20,8 +30,8 @@ def _build_parser() -> argparse.ArgumentParser:
     install.add_argument(
         "--out-root",
         type=Path,
-        default=Path("out"),
-        help="Output root (default: ./out).",
+        default=None,
+        help=f"Output root (default: {default_snapshot_out_root()}).",
     )
     install.add_argument(
         "--zkvm-src",
@@ -33,27 +43,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _install(args: argparse.Namespace) -> int:
-    from risc0_fuzzer.utils_install import clone_and_checkout_risc0
-    from risc0_fuzzer.passes import pass1_infrastructure, pass2_bypass_checks, pass3_collection
-
     resolved = resolve_risc0_commit(args.commit_or_branch)
-    dest = (args.out_root / f"risc0-{resolved}" / "risc0-src").expanduser().resolve()
-    dest = clone_and_checkout_risc0(
+    out_root = resolve_snapshot_out_root(args.out_root)
+    if args.out_root is not None:
+        maybe_warn_on_nondefault_out_root(out_root)
+    dest = (out_root / f"risc0-{resolved}" / "risc0-src").expanduser().resolve()
+    clone_and_checkout_risc0(
         dest=dest,
         commit_or_branch=resolved,
         zkvm_src=args.zkvm_src,
     )
-
-    print("Applying Pass 1/3 (infrastructure)...")
-    pass1_infrastructure.apply(risc0_install_path=dest, commit_or_branch=resolved)
-
-    print("Applying Pass 2/3 (bypass checks)...")
-    pass2_bypass_checks.apply(risc0_install_path=dest, commit_or_branch=resolved)
-
-    print("Applying Pass 3/3 (collection)...")
-    pass3_collection.apply(risc0_install_path=dest, commit_or_branch=resolved)
-
-    print("RISC0 snapshot patched for prove hooks and executor-layer injection.")
+    apply_pass_pipeline(
+        package_name="risc0_fuzzer",
+        install_path_kw="risc0_install_path",
+        install_path=dest,
+        commit_or_branch=resolved,
+    )
+    print("RISC0 snapshot staged for beak.")
     print(dest)
     return 0
 

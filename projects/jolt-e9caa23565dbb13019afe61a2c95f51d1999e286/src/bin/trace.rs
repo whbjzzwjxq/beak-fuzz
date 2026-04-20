@@ -23,6 +23,18 @@ fn main() {
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
+            Arg::new("inject_kind")
+                .long("inject-kind")
+                .help("Explicit witness injection kind for smoke/integration checks.")
+                .num_args(1),
+        )
+        .arg(
+            Arg::new("inject_step")
+                .long("inject-step")
+                .default_value("0")
+                .help("Injection step. Use 18446744073709551615 for wildcard/auto-site backends."),
+        )
+        .arg(
             Arg::new("oracle_memory_model")
                 .long("oracle-memory-model")
                 .default_value("split-code-data")
@@ -63,6 +75,12 @@ fn main() {
     }
 
     let print_buckets = matches.get_flag("print_buckets");
+    let inject_kind = matches.get_one::<String>("inject_kind").map(|s| s.as_str());
+    let inject_step: u64 = matches
+        .get_one::<String>("inject_step")
+        .unwrap()
+        .parse()
+        .expect("inject-step");
     let oracle_memory_model = OracleMemoryModel::parse(
         matches.get_one::<String>("oracle_memory_model").unwrap(),
     )
@@ -99,7 +117,7 @@ fn main() {
     }
 
     println!("\n=== Jolt backend ===");
-    let backend_resp = match run_backend_once(&words, None, 0) {
+    let backend_resp = match run_backend_once(&words, inject_kind, inject_step) {
         Ok(resp) => resp,
         Err(e) => {
             eprintln!("  backend error: {e}");
@@ -107,6 +125,11 @@ fn main() {
         }
     };
     println!("  micro_op_count = {}", backend_resp.micro_op_count);
+    println!("  injection_applied = {}", backend_resp.injection_applied);
+    if let Some(kind) = inject_kind {
+        println!("  inject_kind = {kind}");
+        println!("  inject_step = {inject_step}");
+    }
     if let Some(err) = &backend_resp.backend_error {
         println!("  backend_error = {err}");
     }
@@ -140,6 +163,22 @@ fn main() {
             );
             mismatch = true;
         }
+    }
+    if inject_kind.is_some() {
+        if !backend_resp.injection_applied {
+            eprintln!("  explicit injection did not fire");
+            std::process::exit(2);
+        }
+        if backend_resp.backend_error.is_some() {
+            eprintln!("  explicit injection hit backend_error");
+            std::process::exit(3);
+        }
+        if mismatch {
+            println!("  Injection run diverged from oracle as expected for witness mutation.");
+        } else {
+            println!("  Injection run preserved register state.");
+        }
+        return;
     }
     if mismatch {
         println!("\n*** SOUNDNESS BUG DETECTED ***");

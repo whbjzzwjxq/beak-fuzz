@@ -50,6 +50,13 @@ fn base_inject_kind(kind: &str) -> &str {
     kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
 }
 
+fn semantic_replay_supported(kind: &str) -> bool {
+    !matches!(
+        base_inject_kind(kind),
+        ZERO_REGISTER_INJECT_KIND | RD_BITS_INJECT_KIND
+    )
+}
+
 fn encode_i(imm: i32, rs1: u32, funct3: u32, rd: u32, opcode: u32) -> u32 {
     (((imm as u32) & 0x0fff) << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode
 }
@@ -342,6 +349,15 @@ pub fn run_backend_once(
     inject_kind: Option<&str>,
     inject_step: u64,
 ) -> Result<RunResponse, String> {
+    if let Some(kind) = inject_kind {
+        if !semantic_replay_supported(kind) {
+            return Err(format!(
+                "risc0 semantic replay is unsupported on c0db0713 for {}: injected prover path can trap with SIGFPE",
+                base_inject_kind(kind)
+            ));
+        }
+    }
+
     let trace = Risc0Trace::from_words(words)?;
     let observed_injection_sites = observe_sites_for_words(words);
 
@@ -422,6 +438,10 @@ impl Risc0Backend {
         } else {
             return Vec::new();
         };
+
+        if !semantic_replay_supported(inject_kind) {
+            return Vec::new();
+        }
 
         let schedule = if self
             .last_observed_injection_sites

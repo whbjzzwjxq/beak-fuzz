@@ -131,13 +131,14 @@ struct RunStats {
     baseline_bucket_hits_sig: Option<String>,
     underconstrained_candidate: bool,
     skip_reason: Option<String>,
+    eval_duration_ms: u64,
 }
 
 static LAST_RUN: LazyLock<Mutex<RunStats>> = LazyLock::new(|| Mutex::new(RunStats::default()));
 
 fn eval_once<B: LoopBackend>(
     cfg: &Loop1Config,
-    timeout: Duration,
+    timeout: Option<Duration>,
     backend: &mut B,
     words: &[u32],
 ) -> RunStats {
@@ -177,7 +178,8 @@ fn eval_once<B: LoopBackend>(
     let signal_sig = canonical_bucket_sig(&signal_sigs);
     let backend_timed_out =
         backend_error.as_deref().map(|e| e.contains("timed out")).unwrap_or(false);
-    let timed_out = start.elapsed() > timeout || backend_timed_out;
+    let eval_duration = start.elapsed();
+    let timed_out = timeout.map(|limit| eval_duration > limit).unwrap_or(false) || backend_timed_out;
 
     RunStats {
         eval_id: 0,
@@ -196,11 +198,19 @@ fn eval_once<B: LoopBackend>(
         baseline_bucket_hits_sig: None,
         underconstrained_candidate: false,
         skip_reason: None,
+        eval_duration_ms: eval_duration.as_millis() as u64,
     }
 }
 
 fn now_ts_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs()
+}
+
+fn now_ts_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(0))
+        .as_millis() as u64
 }
 
 fn decode_words_from_input(input: &BytesInput, max_instructions: usize) -> Vec<u32> {
@@ -317,6 +327,8 @@ struct BucketNoveltyFeedback {
     bug_writer: JsonlWriter,
     run_writer: JsonlWriter,
     cfg: Loop1Config,
+    run_started_at_ms: u64,
+    run_start: Instant,
     name: std::borrow::Cow<'static, str>,
     written_bug_keys: HashSet<String>,
 }
@@ -327,6 +339,8 @@ impl BucketNoveltyFeedback {
         bug_writer: JsonlWriter,
         run_writer: JsonlWriter,
         cfg: Loop1Config,
+        run_started_at_ms: u64,
+        run_start: Instant,
     ) -> Self {
         Self {
             seen: HashSet::new(),
@@ -335,6 +349,8 @@ impl BucketNoveltyFeedback {
             bug_writer,
             run_writer,
             cfg,
+            run_started_at_ms,
+            run_start,
             name: "BucketNoveltyFeedback".into(),
             written_bug_keys: HashSet::new(),
         }
@@ -374,6 +390,7 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
         let has_exception = !stats.injected_phase
             && (stats.timed_out || stats.backend_error.is_some() || stats.oracle_error.is_some());
         let is_bug = baseline_mismatch || has_exception || underconstrained_candidate;
+        let elapsed_ms = self.run_start.elapsed().as_millis() as u64;
         if is_bug {
             let words = decode_words_from_input(input, 2048);
             let kind = if has_exception {
@@ -407,6 +424,9 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
                     zkvm_commit: self.cfg.zkvm_commit.clone(),
                     rng_seed: self.cfg.rng_seed,
                     timeout_ms: self.cfg.timeout_ms,
+                    run_started_at_ms: self.run_started_at_ms,
+                    elapsed_ms,
+                    eval_duration_ms: stats.eval_duration_ms,
                     timed_out: stats.timed_out,
                     bucket_hits_sig: stats.bucket_hits_sig.clone(),
                     signal_sig: stats.signal_sig.clone(),
@@ -451,6 +471,9 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
             zkvm_commit: self.cfg.zkvm_commit.clone(),
             rng_seed: self.cfg.rng_seed,
             timeout_ms: self.cfg.timeout_ms,
+            run_started_at_ms: self.run_started_at_ms,
+            elapsed_ms,
+            eval_duration_ms: stats.eval_duration_ms,
             eval_id: stats.eval_id,
             timed_out: stats.timed_out,
             bucket_hits_sig: stats.bucket_hits_sig.clone(),
@@ -484,6 +507,9 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
             zkvm_commit: self.cfg.zkvm_commit.clone(),
             rng_seed: self.cfg.rng_seed,
             timeout_ms: self.cfg.timeout_ms,
+            run_started_at_ms: self.run_started_at_ms,
+            elapsed_ms,
+            eval_duration_ms: stats.eval_duration_ms,
             timed_out: stats.timed_out,
             mismatch: baseline_mismatch,
             bucket_hits_sig: sig,
@@ -578,6 +604,8 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     let corpus_writer = JsonlWriter::open_append(&corpus_path)?;
     let bug_writer = JsonlWriter::open_append(&bugs_path)?;
     let run_writer = JsonlWriter::open_append(&runs_path)?;
+    let run_started_at_ms = now_ts_millis();
+    let run_start = Instant::now();
 
     // --- libAFL setup ---
     let rand = StdRand::with_seed(cfg.rng_seed);
@@ -589,6 +617,8 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
         bug_writer.clone(),
         run_writer.clone(),
         cfg.clone(),
+        run_started_at_ms,
+        run_start,
     );
     let mut objective = NeverObjective::new();
     let mut state: LoopState =
@@ -622,7 +652,7 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     let mut eval_id_counter: u64 = 0;
 
     // Executor harness: run backend execution, collect trace/eval, and compare regs.
-    let timeout = Duration::from_millis(cfg.timeout_ms);
+    let timeout = (cfg.timeout_ms > 0).then(|| Duration::from_millis(cfg.timeout_ms));
     let mut harness = |input: &BytesInput| -> ExitKind {
         eval_id_counter = eval_id_counter.saturating_add(1);
         let eval_id = eval_id_counter;

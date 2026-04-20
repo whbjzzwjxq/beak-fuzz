@@ -445,7 +445,7 @@ impl BenchmarkBackend for Sp1Backend {
     }
 
     fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
-        let timeout = Duration::from_millis(self.timeout_ms);
+        let timeout = (self.timeout_ms > 0).then(|| Duration::from_millis(self.timeout_ms));
         self.eval.backend_error = None;
         self.eval.bucket_hits.clear();
         self.eval.micro_op_count = 0;
@@ -480,21 +480,27 @@ impl BenchmarkBackend for Sp1Backend {
 
         let started = Instant::now();
         let resp = loop {
-            let elapsed = started.elapsed();
-            if elapsed >= timeout {
-                self.stop_worker();
-                let msg = format!(
-                    "backend trace build timed out after {} ms (worker killed)",
-                    self.timeout_ms
-                );
-                self.eval.backend_error = Some(msg.clone());
-                return Err(msg);
-            }
-            let remaining = timeout - elapsed;
             let recv = {
                 let worker =
                     self.worker.as_ref().ok_or_else(|| "backend worker unavailable".to_string())?;
-                worker.responses_rx.recv_timeout(remaining)
+                if let Some(limit) = timeout {
+                    let elapsed = started.elapsed();
+                    if elapsed >= limit {
+                        self.stop_worker();
+                        let msg = format!(
+                            "backend trace build timed out after {} ms (worker killed)",
+                            self.timeout_ms
+                        );
+                        self.eval.backend_error = Some(msg.clone());
+                        return Err(msg);
+                    }
+                    worker.responses_rx.recv_timeout(limit.saturating_sub(elapsed))
+                } else {
+                    worker
+                        .responses_rx
+                        .recv()
+                        .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                }
             };
             match recv {
                 Ok(Ok(resp)) => {

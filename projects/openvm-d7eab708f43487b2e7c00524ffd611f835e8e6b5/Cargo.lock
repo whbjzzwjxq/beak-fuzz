@@ -2284,7 +2284,6 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde-big-array",
- "serde_json",
  "static_assertions",
  "thiserror 1.0.69",
  "tracing",
@@ -2729,7 +2728,6 @@ dependencies = [
  "openvm-stark-backend",
  "rand 0.8.5",
  "serde",
- "serde_json",
  "strum 0.26.3",
 ]
 

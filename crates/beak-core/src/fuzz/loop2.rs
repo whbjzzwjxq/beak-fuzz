@@ -29,6 +29,7 @@ struct DirectRunStats {
     backend_error: Option<String>,
     oracle_error: Option<String>,
     timed_out: bool,
+    eval_duration_ms: u64,
 }
 
 fn injection_kind_is_noop_prefix(kind: Option<&str>) -> bool {
@@ -53,6 +54,13 @@ fn colorize(text: &str, code: &str) -> String {
 
 fn now_ts_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs()
+}
+
+fn now_ts_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(0))
+        .as_millis() as u64
 }
 
 fn decode_words_from_input(input: &BytesInput, max_instructions: usize) -> Vec<u32> {
@@ -192,7 +200,10 @@ fn run_single_eval<B: LoopBackend>(
     let signal_sig = canonical_bucket_sig(&signal_sigs);
     let backend_timed_out =
         backend_error.as_deref().map(|e| e.contains("timed out")).unwrap_or(false);
-    let timed_out = start.elapsed() > Duration::from_millis(cfg.timeout_ms) || backend_timed_out;
+    let eval_duration = start.elapsed();
+    let timed_out = ((cfg.timeout_ms > 0)
+        && eval_duration > Duration::from_millis(cfg.timeout_ms))
+        || backend_timed_out;
 
     DirectRunStats {
         bucket_hits_sig: sig,
@@ -203,6 +214,7 @@ fn run_single_eval<B: LoopBackend>(
         backend_error,
         oracle_error,
         timed_out,
+        eval_duration_ms: eval_duration.as_millis() as u64,
     }
 }
 
@@ -247,6 +259,8 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
     let bugs_path = cfg.out_dir.join(format!("{prefix}-bugs.jsonl"));
     let corpus_writer = JsonlWriter::open_append(&corpus_path)?;
     let bug_writer = JsonlWriter::open_append(&bugs_path)?;
+    let run_started_at_ms = now_ts_millis();
+    let run_start = Instant::now();
 
     let seeds = load_initial_seeds(&cfg.seeds_jsonl, cfg.max_instructions, &|words| {
         backend.is_usable_seed(words)
@@ -317,10 +331,14 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
                 "has_direct_injection_target".to_string(),
                 json!(has_direct_injection_target),
             );
+            let elapsed_ms = run_start.elapsed().as_millis() as u64;
             let corpus = CorpusRecord {
                 zkvm_commit: cfg.zkvm_commit.clone(),
                 rng_seed: cfg.rng_seed,
                 timeout_ms: cfg.timeout_ms,
+                run_started_at_ms,
+                elapsed_ms,
+                eval_duration_ms: stats.eval_duration_ms,
                 timed_out: stats.timed_out,
                 mismatch: baseline_mismatch,
                 bucket_hits_sig: stats.bucket_hits_sig.clone(),
@@ -354,6 +372,9 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
                     zkvm_commit: cfg.zkvm_commit.clone(),
                     rng_seed: cfg.rng_seed,
                     timeout_ms: cfg.timeout_ms,
+                    run_started_at_ms,
+                    elapsed_ms,
+                    eval_duration_ms: stats.eval_duration_ms,
                     timed_out: stats.timed_out,
                     bucket_hits_sig: stats.bucket_hits_sig.clone(),
                     signal_sig: stats.signal_sig.clone(),

@@ -103,6 +103,15 @@ fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
     }
 }
 
+fn inject_variant_param_usize(kind: &str, key: &str) -> Option<usize> {
+    kind.split_once("::").and_then(|(_, variant)| {
+        variant.split(',').find_map(|part| {
+            let (k, v) = part.split_once('=')?;
+            (k == key).then(|| v.parse::<usize>().ok()).flatten()
+        })
+    })
+}
+
 pub fn run_backend_once(
     request_id: u64,
     words: &[u32],
@@ -119,6 +128,16 @@ pub fn run_backend_once(
         }
         _ => {
             std::env::remove_var("BEAK_OPENVM_ENABLE_O8");
+        }
+    }
+    match inject_kind {
+        Some(kind) if !kind.is_empty() => {
+            std::env::set_var("BEAK_OPENVM_WITNESS_INJECT_KIND", kind);
+            std::env::set_var("BEAK_OPENVM_WITNESS_INJECT_STEP", inject_step.to_string());
+        }
+        _ => {
+            std::env::remove_var("BEAK_OPENVM_WITNESS_INJECT_KIND");
+            std::env::remove_var("BEAK_OPENVM_WITNESS_INJECT_STEP");
         }
     }
     fuzzer_utils::configure_witness_injection(inject_kind, inject_step);
@@ -239,6 +258,23 @@ pub fn run_backend_once(
                 } else {
                     steps.contains(&inject_step)
                 }
+            })
+            .or_else(|| {
+                inject_kind.and_then(|kind| {
+                    (base_inject_kind(kind) == "openvm.semantic.lookup.xor_multiplicity_consistency")
+                        .then(|| {
+                            let rank = inject_variant_param_usize(kind, "rank").unwrap_or(0);
+                            let xor_hits = eval
+                                .bucket_hits
+                                .iter()
+                                .filter(|hit| {
+                                    hit.bucket_id
+                                        == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id
+                                })
+                                .count();
+                            rank < xor_hits
+                        })
+                })
             })
             .unwrap_or(false);
 
@@ -729,7 +765,7 @@ impl BenchmarkBackend for OpenVmBackend {
     }
 
     fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
-        let timeout = Duration::from_millis(self.timeout_ms);
+        let timeout = (self.timeout_ms > 0).then(|| Duration::from_millis(self.timeout_ms));
         self.eval.backend_error = None;
         self.eval.bucket_hits.clear();
         self.eval.micro_op_count = 0;
@@ -763,22 +799,27 @@ impl BenchmarkBackend for OpenVmBackend {
 
         let started = Instant::now();
         let worker_resp = loop {
-            let elapsed = started.elapsed();
-            if elapsed >= timeout {
-                self.stop_worker();
-                let msg = format!(
-                    "backend trace build timed out after {} ms (worker killed)",
-                    self.timeout_ms
-                );
-                self.eval.backend_error = Some(msg.clone());
-                return Err(msg);
-            }
-
-            let remaining = timeout - elapsed;
             let recv = {
                 let worker =
                     self.worker.as_ref().ok_or_else(|| "backend worker unavailable".to_string())?;
-                worker.responses_rx.recv_timeout(remaining)
+                if let Some(limit) = timeout {
+                    let elapsed = started.elapsed();
+                    if elapsed >= limit {
+                        self.stop_worker();
+                        let msg = format!(
+                            "backend trace build timed out after {} ms (worker killed)",
+                            self.timeout_ms
+                        );
+                        self.eval.backend_error = Some(msg.clone());
+                        return Err(msg);
+                    }
+                    worker.responses_rx.recv_timeout(limit.saturating_sub(elapsed))
+                } else {
+                    worker
+                        .responses_rx
+                        .recv()
+                        .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                }
             };
             match recv {
                 Ok(Ok(resp)) => {

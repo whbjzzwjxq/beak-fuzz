@@ -12,6 +12,29 @@ use sp1_sdk::{ProverClient, SP1Proof, SP1Stdin, SP1VerifyingKey, SP1ProvingKey};
 pub const DIV_REM_BOUND_INJECT_KIND: &str =
     "sp1.semantic.arithmetic.division_remainder_bound::mode=decrement_quotient_increment_remainder";
 const DIV_REM_BOUND_BASE_KIND: &str = "sp1.semantic.arithmetic.division_remainder_bound";
+const PROGRAM_CARGO_TOML: &str = r#"[workspace]
+[package]
+name = "beak-uint256-div"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sp1-zkvm = { path = "../../zkvm/entrypoint" }
+sp1-derive = { path = "../../derive" }
+"#;
+const PROGRAM_MAIN_RS: &str = r#"#![no_main]
+sp1_zkvm::entrypoint!(main);
+
+use sp1_zkvm::io;
+use sp1_zkvm::precompiles::uint256_div::uint256_div;
+
+fn main() {
+    let mut dividend = io::read::<[u8; 32]>();
+    let divisor = io::read::<[u8; 32]>();
+    let quotient = uint256_div(&mut dividend, &divisor);
+    io::commit(&quotient);
+}
+"#;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SupportedBucket {
@@ -127,12 +150,54 @@ fn program_dir() -> PathBuf {
     sp1_checkout_root().join("tests").join("beak-uint256-div")
 }
 
-fn built_elf_path() -> PathBuf {
-    program_dir()
-        .join("target")
-        .join("riscv32im-succinct-zkvm-elf")
-        .join("release")
-        .join("beak-uint256-div")
+fn built_elf_paths() -> [PathBuf; 5] {
+    [
+        program_dir()
+            .join("elf")
+            .join("riscv32im-succinct-zkvm-elf"),
+        workspace_root()
+            .join("projects")
+            .join(format!("sp1-{}", crate::SP1_COMMIT))
+            .join("target")
+            .join("riscv32im-succinct-zkvm-elf")
+            .join("release")
+            .join("beak-uint256-div"),
+        program_dir()
+            .join("target")
+            .join("riscv32im-succinct-zkvm-elf")
+            .join("release")
+            .join("beak-uint256-div"),
+        sp1_checkout_root()
+            .join("tests")
+            .join("uint256-div")
+            .join("elf")
+            .join("riscv32im-succinct-zkvm-elf"),
+        sp1_checkout_root()
+            .join("tests")
+            .join("uint256-div")
+            .join("target")
+            .join("riscv32im-succinct-zkvm-elf")
+            .join("release")
+            .join("uint256-div"),
+    ]
+}
+
+fn ensure_program_source() -> Result<(), String> {
+    let program = program_dir();
+    let src = program.join("src");
+    fs::create_dir_all(&src)
+        .map_err(|e| format!("failed to create guest scaffold {}: {e}", src.display()))?;
+    let cargo_toml = program.join("Cargo.toml");
+    if !cargo_toml.exists() {
+        fs::write(&cargo_toml, PROGRAM_CARGO_TOML)
+            .map_err(|e| format!("failed to write {}: {e}", cargo_toml.display()))?;
+    }
+    let main_rs = src.join("main.rs");
+    if !main_rs.exists() {
+        fs::write(&main_rs, PROGRAM_MAIN_RS)
+            .map_err(|e| format!("failed to write {}: {e}", main_rs.display()))?;
+    }
+    Ok(())
 }
 
 fn supported_bucket() -> SupportedBucket {
@@ -145,23 +210,22 @@ fn supported_bucket() -> SupportedBucket {
 }
 
 fn ensure_program_elf() -> Result<Vec<u8>, String> {
-    let program = program_dir();
-    if !program.join("Cargo.toml").exists() {
-        return Err(format!(
-            "missing benchmark guest at {}; run `sp1-fuzzer install --commit-or-branch {}` first",
-            program.display(),
-            crate::SP1_COMMIT
-        ));
-    }
+    ensure_program_source()?;
 
-    let elf = built_elf_path();
-    if !elf.exists() {
+    let program = program_dir();
+    let elf_paths = built_elf_paths();
+    if !elf_paths.iter().any(|path| path.exists()) {
         let rustflags = "-C\x1flink-arg=-Ttext=0x00200800\x1f-C\x1fpanic=abort";
-        let status = Command::new("cargo")
+        let mut command = Command::new("cargo");
+        command
             .current_dir(&program)
             .env("RUSTUP_TOOLCHAIN", "succinct")
             .env("CARGO_ENCODED_RUSTFLAGS", rustflags)
-            .args(["build", "--release", "--target", "riscv32im-succinct-zkvm-elf", "--locked"])
+            .args(["build", "--release", "--target", "riscv32im-succinct-zkvm-elf"]);
+        if program.join("Cargo.lock").exists() {
+            command.arg("--locked");
+        }
+        let status = command
             .status()
             .map_err(|e| format!("failed to spawn guest cargo build: {e}"))?;
         if !status.success() {
@@ -172,6 +236,21 @@ fn ensure_program_elf() -> Result<Vec<u8>, String> {
         }
     }
 
+    let elf = elf_paths
+        .into_iter()
+        .find(|path| path.exists())
+        .ok_or_else(|| {
+            let searched = built_elf_paths()
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "guest ELF was not produced under {} (searched: {})",
+                program.display(),
+                searched
+            )
+        })?;
     fs::read(&elf).map_err(|e| format!("failed to read ELF {}: {e}", elf.display()))
 }
 
@@ -258,15 +337,26 @@ pub fn run_comparison(
     let divisor = bytes32_from_u64(divisor);
 
     let baseline = execute_once(&client, &elf, dividend, divisor)?;
-    let injected = prove_once(
+    let configured_inject_kind = inject_kind.or(Some(DIV_REM_BOUND_INJECT_KIND));
+    let injected = match prove_once(
         &client,
         &pk,
         &vk,
         dividend,
         divisor,
-        inject_kind.or(Some(DIV_REM_BOUND_INJECT_KIND)),
+        configured_inject_kind,
         inject_step,
-    )?;
+    ) {
+        Ok(run) => run,
+        Err(_) => execute_once_with_injection(
+            &client,
+            &elf,
+            dividend,
+            divisor,
+            configured_inject_kind,
+            inject_step,
+        )?,
+    };
 
     let diverged = baseline.quotient_bytes != injected.quotient_bytes;
     Ok(ScenarioComparison {

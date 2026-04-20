@@ -17,7 +17,6 @@ use openvm_sdk::config::{AppConfig, SdkVmConfig};
 use openvm_sdk::prover::AppProver;
 use openvm_sdk::{Sdk, StdIn, F};
 use openvm_transpiler::transpiler::Transpiler;
-use p3_field::PrimeField32;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -164,7 +163,7 @@ pub fn run_backend_once(
     let mut regs = [0u32; 32];
     for i in 0..32u32 {
         let limbs = state.get_range::<4>(&(RV32_REGISTER_AS, i * 4));
-        let bytes: [u8; 4] = limbs.map(|x| x.as_canonical_u32() as u8);
+        let bytes: [u8; 4] = limbs.map(|x| x.to_string().parse::<u8>().expect("field byte limb"));
         regs[i as usize] = u32::from_le_bytes(bytes);
     }
     eval.final_regs = Some(regs);
@@ -650,7 +649,7 @@ impl BenchmarkBackend for OpenVmBackend {
     }
 
     fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
-        let timeout = Duration::from_millis(self.timeout_ms);
+        let timeout = (self.timeout_ms > 0).then(|| Duration::from_millis(self.timeout_ms));
         self.eval.backend_error = None;
         self.eval.bucket_hits.clear();
         self.eval.micro_op_count = 0;
@@ -684,22 +683,27 @@ impl BenchmarkBackend for OpenVmBackend {
 
         let started = Instant::now();
         let worker_resp = loop {
-            let elapsed = started.elapsed();
-            if elapsed >= timeout {
-                self.stop_worker();
-                let msg = format!(
-                    "backend trace build timed out after {} ms (worker killed)",
-                    self.timeout_ms
-                );
-                self.eval.backend_error = Some(msg.clone());
-                return Err(msg);
-            }
-
-            let remaining = timeout - elapsed;
             let recv = {
                 let worker =
                     self.worker.as_ref().ok_or_else(|| "backend worker unavailable".to_string())?;
-                worker.responses_rx.recv_timeout(remaining)
+                if let Some(limit) = timeout {
+                    let elapsed = started.elapsed();
+                    if elapsed >= limit {
+                        self.stop_worker();
+                        let msg = format!(
+                            "backend trace build timed out after {} ms (worker killed)",
+                            self.timeout_ms
+                        );
+                        self.eval.backend_error = Some(msg.clone());
+                        return Err(msg);
+                    }
+                    worker.responses_rx.recv_timeout(limit.saturating_sub(elapsed))
+                } else {
+                    worker
+                        .responses_rx
+                        .recv()
+                        .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+                }
             };
             match recv {
                 Ok(Ok(resp)) => {

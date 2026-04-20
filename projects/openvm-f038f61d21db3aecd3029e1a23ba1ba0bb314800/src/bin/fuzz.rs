@@ -144,7 +144,7 @@ fn main() {
         .arg(
             Arg::new("oracle_precheck_max_steps")
                 .long("oracle-precheck-max-steps")
-                .default_value("400")
+                .default_value("32")
                 .help("Oracle pre-check step cap; if oracle reaches this bound, skip backend for this input. Set 0 to disable."),
         )
         .arg(

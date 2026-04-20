@@ -4,13 +4,23 @@ import argparse
 from pathlib import Path
 
 from nexus_fuzzer.settings import NEXUS_BENCHMARK_COMMIT, resolve_nexus_commit
+from nexus_fuzzer.utils_install import clone_and_checkout_nexus
+from zkvm_fuzzer_utils.snapshot_install import (
+    apply_pass_pipeline,
+    default_snapshot_out_root,
+    maybe_warn_on_nondefault_out_root,
+    resolve_snapshot_out_root,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="nexus-fuzzer", description="Nexus installer entrypoint.")
     sp = ap.add_subparsers(dest="command", required=True)
 
-    install = sp.add_parser("install", help="Materialize Nexus snapshot into out/.")
+    install = sp.add_parser(
+        "install",
+        help="Materialize Nexus snapshot into the repo-local beak-py/out/ by default.",
+    )
     install.add_argument(
         "--commit-or-branch",
         type=str,
@@ -20,8 +30,8 @@ def _build_parser() -> argparse.ArgumentParser:
     install.add_argument(
         "--out-root",
         type=Path,
-        default=Path("out"),
-        help="Output root (default: ./out).",
+        default=None,
+        help=f"Output root (default: {default_snapshot_out_root()}).",
     )
     install.add_argument(
         "--zkvm-src",
@@ -33,26 +43,22 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _install(args: argparse.Namespace) -> int:
-    from nexus_fuzzer.utils_install import clone_and_checkout_nexus
-    from nexus_fuzzer.passes import pass1_infrastructure, pass2_bypass_checks, pass3_collection
-
     resolved = resolve_nexus_commit(args.commit_or_branch)
-    dest = (args.out_root / f"nexus-{resolved}" / "nexus-src").expanduser().resolve()
-    dest = clone_and_checkout_nexus(
+    out_root = resolve_snapshot_out_root(args.out_root)
+    if args.out_root is not None:
+        maybe_warn_on_nondefault_out_root(out_root)
+    dest = (out_root / f"nexus-{resolved}" / "nexus-src").expanduser().resolve()
+    clone_and_checkout_nexus(
         dest=dest,
         commit_or_branch=resolved,
         zkvm_src=args.zkvm_src,
     )
-
-    print("Applying Pass 1/3 (infrastructure)...")
-    pass1_infrastructure.apply(nexus_install_path=dest, commit_or_branch=resolved)
-
-    print("Applying Pass 2/3 (bypass checks)...")
-    pass2_bypass_checks.apply(nexus_install_path=dest, commit_or_branch=resolved)
-
-    print("Applying Pass 3/3 (collection)...")
-    pass3_collection.apply(nexus_install_path=dest, commit_or_branch=resolved)
-
+    apply_pass_pipeline(
+        package_name="nexus_fuzzer",
+        install_path_kw="nexus_install_path",
+        install_path=dest,
+        commit_or_branch=resolved,
+    )
     print("Nexus snapshot staged for beak.")
     print(dest)
     return 0

@@ -142,7 +142,7 @@ fn main() {
         .arg(
             Arg::new("oracle_precheck_max_steps")
                 .long("oracle-precheck-max-steps")
-                .default_value("0")
+                .default_value("32")
                 .help("If > 0, run a cheap oracle step-bounded precheck and skip likely non-terminating seeds."),
         )
         .arg(

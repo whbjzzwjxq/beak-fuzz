@@ -23,7 +23,6 @@ serde_json = "1"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2"
 strum = { version = "0.27", features = ["derive"] }
-p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "88d7f05" }
 
 # OpenVM path dependencies (scoped to one specific commit)
 fuzzer_utils = { path = "../../beak-py/out/openvm-f038f61d21db3aecd3029e1a23ba1ba0bb314800/openvm-src/crates/fuzzer_utils" }
@@ -32,3 +31,4 @@ openvm-circuit = { path = "../../beak-py/out/openvm-f038f61d21db3aecd3029e1a23ba
 openvm-transpiler = { path = "../../beak-py/out/openvm-f038f61d21db3aecd3029e1a23ba1ba0bb314800/openvm-src/crates/toolchain/transpiler" }
 openvm-rv32im-transpiler = { path = "../../beak-py/out/openvm-f038f61d21db3aecd3029e1a23ba1ba0bb314800/openvm-src/extensions/rv32im/transpiler" }
 openvm-instructions = { path = "../../beak-py/out/openvm-f038f61d21db3aecd3029e1a23ba1ba0bb314800/openvm-src/crates/toolchain/instructions" }
+openvm-stark-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v1.0.0-rc.0" }

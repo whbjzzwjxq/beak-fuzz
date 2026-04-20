@@ -40,6 +40,14 @@ use openvm_instructions::{
 pub const NUM_LIMBS: usize = 4;
 pub const LIMB_BITS: usize = 8;
 
+fn base_injection_kind(kind: &str) -> &str {
+    kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
+}
+
+fn injection_variant(kind: &str) -> Option<&str> {
+    kind.split_once("::").map(|(_, variant)| variant)
+}
+
 ////////////////
 // GLOBAL STATE
 /////////
@@ -87,6 +95,7 @@ pub struct GlobalState {
     pub injection_step: u64,
     pub witness_step_idx: u64,
     pub observed_witness_sites: BTreeMap<String, Vec<u64>>,
+    pub applied_witness_sites: BTreeMap<String, Vec<u64>>,
     pub assertions_enabled: bool,
 
     pub rng: StdRng,
@@ -118,6 +127,7 @@ impl GlobalState {
             injection_step,
             witness_step_idx: 0,
             observed_witness_sites: BTreeMap::new(),
+            applied_witness_sites: BTreeMap::new(),
             assertions_enabled: false,
             rng: StdRng::seed_from_u64(0),
             seed: 0,
@@ -141,6 +151,7 @@ impl GlobalState {
         self.last_row_id = None;
         self.witness_step_idx = 0;
         self.observed_witness_sites.clear();
+        self.applied_witness_sites.clear();
         // Canonicalize Value trees before handing them out.
         //
         // We observed a serde edge case where a small subset of in-memory `Value`s may fail
@@ -169,12 +180,38 @@ impl GlobalState {
         }
     }
 
+    fn note_applied_witness_site(&mut self, kind: &str, step: u64) {
+        let sites = self.applied_witness_sites.entry(kind.to_string()).or_default();
+        if sites.last().copied() != Some(step) {
+            sites.push(step);
+        }
+    }
+
     pub fn should_inject_witness(&self, kind: &str, step: u64) -> bool {
-        self.injection_enabled && self.injection_kind == kind && self.injection_step == step
+        self.injection_enabled
+            && base_injection_kind(self.injection_kind.as_str()) == kind
+            && (self.injection_step == step || self.injection_step == u64::MAX)
+    }
+
+    pub fn matching_injection_kind(&self, kind: &str, step: u64) -> Option<String> {
+        self.should_inject_witness(kind, step)
+            .then(|| self.injection_kind.clone())
+    }
+
+    pub fn active_witness_variant(&self, kind: &str) -> Option<String> {
+        self.injection_enabled
+            .then(|| base_injection_kind(self.injection_kind.as_str()) == kind)
+            .filter(|matched| *matched)
+            .and_then(|_| injection_variant(self.injection_kind.as_str()))
+            .map(str::to_string)
     }
 
     pub fn take_observed_witness_sites(&mut self) -> BTreeMap<String, Vec<u64>> {
         std::mem::take(&mut self.observed_witness_sites)
+    }
+
+    pub fn take_applied_witness_sites(&mut self) -> BTreeMap<String, Vec<u64>> {
+        std::mem::take(&mut self.applied_witness_sites)
     }
 
     pub fn configure_witness_injection(&mut self, kind: Option<&str>, step: u64) {
@@ -885,7 +922,22 @@ pub fn next_witness_step() -> u64 {
 pub fn should_inject_witness(kind: &str, step: u64) -> bool {
     let mut state = GLOBAL_STATE.lock().unwrap();
     state.note_witness_site(kind, step);
-    state.should_inject_witness(kind, step)
+    let should_inject = state.should_inject_witness(kind, step);
+    if should_inject {
+        state.note_applied_witness_site(kind, step);
+    }
+    should_inject
+}
+
+pub fn matching_injection_kind(kind: &str, step: u64) -> Option<String> {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.note_witness_site(kind, step);
+    state.matching_injection_kind(kind, step)
+}
+
+pub fn active_witness_variant(kind: &str) -> Option<String> {
+    let state = GLOBAL_STATE.lock().unwrap();
+    state.active_witness_variant(kind)
 }
 
 pub fn configure_witness_injection(kind: Option<&str>, step: u64) {
@@ -901,6 +953,11 @@ pub fn take_json_logs() -> Vec<serde_json::Value> {
 pub fn take_observed_witness_sites() -> BTreeMap<String, Vec<u64>> {
     let mut state = GLOBAL_STATE.lock().unwrap();
     state.take_observed_witness_sites()
+}
+
+pub fn take_applied_witness_sites() -> BTreeMap<String, Vec<u64>> {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.take_applied_witness_sites()
 }
 
 pub fn emit_base_alu_chip_row<const N: usize>(

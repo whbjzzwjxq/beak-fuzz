@@ -8,13 +8,23 @@ from pico_fuzzer.settings import (
     PICO_BENCHMARK_45E74_COMMIT,
     resolve_pico_commit,
 )
+from pico_fuzzer.utils_install import clone_and_checkout_pico
+from zkvm_fuzzer_utils.snapshot_install import (
+    apply_pass_pipeline,
+    default_snapshot_out_root,
+    maybe_warn_on_nondefault_out_root,
+    resolve_snapshot_out_root,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="pico-fuzzer", description="Pico installer entrypoint.")
     sp = ap.add_subparsers(dest="command", required=True)
 
-    install = sp.add_parser("install", help="Materialize Pico snapshot into out/.")
+    install = sp.add_parser(
+        "install",
+        help="Materialize Pico snapshot into the repo-local beak-py/out/ by default.",
+    )
     install.add_argument(
         "--commit-or-branch",
         type=str,
@@ -25,30 +35,26 @@ def _build_parser() -> argparse.ArgumentParser:
     install.add_argument(
         "--out-root",
         type=Path,
-        default=Path("out"),
-        help="Output root (default: ./out).",
+        default=None,
+        help=f"Output root (default: {default_snapshot_out_root()}).",
     )
     return ap
 
 
 def _install(args: argparse.Namespace) -> int:
-    from pico_fuzzer.utils_install import clone_and_checkout_pico
-    from pico_fuzzer.passes import pass1_infrastructure, pass2_bypass_checks, pass3_collection
-
     resolved = resolve_pico_commit(args.commit_or_branch)
-    dest = (args.out_root / f"pico-{resolved}" / "pico-src").expanduser().resolve()
-    dest = clone_and_checkout_pico(dest=dest, commit_or_branch=resolved)
-
-    print("Applying Pass 1/3 (infrastructure)...")
-    pass1_infrastructure.apply(pico_install_path=dest, commit_or_branch=resolved)
-
-    print("Applying Pass 2/3 (bypass checks)...")
-    pass2_bypass_checks.apply(pico_install_path=dest, commit_or_branch=resolved)
-
-    print("Applying Pass 3/3 (collection)...")
-    pass3_collection.apply(pico_install_path=dest, commit_or_branch=resolved)
-
-    print("Pico snapshot patched for witness injection and collection.")
+    out_root = resolve_snapshot_out_root(args.out_root)
+    if args.out_root is not None:
+        maybe_warn_on_nondefault_out_root(out_root)
+    dest = (out_root / f"pico-{resolved}" / "pico-src").expanduser().resolve()
+    clone_and_checkout_pico(dest=dest, commit_or_branch=resolved)
+    apply_pass_pipeline(
+        package_name="pico_fuzzer",
+        install_path_kw="pico_install_path",
+        install_path=dest,
+        commit_or_branch=resolved,
+    )
+    print("Pico snapshot staged for beak.")
     print(dest)
     return 0
 
