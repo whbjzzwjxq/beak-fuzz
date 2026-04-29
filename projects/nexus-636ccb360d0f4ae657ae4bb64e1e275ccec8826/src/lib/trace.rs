@@ -1,5 +1,5 @@
 use beak_core::trace::observations::MemoryWriteObservation;
-use beak_core::trace::{BucketHit, Trace, semantic_matchers};
+use beak_core::trace::{semantic_matchers, BucketHit, Trace};
 use nexus_common::memory::MemoryRecord;
 use nexus_vm::trace::UniformTrace;
 

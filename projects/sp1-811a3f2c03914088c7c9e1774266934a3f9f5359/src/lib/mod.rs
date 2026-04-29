@@ -16,9 +16,7 @@ pub const SP1_COMMIT: &str = "811a3f2c03914088c7c9e1774266934a3f9f5359";
 pub const SP1_REPO_URL: &str = "https://github.com/succinctlabs/sp1.git";
 
 pub fn run_checked(cmd: &mut Command) -> Result<(), String> {
-    let status = cmd
-        .status()
-        .map_err(|e| format!("failed to spawn command: {e}"))?;
+    let status = cmd.status().map_err(|e| format!("failed to spawn command: {e}"))?;
     if status.success() {
         Ok(())
     } else {
@@ -27,9 +25,8 @@ pub fn run_checked(cmd: &mut Command) -> Result<(), String> {
 }
 
 pub fn ensure_sp1_checkout(zkvm_dir: &Path) -> Result<(), String> {
-    let parent = zkvm_dir
-        .parent()
-        .ok_or_else(|| format!("invalid zkvm dir: {}", zkvm_dir.display()))?;
+    let parent =
+        zkvm_dir.parent().ok_or_else(|| format!("invalid zkvm dir: {}", zkvm_dir.display()))?;
     fs::create_dir_all(parent).map_err(|e| format!("create parent dir failed: {e}"))?;
 
     if !zkvm_dir.join(".git").exists() {
@@ -39,24 +36,11 @@ pub fn ensure_sp1_checkout(zkvm_dir: &Path) -> Result<(), String> {
     }
 
     let mut fetch = Command::new("git");
-    fetch.args([
-        "-C",
-        zkvm_dir.to_string_lossy().as_ref(),
-        "fetch",
-        "--all",
-        "--tags",
-        "--prune",
-    ]);
+    fetch.args(["-C", zkvm_dir.to_string_lossy().as_ref(), "fetch", "--all", "--tags", "--prune"]);
     run_checked(&mut fetch).map_err(|e| format!("git fetch failed: {e}"))?;
 
     let mut checkout = Command::new("git");
-    checkout.args([
-        "-C",
-        zkvm_dir.to_string_lossy().as_ref(),
-        "checkout",
-        "--force",
-        SP1_COMMIT,
-    ]);
+    checkout.args(["-C", zkvm_dir.to_string_lossy().as_ref(), "checkout", "--force", SP1_COMMIT]);
     run_checked(&mut checkout).map_err(|e| format!("git checkout failed: {e}"))?;
     Ok(())
 }

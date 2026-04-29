@@ -47,7 +47,6 @@ class Case:
     name: str
     project_dir: str
     words: tuple[str, ...]
-    timeout_ms: int
     semantic_window_before: int
     semantic_window_after: int
     semantic_step_stride: int
@@ -60,7 +59,6 @@ CASES: dict[str, Case] = {
         name="openvm-336.o5",
         project_dir="projects/openvm-336f1a475e5aa3513c4c5a266399f4128c119bba",
         words=("01400313", "14001073", "14002573", "00000393", "00754533"),
-        timeout_ms=15000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -71,7 +69,6 @@ CASES: dict[str, Case] = {
         name="openvm-336.o7",
         project_dir="projects/openvm-336f1a475e5aa3513c4c5a266399f4128c119bba",
         words=("0badc297", "00000293"),
-        timeout_ms=15000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -90,7 +87,6 @@ CASES: dict[str, Case] = {
             "0ff00393",
             "00774533",
         ),
-        timeout_ms=15000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -101,7 +97,6 @@ CASES: dict[str, Case] = {
         name="openvm-336.o15",
         project_dir="projects/openvm-336f1a475e5aa3513c4c5a266399f4128c119bba",
         words=("00700313", "800005b7", "fff00613", "02c5c733", "800003b7", "00774533"),
-        timeout_ms=15000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -112,7 +107,6 @@ CASES: dict[str, Case] = {
         name="openvm-f038.o1",
         project_dir="projects/openvm-f038f61d21db3aecd3029e1a23ba1ba0bb314800",
         words=("14001073", "01400313", "14002573", "00000393", "00754533"),
-        timeout_ms=15000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -131,7 +125,6 @@ CASES: dict[str, Case] = {
             "0ff00393",
             "00774533",
         ),
-        timeout_ms=15000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -150,7 +143,6 @@ CASES: dict[str, Case] = {
             "0ff00393",
             "0ff00393",
         ),
-        timeout_ms=15000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -161,7 +153,6 @@ CASES: dict[str, Case] = {
         name="openvm-f038.o25",
         project_dir="projects/openvm-f038f61d21db3aecd3029e1a23ba1ba0bb314800",
         words=("01400313", "14001073", "00000393", "14002573", "00754533"),
-        timeout_ms=15000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -172,7 +163,6 @@ CASES: dict[str, Case] = {
         name="openvm-f038.o26",
         project_dir="projects/openvm-f038f61d21db3aecd3029e1a23ba1ba0bb314800",
         words=("01400313", "14001073", "14002573", "00000393", "00754533"),
-        timeout_ms=15000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -191,7 +181,6 @@ CASES: dict[str, Case] = {
             "0ff00393",
             "00774533",
         ),
-        timeout_ms=15000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -202,7 +191,6 @@ CASES: dict[str, Case] = {
         name="sp1-811.timestamp",
         project_dir="projects/sp1-811a3f2c03914088c7c9e1774266934a3f9f5359",
         words=("00100193", "27654137", "32012183"),
-        timeout_ms=30000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -213,7 +201,6 @@ CASES: dict[str, Case] = {
         name="sp1-811.bool",
         project_dir="projects/sp1-811a3f2c03914088c7c9e1774266934a3f9f5359",
         words=("27654137", "00100193", "32312023"),
-        timeout_ms=30000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -224,7 +211,6 @@ CASES: dict[str, Case] = {
         name="sp1-7f64.s27",
         project_dir="projects/sp1-7f643da16813af4c0fbaad4837cd7409386cf38c",
         words=("00012183",),
-        timeout_ms=15000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -235,7 +221,6 @@ CASES: dict[str, Case] = {
         name="sp1-7f64.s28",
         project_dir="projects/sp1-7f643da16813af4c0fbaad4837cd7409386cf38c",
         words=("00000073",),
-        timeout_ms=15000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -246,7 +231,6 @@ CASES: dict[str, Case] = {
         name="sp1-39ab.is_memory",
         project_dir="projects/sp1-39ab52fce38172c9d23feed7248198dc14c164a9",
         words=("00012183",),
-        timeout_ms=30000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -257,7 +241,6 @@ CASES: dict[str, Case] = {
         name="pico-45.timestamp",
         project_dir="projects/pico-45e74ccd62758c6d67239913956e749adaba261c",
         words=("00012083",),
-        timeout_ms=60000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -268,7 +251,6 @@ CASES: dict[str, Case] = {
         name="pico-45.bool",
         project_dir="projects/pico-45e74ccd62758c6d67239913956e749adaba261c",
         words=("00112023", "00012083"),
-        timeout_ms=60000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -343,8 +325,6 @@ def make_cmd(case: Case) -> list[str]:
         str(binary),
         "--bin",
         " ".join(case.words),
-        "--timeout-ms",
-        str(case.timeout_ms),
         "--semantic-window-before",
         str(case.semantic_window_before),
         "--semantic-window-after",
@@ -523,7 +503,6 @@ def summarize_case(
         "baseline": {
             "bucket_hits_sig": baseline.get("bucket_hits_sig") if baseline else None,
             "backend_error": baseline.get("backend_error") if baseline else None,
-            "timed_out": baseline.get("timed_out") if baseline else None,
         },
         "semantic_attempts_completed": semantic_attempts,
         "semantic_applied_attempts": semantic_applied_attempts,
@@ -557,7 +536,6 @@ def summarize_case(
             "semantic_injection_applied": ((first_semantic_bug or {}).get("metadata") or {}).get("semantic_injection_applied"),
             "bucket_hits_sig": (first_semantic_bug or {}).get("bucket_hits_sig"),
             "backend_error": (first_semantic_bug or {}).get("backend_error"),
-            "timed_out": (first_semantic_bug or {}).get("timed_out"),
         }
         if first_semantic_bug
         else None,
@@ -571,7 +549,6 @@ def summarize_case(
             "semantic_injection_applied": ((first_underconstrained or {}).get("metadata") or {}).get("semantic_injection_applied"),
             "bucket_hits_sig": (first_underconstrained or {}).get("bucket_hits_sig"),
             "backend_error": (first_underconstrained or {}).get("backend_error"),
-            "timed_out": (first_underconstrained or {}).get("timed_out"),
         }
         if first_underconstrained
         else None,
@@ -640,7 +617,7 @@ def main() -> None:
             case = CASES[name]
             print(
                 f"{name}: {case.project_dir} words={' '.join(case.words)} "
-                f"timeout_ms={case.timeout_ms} search={case.semantic_window_before}/{case.semantic_window_after}/{case.semantic_max_trials}"
+                f"search={case.semantic_window_before}/{case.semantic_window_after}/{case.semantic_max_trials}"
             )
         return
 

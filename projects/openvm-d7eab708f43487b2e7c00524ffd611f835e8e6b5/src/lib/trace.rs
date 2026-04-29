@@ -5,7 +5,7 @@ use beak_core::trace::observations::{
     ImmediateLimbObservation, MemoryAddressSpaceObservation, MemoryImmediateSignObservation,
     VolatileBoundaryObservation, XorMultiplicityObservation,
 };
-use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic_matchers};
+use beak_core::trace::{semantic_matchers, BucketHit, Trace, TraceSignal};
 use serde_json::Value;
 
 use crate::chip_row::{OpenVMChipRow, OpenVMChipRowKind, OpenVMChipRowPayload, Rs2Source};

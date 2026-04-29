@@ -8,24 +8,23 @@ use beak_core::rv32im::{
     instruction::RV32IMInstruction,
     oracle::{OracleConfig, OracleMemoryModel, RISCVOracle},
 };
-use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic};
+use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
 use risc0_binfmt::{MemoryImage, Program};
 use risc0_circuit_rv32im::{
-    MAX_INSN_CYCLES,
     execute::{
-        DEFAULT_SEGMENT_LIMIT_PO2,
-        Executor,
         platform::{
             HOST_ECALL_TERMINATE, MACHINE_REGS_ADDR, REG_A0, REG_A1, REG_A7, USER_REGS_ADDR,
             USER_START_ADDR, WORD_SIZE,
         },
         testutil::DEFAULT_SESSION_LIMIT,
+        Executor, DEFAULT_SEGMENT_LIMIT_PO2,
     },
+    prove::beak::{prove_segment_with_injection, BeakInjectionPlan},
     trace::{TraceCallback, TraceEvent},
-    prove::beak::{BeakInjectionPlan, prove_segment_with_injection},
+    MAX_INSN_CYCLES,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::trace::Risc0Trace;
 
@@ -51,10 +50,7 @@ fn base_inject_kind(kind: &str) -> &str {
 }
 
 fn semantic_replay_supported(kind: &str) -> bool {
-    !matches!(
-        base_inject_kind(kind),
-        ZERO_REGISTER_INJECT_KIND | RD_BITS_INJECT_KIND
-    )
+    !matches!(base_inject_kind(kind), ZERO_REGISTER_INJECT_KIND | RD_BITS_INJECT_KIND)
 }
 
 fn encode_i(imm: i32, rs1: u32, funct3: u32, rd: u32, opcode: u32) -> u32 {
@@ -89,10 +85,7 @@ fn build_program(words: &[u32]) -> Program {
         image.insert(entry + (idx as u32) * WORD_SIZE as u32, word);
     }
     for (idx, word) in termination_words().into_iter().enumerate() {
-        image.insert(
-            entry + ((words.len() + idx) as u32) * WORD_SIZE as u32,
-            word,
-        );
+        image.insert(entry + ((words.len() + idx) as u32) * WORD_SIZE as u32, word);
     }
     Program::new_from_entry_and_image(entry, image)
 }
@@ -101,18 +94,16 @@ fn execute_session(
     image: MemoryImage,
     max_cycles: Option<u64>,
     trace: Vec<Rc<RefCell<dyn TraceCallback>>>,
-) -> Result<(Vec<risc0_circuit_rv32im::execute::Segment>, risc0_circuit_rv32im::execute::ExecutorResult), String> {
+) -> Result<
+    (Vec<risc0_circuit_rv32im::execute::Segment>, risc0_circuit_rv32im::execute::ExecutorResult),
+    String,
+> {
     let mut segments = Vec::new();
     let result = Executor::new(image, &Risc0HostSyscall, None, trace)
-        .run(
-            DEFAULT_SEGMENT_LIMIT_PO2,
-            MAX_INSN_CYCLES,
-            max_cycles,
-            |segment| {
-                segments.push(segment);
-                Ok(())
-            },
-        )
+        .run(DEFAULT_SEGMENT_LIMIT_PO2, MAX_INSN_CYCLES, max_cycles, |segment| {
+            segments.push(segment);
+            Ok(())
+        })
         .map_err(|e| format!("risc0 execute failed: {e}"))?;
     Ok((segments, result))
 }
@@ -179,25 +170,24 @@ fn termination_start_cycle(words: &[u32]) -> Result<u64, String> {
     let termination_pc = risc0_entry_pc() + (words.len() as u32) * WORD_SIZE as u32;
     let cutoff = Rc::new(RefCell::new(None::<u64>));
     let cutoff_cb = cutoff.clone();
-    let trace_cb: Rc<RefCell<dyn TraceCallback>> = Rc::new(RefCell::new(move |event: TraceEvent| {
-        if let TraceEvent::InstructionStart { cycle, pc, .. } = event {
-            if pc == termination_pc && cutoff_cb.borrow().is_none() {
-                *cutoff_cb.borrow_mut() = Some(cycle);
+    let trace_cb: Rc<RefCell<dyn TraceCallback>> =
+        Rc::new(RefCell::new(move |event: TraceEvent| {
+            if let TraceEvent::InstructionStart { cycle, pc, .. } = event {
+                if pc == termination_pc && cutoff_cb.borrow().is_none() {
+                    *cutoff_cb.borrow_mut() = Some(cycle);
+                }
             }
-        }
-        Ok(())
-    }));
+            Ok(())
+        }));
     let _ = execute_session(image, DEFAULT_SESSION_LIMIT, vec![trace_cb])?;
     let observed = *cutoff.borrow();
     observed.ok_or_else(|| "risc0 trace did not reach synthetic termination stub".to_string())
 }
 
 fn original_ecall_start_cycle(words: &[u32]) -> Result<Option<u64>, String> {
-    let Some((idx, _)) = words
-        .iter()
-        .enumerate()
-        .find(|(_, word)| RV32IMInstruction::decode(**word).is_some_and(|dec| dec.mnemonic == "ecall"))
-    else {
+    let Some((idx, _)) = words.iter().enumerate().find(|(_, word)| {
+        RV32IMInstruction::decode(**word).is_some_and(|dec| dec.mnemonic == "ecall")
+    }) else {
         return Ok(None);
     };
 
@@ -206,14 +196,15 @@ fn original_ecall_start_cycle(words: &[u32]) -> Result<Option<u64>, String> {
     let ecall_pc = risc0_entry_pc() + (idx as u32) * WORD_SIZE as u32;
     let cutoff = Rc::new(RefCell::new(None::<u64>));
     let cutoff_cb = cutoff.clone();
-    let trace_cb: Rc<RefCell<dyn TraceCallback>> = Rc::new(RefCell::new(move |event: TraceEvent| {
-        if let TraceEvent::InstructionStart { cycle, pc, .. } = event {
-            if pc == ecall_pc && cutoff_cb.borrow().is_none() {
-                *cutoff_cb.borrow_mut() = Some(cycle);
+    let trace_cb: Rc<RefCell<dyn TraceCallback>> =
+        Rc::new(RefCell::new(move |event: TraceEvent| {
+            if let TraceEvent::InstructionStart { cycle, pc, .. } = event {
+                if pc == ecall_pc && cutoff_cb.borrow().is_none() {
+                    *cutoff_cb.borrow_mut() = Some(cycle);
+                }
             }
-        }
-        Ok(())
-    }));
+            Ok(())
+        }));
     let _ = execute_session(image, DEFAULT_SESSION_LIMIT, vec![trace_cb])?;
     let observed = *cutoff.borrow();
     Ok(observed)
@@ -231,7 +222,8 @@ fn final_regs_for_oracle(words: &[u32]) -> Result<[u32; 32], String> {
     if let Some(cutoff) = original_ecall_start_cycle(words)? {
         let program = build_program(words);
         let image = MemoryImage::new_kernel(program);
-        let (_segments, result) = execute_session(image, Some(cutoff.saturating_add(1)), Vec::new())?;
+        let (_segments, result) =
+            execute_session(image, Some(cutoff.saturating_add(1)), Vec::new())?;
         return final_regs_from_post_image(&result.post_image);
     }
     final_regs_before_termination(words)
@@ -271,8 +263,7 @@ fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
         } else if dec.rd.unwrap_or(0) != 0
             && !matches!(
                 dec.mnemonic.as_str(),
-                "sb"
-                    | "sh"
+                "sb" | "sh"
                     | "sw"
                     | "beq"
                     | "bne"
@@ -365,14 +356,14 @@ pub fn run_backend_once(
     let image = risc0_binfmt::MemoryImage::new_kernel(program);
     let (segments, _result) = execute_session(image, DEFAULT_SESSION_LIMIT, Vec::new())?;
 
-    let plan = inject_kind.map(|kind| BeakInjectionPlan { kind: kind.to_string(), step: inject_step });
+    let plan =
+        inject_kind.map(|kind| BeakInjectionPlan { kind: kind.to_string(), step: inject_step });
     let mut witness_mutation_observed = false;
 
     for segment in &segments {
         let (seal, applied) = prove_segment_with_injection(segment, plan.as_ref())
             .map_err(|e| format!("risc0 prove failed: {e}"))?;
-        risc0_circuit_rv32im::verify(&seal)
-            .map_err(|e| format!("risc0 verify failed: {e}"))?;
+        risc0_circuit_rv32im::verify(&seal).map_err(|e| format!("risc0 verify failed: {e}"))?;
         witness_mutation_observed |= applied;
     }
     let injection_applied = witness_mutation_observed;
@@ -409,7 +400,7 @@ pub struct Risc0Backend {
 }
 
 impl Risc0Backend {
-    pub fn new(max_instructions: usize, _timeout_ms: u64) -> Self {
+    pub fn new(max_instructions: usize) -> Self {
         Self {
             max_instructions,
             eval: BackendEval::default(),
@@ -425,16 +416,24 @@ impl Risc0Backend {
     fn semantic_candidate_from_hit(&self, hit: &BucketHit) -> Vec<SemanticInjectionCandidate> {
         let anchor = Self::step_from_hit(hit);
         let bucket_id = hit.bucket_id.as_str();
-        let (semantic_class, inject_kind) = if bucket_id == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id {
+        let (semantic_class, inject_kind) = if bucket_id
+            == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id
+        {
             (semantic::decode::ZERO_REGISTER_IMMUTABILITY.semantic_class, ZERO_REGISTER_INJECT_KIND)
         } else if bucket_id == semantic::decode::OPERAND_INDEX_ROUTING.id {
             (semantic::decode::OPERAND_INDEX_ROUTING.semantic_class, OPERAND_ROUTE_INJECT_KIND)
         } else if bucket_id == semantic::decode::RD_BIT_DECOMPOSITION.id {
             (semantic::decode::RD_BIT_DECOMPOSITION.semantic_class, RD_BITS_INJECT_KIND)
         } else if bucket_id == semantic::arithmetic::DIVISION_REMAINDER_BOUND.id {
-            (semantic::arithmetic::DIVISION_REMAINDER_BOUND.semantic_class, DIV_REM_BOUND_INJECT_KIND)
+            (
+                semantic::arithmetic::DIVISION_REMAINDER_BOUND.semantic_class,
+                DIV_REM_BOUND_INJECT_KIND,
+            )
         } else if bucket_id == semantic::control::ECALL_ARGUMENT_DECOMPOSITION.id {
-            (semantic::control::ECALL_ARGUMENT_DECOMPOSITION.semantic_class, ECALL_ARG_DECOMP_INJECT_KIND)
+            (
+                semantic::control::ECALL_ARGUMENT_DECOMPOSITION.semantic_class,
+                ECALL_ARG_DECOMP_INJECT_KIND,
+            )
         } else {
             return Vec::new();
         };
@@ -521,17 +520,17 @@ impl BenchmarkBackend for Risc0Backend {
 #[cfg(test)]
 mod tests {
     use super::{
-        ECALL_ARG_DECOMP_INJECT_KIND, build_program, nonzero_reg_count, observe_sites_for_words,
-        read_reg_bank,
+        build_program, nonzero_reg_count, observe_sites_for_words, read_reg_bank,
+        ECALL_ARG_DECOMP_INJECT_KIND,
     };
     use risc0_binfmt::MemoryImage;
     use risc0_circuit_rv32im::{
-        MAX_INSN_CYCLES,
         execute::{
-            DEFAULT_SEGMENT_LIMIT_PO2,
             platform::{MACHINE_REGS_ADDR, USER_REGS_ADDR},
-            testutil::{DEFAULT_SESSION_LIMIT, execute},
+            testutil::{execute, DEFAULT_SESSION_LIMIT},
+            DEFAULT_SEGMENT_LIMIT_PO2,
         },
+        MAX_INSN_CYCLES,
     };
 
     use super::Risc0HostSyscall;

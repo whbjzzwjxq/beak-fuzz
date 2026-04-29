@@ -3,7 +3,7 @@ use beak_core::trace::observations::{
     DivisionInsnObservation, EcallInsnObservation, RdBitDecompositionObservation,
     SequenceInsnObservation, SequenceSemanticMatcherProfile, ZeroRegisterWriteObservation,
 };
-use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic_matchers};
+use beak_core::trace::{semantic_matchers, BucketHit, Trace, TraceSignal};
 
 #[derive(Debug, Clone)]
 pub struct Risc0Trace {
@@ -15,8 +15,7 @@ pub struct Risc0Trace {
 fn writes_rd(mnemonic: &str) -> bool {
     !matches!(
         mnemonic,
-        "sb"
-            | "sh"
+        "sb" | "sh"
             | "sw"
             | "beq"
             | "bne"
@@ -144,8 +143,8 @@ impl Trace for Risc0Trace {
 
 #[cfg(test)]
 mod tests {
-    use beak_core::trace::Trace;
     use beak_core::trace::semantic;
+    use beak_core::trace::Trace;
 
     use super::Risc0Trace;
 
@@ -153,11 +152,7 @@ mod tests {
     fn risc0_trace_emits_risc0_semantics() {
         let words = [0x0010_0093, 0x0231_50b3, 0x0000_0073];
         let trace = Risc0Trace::from_words(&words).expect("trace");
-        let sigs = trace
-            .bucket_hits()
-            .iter()
-            .map(|hit| hit.bucket_id.as_str())
-            .collect::<Vec<_>>();
+        let sigs = trace.bucket_hits().iter().map(|hit| hit.bucket_id.as_str()).collect::<Vec<_>>();
         assert!(sigs.iter().all(|id| semantic::by_id(id).is_some()));
         assert!(sigs.contains(&semantic::decode::RD_BIT_DECOMPOSITION.id));
         assert!(sigs.contains(&semantic::decode::OPERAND_INDEX_ROUTING.id));

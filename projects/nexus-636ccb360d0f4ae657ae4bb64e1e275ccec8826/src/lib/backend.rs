@@ -4,7 +4,7 @@ use beak_core::fuzz::benchmark::{
     BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic};
+use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
 use nexus_common::cpu::Registers;
 use nexus_common::memory::{MemoryRecord, MemoryRecords};
 use nexus_common::riscv::register::Register;
@@ -41,7 +41,11 @@ fn base_inject_kind(kind: &str) -> &str {
 }
 
 fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
-    if variant.is_empty() { kind.to_string() } else { format!("{kind}::{variant}") }
+    if variant.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind}::{variant}")
+    }
 }
 
 fn inject_variant_value<'a>(kind: &'a str, key: &str) -> Option<&'a str> {
@@ -353,7 +357,7 @@ pub struct NexusBackend {
 }
 
 impl NexusBackend {
-    pub fn new(max_instructions: usize, _timeout_ms: u64) -> Self {
+    pub fn new(max_instructions: usize) -> Self {
         Self {
             max_instructions,
             eval: BackendEval::default(),

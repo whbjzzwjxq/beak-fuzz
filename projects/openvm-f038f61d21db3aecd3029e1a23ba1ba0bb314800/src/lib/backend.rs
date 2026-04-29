@@ -23,7 +23,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 fn build_sdk() -> Sdk {
     Sdk
@@ -253,7 +253,6 @@ struct WitnessInjectionPlan {
 
 pub struct OpenVmBackend {
     max_instructions: usize,
-    timeout_ms: u64,
     eval: BackendEval,
     last_words: Vec<u32>,
     last_observed_injection_sites: BTreeMap<String, Vec<u64>>,
@@ -264,10 +263,9 @@ pub struct OpenVmBackend {
 }
 
 impl OpenVmBackend {
-    pub fn new(max_instructions: usize, timeout_ms: u64) -> Self {
+    pub fn new(max_instructions: usize) -> Self {
         Self {
             max_instructions,
-            timeout_ms,
             eval: BackendEval::default(),
             last_words: Vec::new(),
             last_observed_injection_sites: BTreeMap::new(),
@@ -649,7 +647,6 @@ impl BenchmarkBackend for OpenVmBackend {
     }
 
     fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
-        let timeout = (self.timeout_ms > 0).then(|| Duration::from_millis(self.timeout_ms));
         self.eval.backend_error = None;
         self.eval.bucket_hits.clear();
         self.eval.micro_op_count = 0;
@@ -681,29 +678,11 @@ impl BenchmarkBackend for OpenVmBackend {
             worker.stdin.flush().map_err(|e| format!("flush worker request failed: {e}"))?;
         }
 
-        let started = Instant::now();
         let worker_resp = loop {
             let recv = {
                 let worker =
                     self.worker.as_ref().ok_or_else(|| "backend worker unavailable".to_string())?;
-                if let Some(limit) = timeout {
-                    let elapsed = started.elapsed();
-                    if elapsed >= limit {
-                        self.stop_worker();
-                        let msg = format!(
-                            "backend trace build timed out after {} ms (worker killed)",
-                            self.timeout_ms
-                        );
-                        self.eval.backend_error = Some(msg.clone());
-                        return Err(msg);
-                    }
-                    worker.responses_rx.recv_timeout(limit.saturating_sub(elapsed))
-                } else {
-                    worker
-                        .responses_rx
-                        .recv()
-                        .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-                }
+                worker.responses_rx.recv()
             };
             match recv {
                 Ok(Ok(resp)) => {
@@ -716,16 +695,7 @@ impl BenchmarkBackend for OpenVmBackend {
                     self.eval.backend_error = Some(e.clone());
                     return Err(e);
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    self.stop_worker();
-                    let msg = format!(
-                        "backend trace build timed out after {} ms (worker killed)",
-                        self.timeout_ms
-                    );
-                    self.eval.backend_error = Some(msg.clone());
-                    return Err(msg);
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(_) => {
                     self.stop_worker();
                     let msg = "backend worker disconnected".to_string();
                     self.eval.backend_error = Some(msg.clone());

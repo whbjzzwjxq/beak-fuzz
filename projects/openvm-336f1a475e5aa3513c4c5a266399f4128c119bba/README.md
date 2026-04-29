@@ -29,7 +29,6 @@ from bounded witness search rather than a single hard-coded step.
 cd path/to/beak/projects/openvm-336f1a475e5aa3513c4c5a266399f4128c119bba
 cargo run --release -q --bin beak-fuzz -- \
   --initial-limit 500 \
-  --timeout-ms 3000 \
   --semantic-window-before 16 \
   --semantic-window-after 64 \
   --semantic-max-trials-per-bucket 64 \
@@ -63,7 +62,6 @@ configured witness window.
 ```bash
 cargo run --release -q --bin beak-fuzz -- \
   --bin "10000093" \
-  --timeout-ms 3000 \
   --semantic-window-before 16 \
   --semantic-window-after 64 \
   --semantic-max-trials-per-bucket 64
@@ -74,7 +72,6 @@ cargo run --release -q --bin beak-fuzz -- \
 ```bash
 cargo run --release -q --bin beak-fuzz -- \
   --bin "0badc297 00000293" \
-  --timeout-ms 3000 \
   --semantic-window-before 16 \
   --semantic-window-after 64 \
   --semantic-max-trials-per-bucket 64
@@ -85,7 +82,6 @@ cargo run --release -q --bin beak-fuzz -- \
 ```bash
 cargo run --release -q --bin beak-fuzz -- \
   --bin "00200313 0ff00793 00002297 e6c28293 0002c703 0ff00393 00774533" \
-  --timeout-ms 3000 \
   --semantic-window-before 16 \
   --semantic-window-after 64 \
   --semantic-max-trials-per-bucket 64
@@ -96,7 +92,6 @@ cargo run --release -q --bin beak-fuzz -- \
 ```bash
 cargo run --release -q --bin beak-fuzz -- \
   --bin "00700313 800005b7 fff00613 02c5c733 800003b7 00774533" \
-  --timeout-ms 3000 \
   --semantic-window-before 16 \
   --semantic-window-after 64 \
   --semantic-max-trials-per-bucket 64

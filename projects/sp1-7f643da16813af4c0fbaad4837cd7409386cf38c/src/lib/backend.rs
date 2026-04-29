@@ -4,7 +4,6 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
 
 use beak_core::fuzz::benchmark::{
     BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
@@ -31,8 +30,6 @@ pub struct WorkerRequest {
     pub request_id: u64,
     pub words: Vec<u32>,
     pub iteration: u64,
-    #[serde(default)]
-    pub timeout_ms: u64,
     #[serde(default)]
     pub inject_kind: Option<String>,
     #[serde(default)]
@@ -363,7 +360,6 @@ fn supports_official_injection(inject_kind: Option<&str>) -> bool {
 
 fn run_sp1_real_backend(
     words: &[u32],
-    _timeout_ms: u64,
     inject_kind: Option<&str>,
     inject_step: u64,
 ) -> Result<RealRunnerResponse, String> {
@@ -445,13 +441,12 @@ fn run_sp1_prove_verify_with_run_test(
 pub fn run_backend_once(
     request_id: u64,
     words: &[u32],
-    timeout_ms: u64,
     _current_iteration: u64,
     inject_kind: Option<&str>,
     inject_step: u64,
 ) -> Result<WorkerResponse, String> {
     let runner_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_sp1_real_backend(words, timeout_ms, inject_kind, inject_step)
+        run_sp1_real_backend(words, inject_kind, inject_step)
     }));
     let resp = match runner_res {
         Ok(Ok(resp)) => resp,
@@ -493,7 +488,6 @@ pub fn run_backend_once(
 
 pub struct Sp1Backend {
     max_instructions: usize,
-    timeout_ms: u64,
     eval: BackendEval,
     last_observed_injection_sites: BTreeMap<String, Vec<u64>>,
     current_iteration: u64,
@@ -510,10 +504,9 @@ struct WorkerProcess {
 }
 
 impl Sp1Backend {
-    pub fn new(max_instructions: usize, timeout_ms: u64) -> Self {
+    pub fn new(max_instructions: usize) -> Self {
         Self {
             max_instructions,
-            timeout_ms,
             eval: BackendEval::default(),
             last_observed_injection_sites: BTreeMap::new(),
             current_iteration: 0,
@@ -810,7 +803,6 @@ impl BenchmarkBackend for Sp1Backend {
     }
 
     fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
-        let timeout = (self.timeout_ms > 0).then(|| Duration::from_millis(self.timeout_ms));
         self.eval.backend_error = None;
         self.eval.bucket_hits.clear();
         self.eval.micro_op_count = 0;
@@ -825,7 +817,6 @@ impl BenchmarkBackend for Sp1Backend {
             request_id,
             words: words.to_vec(),
             iteration: self.current_iteration,
-            timeout_ms: self.timeout_ms,
             inject_kind: self.pending_injection.as_ref().map(|p| p.kind.clone()),
             inject_step: self.pending_injection.as_ref().map(|p| p.step).unwrap_or(0),
         };
@@ -843,29 +834,11 @@ impl BenchmarkBackend for Sp1Backend {
             worker.stdin.flush().map_err(|e| format!("flush worker request failed: {e}"))?;
         }
 
-        let started = Instant::now();
         let resp = loop {
             let recv = {
                 let worker =
                     self.worker.as_ref().ok_or_else(|| "backend worker unavailable".to_string())?;
-                if let Some(limit) = timeout {
-                    let elapsed = started.elapsed();
-                    if elapsed >= limit {
-                        self.stop_worker();
-                        let msg = format!(
-                            "backend trace build timed out after {} ms (worker killed)",
-                            self.timeout_ms
-                        );
-                        self.eval.backend_error = Some(msg.clone());
-                        return Err(msg);
-                    }
-                    worker.responses_rx.recv_timeout(limit.saturating_sub(elapsed))
-                } else {
-                    worker
-                        .responses_rx
-                        .recv()
-                        .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-                }
+                worker.responses_rx.recv()
             };
             match recv {
                 Ok(Ok(resp)) => {
@@ -878,16 +851,7 @@ impl BenchmarkBackend for Sp1Backend {
                     self.eval.backend_error = Some(e.clone());
                     return Err(e);
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    self.stop_worker();
-                    let msg = format!(
-                        "backend trace build timed out after {} ms (worker killed)",
-                        self.timeout_ms
-                    );
-                    self.eval.backend_error = Some(msg.clone());
-                    return Err(msg);
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(_) => {
                     self.stop_worker();
                     let msg = "backend worker disconnected".to_string();
                     self.eval.backend_error = Some(msg.clone());

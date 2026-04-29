@@ -21,7 +21,13 @@ pub struct PicoInsn {
 }
 
 impl PicoInsn {
-    pub fn from_decoded(seq: u64, step_idx: u64, pc: Pc, timestamp: Timestamp, insn: RV32IMInstruction) -> Self {
+    pub fn from_decoded(
+        seq: u64,
+        step_idx: u64,
+        pc: Pc,
+        timestamp: Timestamp,
+        insn: RV32IMInstruction,
+    ) -> Self {
         Self {
             seq,
             step_idx,

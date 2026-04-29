@@ -19,7 +19,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 fn build_sdk() -> Sdk {
     let mut app_config = AppConfig::riscv32();
@@ -122,13 +122,11 @@ pub fn run_backend_once(
         eval.backend_error = Some(msg.clone());
         msg
     })?;
-    let (segments, _) = metered_interpreter
-        .execute_metered(input, metered_ctx)
-        .map_err(|e| {
-            let msg = format!("execute_metered failed: {e:?}");
-            eval.backend_error = Some(msg.clone());
-            msg
-        })?;
+    let (segments, _) = metered_interpreter.execute_metered(input, metered_ctx).map_err(|e| {
+        let msg = format!("execute_metered failed: {e:?}");
+        eval.backend_error = Some(msg.clone());
+        msg
+    })?;
 
     let mut state = instance.state_mut().take();
     let (vm, interpreter) = (&mut instance.vm, &mut instance.interpreter);
@@ -150,13 +148,11 @@ pub fn run_backend_once(
             })?;
         state = Some(out.to_state);
 
-        let _ctx = vm
-            .generate_proving_ctx(out.system_records, out.record_arenas)
-            .map_err(|e| {
-                let msg = format!("generate_proving_ctx failed: {e:?}");
-                eval.backend_error = Some(msg.clone());
-                msg
-            })?;
+        let _ctx = vm.generate_proving_ctx(out.system_records, out.record_arenas).map_err(|e| {
+            let msg = format!("generate_proving_ctx failed: {e:?}");
+            eval.backend_error = Some(msg.clone());
+            msg
+        })?;
     }
     let ms_trace_only = t2.elapsed().as_millis();
 
@@ -221,7 +217,6 @@ struct WorkerProcess {
 
 pub struct OpenVmBackend {
     max_instructions: usize,
-    timeout_ms: u64,
     eval: BackendEval,
     last_words: Vec<u32>,
     current_iteration: u64,
@@ -230,10 +225,9 @@ pub struct OpenVmBackend {
 }
 
 impl OpenVmBackend {
-    pub fn new(max_instructions: usize, timeout_ms: u64) -> Self {
+    pub fn new(max_instructions: usize) -> Self {
         Self {
             max_instructions,
-            timeout_ms,
             eval: BackendEval::default(),
             last_words: Vec::new(),
             current_iteration: 0,
@@ -256,10 +250,8 @@ impl OpenVmBackend {
             .spawn()
             .map_err(|e| format!("spawn backend worker failed: {e}"))?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "capture backend worker stdin failed".to_string())?;
+        let stdin =
+            child.stdin.take().ok_or_else(|| "capture backend worker stdin failed".to_string())?;
         let stdout = child
             .stdout
             .take()
@@ -301,12 +293,7 @@ impl OpenVmBackend {
             }
         });
 
-        self.worker = Some(WorkerProcess {
-            child,
-            stdin,
-            responses_rx: rx,
-            reader_thread,
-        });
+        self.worker = Some(WorkerProcess { child, stdin, responses_rx: rx, reader_thread });
         Ok(())
     }
 
@@ -338,7 +325,6 @@ impl BenchmarkBackend for OpenVmBackend {
     }
 
     fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
-        let timeout = (self.timeout_ms > 0).then(|| Duration::from_millis(self.timeout_ms));
         self.eval.backend_error = None;
         self.eval.bucket_hits.clear();
         self.eval.micro_op_count = 0;
@@ -347,55 +333,27 @@ impl BenchmarkBackend for OpenVmBackend {
         self.start_worker()?;
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
-        let req = WorkerRequest {
-            request_id,
-            words: words.to_vec(),
-            iteration: self.current_iteration,
-        };
+        let req =
+            WorkerRequest { request_id, words: words.to_vec(), iteration: self.current_iteration };
 
         {
-            let worker = self
-                .worker
-                .as_mut()
-                .ok_or_else(|| "backend worker unavailable".to_string())?;
-            let mut payload =
-                serde_json::to_vec(&req).map_err(|e| format!("serialize worker request failed: {e}"))?;
+            let worker =
+                self.worker.as_mut().ok_or_else(|| "backend worker unavailable".to_string())?;
+            let mut payload = serde_json::to_vec(&req)
+                .map_err(|e| format!("serialize worker request failed: {e}"))?;
             payload.push(b'\n');
             worker
                 .stdin
                 .write_all(&payload)
                 .map_err(|e| format!("write worker request failed: {e}"))?;
-            worker
-                .stdin
-                .flush()
-                .map_err(|e| format!("flush worker request failed: {e}"))?;
+            worker.stdin.flush().map_err(|e| format!("flush worker request failed: {e}"))?;
         }
 
-        let started = Instant::now();
         let worker_resp = loop {
             let recv = {
-                let worker = self
-                    .worker
-                    .as_ref()
-                    .ok_or_else(|| "backend worker unavailable".to_string())?;
-                if let Some(limit) = timeout {
-                    let elapsed = started.elapsed();
-                    if elapsed >= limit {
-                        self.stop_worker();
-                        let msg = format!(
-                            "backend trace build timed out after {} ms (worker killed)",
-                            self.timeout_ms
-                        );
-                        self.eval.backend_error = Some(msg.clone());
-                        return Err(msg);
-                    }
-                    worker.responses_rx.recv_timeout(limit.saturating_sub(elapsed))
-                } else {
-                    worker
-                        .responses_rx
-                        .recv()
-                        .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-                }
+                let worker =
+                    self.worker.as_ref().ok_or_else(|| "backend worker unavailable".to_string())?;
+                worker.responses_rx.recv()
             };
             match recv {
                 Ok(Ok(resp)) => {
@@ -408,16 +366,7 @@ impl BenchmarkBackend for OpenVmBackend {
                     self.eval.backend_error = Some(e.clone());
                     return Err(e);
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    self.stop_worker();
-                    let msg = format!(
-                        "backend trace build timed out after {} ms (worker killed)",
-                        self.timeout_ms
-                    );
-                    self.eval.backend_error = Some(msg.clone());
-                    return Err(msg);
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(_) => {
                     self.stop_worker();
                     let msg = "backend worker disconnected".to_string();
                     self.eval.backend_error = Some(msg.clone());

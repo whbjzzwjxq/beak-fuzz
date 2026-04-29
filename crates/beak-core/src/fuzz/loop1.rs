@@ -30,7 +30,6 @@ pub struct Loop1Config {
     pub zkvm_tag: String,
     pub zkvm_commit: String,
     pub rng_seed: u64,
-    pub timeout_ms: u64,
     pub oracle: OracleConfig,
 
     pub seeds_jsonl: PathBuf,
@@ -123,7 +122,6 @@ struct RunStats {
     mismatch_regs: Vec<(u32, u32, u32)>,
     backend_error: Option<String>,
     oracle_error: Option<String>,
-    timed_out: bool,
     has_direct_injection_target: bool,
     injected_phase: bool,
     direct_injection_kind: Option<String>,
@@ -136,12 +134,7 @@ struct RunStats {
 
 static LAST_RUN: LazyLock<Mutex<RunStats>> = LazyLock::new(|| Mutex::new(RunStats::default()));
 
-fn eval_once<B: LoopBackend>(
-    cfg: &Loop1Config,
-    timeout: Option<Duration>,
-    backend: &mut B,
-    words: &[u32],
-) -> RunStats {
+fn eval_once<B: LoopBackend>(cfg: &Loop1Config, backend: &mut B, words: &[u32]) -> RunStats {
     let start = Instant::now();
     backend.prepare_for_run(cfg.rng_seed);
 
@@ -176,10 +169,7 @@ fn eval_once<B: LoopBackend>(
     let signal_sigs = sorted_signatures_from_signals(&eval.trace_signals);
     let sig = canonical_bucket_sig(&bucket_sigs);
     let signal_sig = canonical_bucket_sig(&signal_sigs);
-    let backend_timed_out =
-        backend_error.as_deref().map(|e| e.contains("timed out")).unwrap_or(false);
     let eval_duration = start.elapsed();
-    let timed_out = timeout.map(|limit| eval_duration > limit).unwrap_or(false) || backend_timed_out;
 
     RunStats {
         eval_id: 0,
@@ -190,7 +180,6 @@ fn eval_once<B: LoopBackend>(
         mismatch_regs: mismatches,
         backend_error,
         oracle_error,
-        timed_out,
         has_direct_injection_target: false,
         injected_phase: false,
         direct_injection_kind: None,
@@ -207,10 +196,8 @@ fn now_ts_secs() -> u64 {
 }
 
 fn now_ts_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_millis() as u64
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_millis()
+        as u64
 }
 
 fn decode_words_from_input(input: &BytesInput, max_instructions: usize) -> Vec<u32> {
@@ -388,7 +375,7 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
         let underconstrained_candidate = stats.underconstrained_candidate;
         let baseline_mismatch = is_baseline_mismatch(&stats);
         let has_exception = !stats.injected_phase
-            && (stats.timed_out || stats.backend_error.is_some() || stats.oracle_error.is_some());
+            && (stats.backend_error.is_some() || stats.oracle_error.is_some());
         let is_bug = baseline_mismatch || has_exception || underconstrained_candidate;
         let elapsed_ms = self.run_start.elapsed().as_millis() as u64;
         if is_bug {
@@ -412,22 +399,19 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
             );
             if self.written_bug_keys.insert(bug_key) {
                 eprintln!(
-                    "[LOOP1][BUG] eval_id={} kind={} mismatches={} timed_out={} injected={} sig={}",
+                    "[LOOP1][BUG] eval_id={} kind={} mismatches={} injected={} sig={}",
                     stats.eval_id,
                     kind,
                     stats.mismatch_regs.len(),
-                    stats.timed_out,
                     stats.injected_phase,
                     stats.bucket_hits_sig
                 );
                 let rec = BugRecord {
                     zkvm_commit: self.cfg.zkvm_commit.clone(),
                     rng_seed: self.cfg.rng_seed,
-                    timeout_ms: self.cfg.timeout_ms,
                     run_started_at_ms: self.run_started_at_ms,
                     elapsed_ms,
                     eval_duration_ms: stats.eval_duration_ms,
-                    timed_out: stats.timed_out,
                     bucket_hits_sig: stats.bucket_hits_sig.clone(),
                     signal_sig: stats.signal_sig.clone(),
                     micro_op_count: stats.micro_op_count,
@@ -442,7 +426,6 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
                     instructions: words,
                     metadata: serde_json::json!({
                         "kind": kind,
-                        "timed_out": stats.timed_out,
                         "injected_phase": stats.injected_phase,
                         "has_direct_injection_target": stats.has_direct_injection_target,
                         "direct_injection_kind": stats.direct_injection_kind,
@@ -470,12 +453,10 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
         let run_rec = RunRecord {
             zkvm_commit: self.cfg.zkvm_commit.clone(),
             rng_seed: self.cfg.rng_seed,
-            timeout_ms: self.cfg.timeout_ms,
             run_started_at_ms: self.run_started_at_ms,
             elapsed_ms,
             eval_duration_ms: stats.eval_duration_ms,
             eval_id: stats.eval_id,
-            timed_out: stats.timed_out,
             bucket_hits_sig: stats.bucket_hits_sig.clone(),
             signal_sig: stats.signal_sig.clone(),
             micro_op_count: stats.micro_op_count,
@@ -506,11 +487,9 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
         let rec = CorpusRecord {
             zkvm_commit: self.cfg.zkvm_commit.clone(),
             rng_seed: self.cfg.rng_seed,
-            timeout_ms: self.cfg.timeout_ms,
             run_started_at_ms: self.run_started_at_ms,
             elapsed_ms,
             eval_duration_ms: stats.eval_duration_ms,
-            timed_out: stats.timed_out,
             mismatch: baseline_mismatch,
             bucket_hits_sig: sig,
             signal_sig: stats.signal_sig.clone(),
@@ -652,7 +631,6 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
     let mut eval_id_counter: u64 = 0;
 
     // Executor harness: run backend execution, collect trace/eval, and compare regs.
-    let timeout = (cfg.timeout_ms > 0).then(|| Duration::from_millis(cfg.timeout_ms));
     let mut harness = |input: &BytesInput| -> ExitKind {
         eval_id_counter = eval_id_counter.saturating_add(1);
         let eval_id = eval_id_counter;
@@ -692,7 +670,7 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
         }
 
         backend.clear_direct_injection();
-        let baseline = eval_once(&cfg, timeout, &mut backend, &words);
+        let baseline = eval_once(&cfg, &mut backend, &words);
         let mut final_stats = baseline.clone();
 
         if cfg.chain_direct_injection {
@@ -729,7 +707,7 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
                         continue;
                     };
 
-                    let mut injected = eval_once(&cfg, timeout, &mut backend, &words);
+                    let mut injected = eval_once(&cfg, &mut backend, &words);
                     injected.has_direct_injection_target = true;
                     injected.injected_phase = true;
                     injected.direct_injection_kind = Some(inject_kind);
@@ -739,11 +717,13 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
                         && baseline.oracle_error.is_none()
                         && injected.backend_error.is_none()
                         && injected.oracle_error.is_none()
-                        && !injection_kind_is_noop_prefix(injected.direct_injection_kind.as_deref());
+                        && !injection_kind_is_noop_prefix(
+                            injected.direct_injection_kind.as_deref(),
+                        );
 
                     if injected.underconstrained_candidate {
                         // Mark resolved only for true underconstrained signals.
-                        // mismatch/exception/timeout are intentionally not resolved.
+                        // mismatch/exception are intentionally not resolved.
                         resolved_direct_buckets.insert(bucket_id.clone());
                     }
 
@@ -754,8 +734,6 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
                             4
                         } else if s.backend_error.is_some() || s.oracle_error.is_some() {
                             3
-                        } else if s.timed_out {
-                            2
                         } else {
                             0
                         }
@@ -780,27 +758,13 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
         let mut last = LAST_RUN.lock().unwrap();
         *last = final_stats;
 
-        // We treat timeouts as a *soft* signal (recorded in `RunStats`) and do not propagate
-        // `ExitKind::Timeout` to libAFL, as it may short-circuit feedback/corpus logic on some
-        // platforms. The in-process hard timeout is handled separately.
         ExitKind::Ok
     };
 
-    // IMPORTANT: libAFL hard timeout on macOS may terminate the whole process (Error 55).
-    // Keep hard timeout large as a safety net only; use cfg.timeout_ms as the soft timeout
-    // signal recorded in corpus/bug metadata so fuzzing can continue across slow inputs.
-    let inproc_hard_timeout = Duration::from_secs(10 * 60);
-
     let observers = tuple_list!();
-    let mut executor = InProcessExecutor::with_timeout::<NeverObjective>(
-        &mut harness,
-        observers,
-        &mut fuzzer,
-        &mut state,
-        &mut mgr,
-        inproc_hard_timeout,
-    )
-    .map_err(|e| format!("create executor failed: {e}"))?;
+    let mut executor =
+        InProcessExecutor::new(&mut harness, observers, &mut fuzzer, &mut state, &mut mgr)
+            .map_err(|e| format!("create executor failed: {e}"))?;
 
     let mut stages = tuple_list!(StdMutationalStage::new(SeedMutator::new(cfg.max_instructions)));
 
@@ -826,7 +790,7 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
             "mismatch"
         } else if s.injected_phase && !s.mismatch_regs.is_empty() {
             "injected_mismatch"
-        } else if s.timed_out || s.backend_error.is_some() || s.oracle_error.is_some() {
+        } else if s.backend_error.is_some() || s.oracle_error.is_some() {
             "exception"
         } else if s.skip_reason.is_some() {
             "skip"
@@ -834,13 +798,12 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
             "ok"
         };
         eprintln!(
-            "[LOOP1][iter {}/{}] eval_id={} kind={} mismatches={} timed_out={} sig={}",
+            "[LOOP1][iter {}/{}] eval_id={} kind={} mismatches={} sig={}",
             i + 1,
             cfg.iters,
             s.eval_id,
             kind,
             s.mismatch_regs.len(),
-            s.timed_out,
             s.bucket_hits_sig
         );
     }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::observations::{SequenceInsnObservation, SequenceSemanticMatcherProfile};
-use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic_matchers};
+use beak_core::trace::{semantic_matchers, BucketHit, Trace, TraceSignal};
 use sp1_core_executor::{
     ExecutionRecord, Executor, ExecutorMode, Instruction as SP1Instruction, Opcode, Program,
 };
@@ -47,7 +47,8 @@ fn op_u32_to_i32(v: u32) -> i32 {
 
 fn req_reg_u8(name: &str, mnemonic: &str, value: Option<u32>) -> Result<u8, String> {
     let reg = value.ok_or_else(|| format!("missing {name} for {mnemonic}"))?;
-    u8::try_from(reg).map_err(|_| format!("register {name}={reg} does not fit in u8 for {mnemonic}"))
+    u8::try_from(reg)
+        .map_err(|_| format!("register {name}={reg} does not fit in u8 for {mnemonic}"))
 }
 
 fn word_for_pc(words: &[u32], program: &Program, pc: u32) -> Option<u32> {
@@ -73,57 +74,371 @@ pub fn decode_word_to_sp1_instruction(word: u32) -> Result<SP1Instruction, Strin
     let req = |name: &str, v: Option<u32>| -> Result<u32, String> {
         v.ok_or_else(|| format!("missing {name} for {m}"))
     };
-    let req_imm = |v: Option<i32>| -> Result<i32, String> {
-        v.ok_or_else(|| format!("missing imm for {m}"))
-    };
+    let req_imm =
+        |v: Option<i32>| -> Result<i32, String> { v.ok_or_else(|| format!("missing imm for {m}")) };
     let req_reg = |name: &str, v: Option<u32>| -> Result<u8, String> { req_reg_u8(name, m, v) };
 
     let insn = match m {
-        "add" => SP1Instruction::new(Opcode::ADD, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "addi" => SP1Instruction::new(Opcode::ADD, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sub" => SP1Instruction::new(Opcode::SUB, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "xor" => SP1Instruction::new(Opcode::XOR, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "xori" => SP1Instruction::new(Opcode::XOR, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "or" => SP1Instruction::new(Opcode::OR, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "ori" => SP1Instruction::new(Opcode::OR, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "and" => SP1Instruction::new(Opcode::AND, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "andi" => SP1Instruction::new(Opcode::AND, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sll" => SP1Instruction::new(Opcode::SLL, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "slli" => SP1Instruction::new(Opcode::SLL, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "srl" => SP1Instruction::new(Opcode::SRL, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "srli" => SP1Instruction::new(Opcode::SRL, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sra" => SP1Instruction::new(Opcode::SRA, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "srai" => SP1Instruction::new(Opcode::SRA, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "slt" => SP1Instruction::new(Opcode::SLT, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "slti" => SP1Instruction::new(Opcode::SLT, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sltu" => SP1Instruction::new(Opcode::SLTU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "sltiu" => SP1Instruction::new(Opcode::SLTU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lb" => SP1Instruction::new(Opcode::LB, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lh" => SP1Instruction::new(Opcode::LH, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lw" => SP1Instruction::new(Opcode::LW, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lbu" => SP1Instruction::new(Opcode::LBU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lhu" => SP1Instruction::new(Opcode::LHU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sb" => SP1Instruction::new(Opcode::SB, req_reg("rs2", dec.rs2)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sh" => SP1Instruction::new(Opcode::SH, req_reg("rs2", dec.rs2)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sw" => SP1Instruction::new(Opcode::SW, req_reg("rs2", dec.rs2)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "beq" => SP1Instruction::new(Opcode::BEQ, req_reg("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "bne" => SP1Instruction::new(Opcode::BNE, req_reg("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "blt" => SP1Instruction::new(Opcode::BLT, req_reg("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "bge" => SP1Instruction::new(Opcode::BGE, req_reg("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "bltu" => SP1Instruction::new(Opcode::BLTU, req_reg("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "bgeu" => SP1Instruction::new(Opcode::BGEU, req_reg("rs1", dec.rs1)?, req("rs2", dec.rs2)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "jal" => SP1Instruction::new(Opcode::JAL, req_reg("rd", dec.rd)?, imm_as_u32(req_imm(dec.imm)?), 0, true, true),
-        "jalr" => SP1Instruction::new(Opcode::JALR, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lui" => SP1Instruction::new(Opcode::ADD, req_reg("rd", dec.rd)?, 0, imm_as_u32(req_imm(dec.imm)?), true, true),
-        "auipc" => SP1Instruction::new(Opcode::AUIPC, req_reg("rd", dec.rd)?, imm_as_u32(req_imm(dec.imm)?), 0, true, true),
-        "mul" => SP1Instruction::new(Opcode::MUL, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "mulh" => SP1Instruction::new(Opcode::MULH, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "mulhu" => SP1Instruction::new(Opcode::MULHU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "mulhsu" => SP1Instruction::new(Opcode::MULHSU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "div" => SP1Instruction::new(Opcode::DIV, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "divu" => SP1Instruction::new(Opcode::DIVU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "rem" => SP1Instruction::new(Opcode::REM, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
-        "remu" => SP1Instruction::new(Opcode::REMU, req_reg("rd", dec.rd)?, req("rs1", dec.rs1)?, req("rs2", dec.rs2)?, false, false),
+        "add" => SP1Instruction::new(
+            Opcode::ADD,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "addi" => SP1Instruction::new(
+            Opcode::ADD,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "sub" => SP1Instruction::new(
+            Opcode::SUB,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "xor" => SP1Instruction::new(
+            Opcode::XOR,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "xori" => SP1Instruction::new(
+            Opcode::XOR,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "or" => SP1Instruction::new(
+            Opcode::OR,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "ori" => SP1Instruction::new(
+            Opcode::OR,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "and" => SP1Instruction::new(
+            Opcode::AND,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "andi" => SP1Instruction::new(
+            Opcode::AND,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "sll" => SP1Instruction::new(
+            Opcode::SLL,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "slli" => SP1Instruction::new(
+            Opcode::SLL,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "srl" => SP1Instruction::new(
+            Opcode::SRL,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "srli" => SP1Instruction::new(
+            Opcode::SRL,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "sra" => SP1Instruction::new(
+            Opcode::SRA,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "srai" => SP1Instruction::new(
+            Opcode::SRA,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "slt" => SP1Instruction::new(
+            Opcode::SLT,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "slti" => SP1Instruction::new(
+            Opcode::SLT,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "sltu" => SP1Instruction::new(
+            Opcode::SLTU,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "sltiu" => SP1Instruction::new(
+            Opcode::SLTU,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "lb" => SP1Instruction::new(
+            Opcode::LB,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "lh" => SP1Instruction::new(
+            Opcode::LH,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "lw" => SP1Instruction::new(
+            Opcode::LW,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "lbu" => SP1Instruction::new(
+            Opcode::LBU,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "lhu" => SP1Instruction::new(
+            Opcode::LHU,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "sb" => SP1Instruction::new(
+            Opcode::SB,
+            req_reg("rs2", dec.rs2)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "sh" => SP1Instruction::new(
+            Opcode::SH,
+            req_reg("rs2", dec.rs2)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "sw" => SP1Instruction::new(
+            Opcode::SW,
+            req_reg("rs2", dec.rs2)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "beq" => SP1Instruction::new(
+            Opcode::BEQ,
+            req_reg("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "bne" => SP1Instruction::new(
+            Opcode::BNE,
+            req_reg("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "blt" => SP1Instruction::new(
+            Opcode::BLT,
+            req_reg("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "bge" => SP1Instruction::new(
+            Opcode::BGE,
+            req_reg("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "bltu" => SP1Instruction::new(
+            Opcode::BLTU,
+            req_reg("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "bgeu" => SP1Instruction::new(
+            Opcode::BGEU,
+            req_reg("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "jal" => SP1Instruction::new(
+            Opcode::JAL,
+            req_reg("rd", dec.rd)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            0,
+            true,
+            true,
+        ),
+        "jalr" => SP1Instruction::new(
+            Opcode::JALR,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "lui" => SP1Instruction::new(
+            Opcode::ADD,
+            req_reg("rd", dec.rd)?,
+            0,
+            imm_as_u32(req_imm(dec.imm)?),
+            true,
+            true,
+        ),
+        "auipc" => SP1Instruction::new(
+            Opcode::AUIPC,
+            req_reg("rd", dec.rd)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            0,
+            true,
+            true,
+        ),
+        "mul" => SP1Instruction::new(
+            Opcode::MUL,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "mulh" => SP1Instruction::new(
+            Opcode::MULH,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "mulhu" => SP1Instruction::new(
+            Opcode::MULHU,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "mulhsu" => SP1Instruction::new(
+            Opcode::MULHSU,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "div" => SP1Instruction::new(
+            Opcode::DIV,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "divu" => SP1Instruction::new(
+            Opcode::DIVU,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "rem" => SP1Instruction::new(
+            Opcode::REM,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
+        "remu" => SP1Instruction::new(
+            Opcode::REMU,
+            req_reg("rd", dec.rd)?,
+            req("rs1", dec.rs1)?,
+            req("rs2", dec.rs2)?,
+            false,
+            false,
+        ),
         // SP1 models ECALL with fixed operand registers x5/x10/x11.
         "ecall" => SP1Instruction::new(Opcode::ECALL, 5, 10, 11, false, false),
         "ebreak" => SP1Instruction::new(Opcode::EBREAK, 0, 0, 0, false, false),
@@ -185,12 +500,7 @@ fn decoded_ops_from_executor_instruction(insn: &SP1Instruction) -> DecodedOps {
         }
         JAL => {
             let (rd, imm) = insn.j_type();
-            DecodedOps {
-                rd: Some(rd as u32),
-                rs1: None,
-                rs2: None,
-                imm: Some(op_u32_to_i32(imm)),
-            }
+            DecodedOps { rd: Some(rd as u32), rs1: None, rs2: None, imm: Some(op_u32_to_i32(imm)) }
         }
         JALR => {
             let (rd, rs1, imm) = insn.i_type();
@@ -203,12 +513,7 @@ fn decoded_ops_from_executor_instruction(insn: &SP1Instruction) -> DecodedOps {
         }
         AUIPC => {
             let (rd, imm) = insn.u_type();
-            DecodedOps {
-                rd: Some(rd as u32),
-                rs1: None,
-                rs2: None,
-                imm: Some(op_u32_to_i32(imm)),
-            }
+            DecodedOps { rd: Some(rd as u32), rs1: None, rs2: None, imm: Some(op_u32_to_i32(imm)) }
         }
         ECALL | EBREAK | UNIMP => DecodedOps::default(),
     }
@@ -263,9 +568,7 @@ impl Sp1Trace {
         let program = build_sp1_program(words)?;
         let mut executor = Executor::new(program, SP1CoreOpts::default());
         executor.executor_mode = ExecutorMode::Trace;
-        executor
-            .run()
-            .map_err(|e| format!("sp1 executor run failed while building trace: {e}"))?;
+        executor.run().map_err(|e| format!("sp1 executor run failed while building trace: {e}"))?;
         let records = std::mem::take(&mut executor.records);
         Self::from_execution_records(words, &records)
     }
@@ -450,10 +753,7 @@ impl Sp1Trace {
             let step = ia.base().step_idx as usize;
             Self::ensure_len(&mut interactions_by_step, step);
             interactions_by_step[step].push(i);
-            interactions_by_row_id
-                .entry(ia.base().row_id.clone())
-                .or_default()
-                .push(i);
+            interactions_by_row_id.entry(ia.base().row_id.clone()).or_default().push(i);
         }
 
         let mut out = Self {
@@ -522,24 +822,15 @@ impl Sp1Trace {
     }
 
     pub fn chip_row_indices_for_step(&self, step_idx: usize) -> &[usize] {
-        self.chip_rows_by_step
-            .get(step_idx)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.chip_rows_by_step.get(step_idx).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     pub fn interaction_indices_for_step(&self, step_idx: usize) -> &[usize] {
-        self.interactions_by_step
-            .get(step_idx)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.interactions_by_step.get(step_idx).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     pub fn interaction_indices_by_row_id(&self, row_id: &str) -> &[usize] {
-        self.interactions_by_row_id
-            .get(row_id)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.interactions_by_row_id.get(row_id).map(|v| v.as_slice()).unwrap_or(&[])
     }
 }
 

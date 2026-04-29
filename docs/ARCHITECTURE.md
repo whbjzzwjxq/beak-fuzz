@@ -89,11 +89,6 @@ This preserves differential checking and bucket extraction while keeping per-inp
 - Then loop1 runs `--iters` times, where each iteration executes one `fuzz_one` step.
 - A single `fuzz_one` can evaluate multiple candidate inputs internally, so backend run counters can exceed `--iters`.
 
-## Timeout Semantics
-
-- `--timeout-ms` is a **soft timeout signal** used for run classification/metadata (`timed_out`), not an immediate interrupt.
-- libAFL in-process execution also has a separate **hard timeout** configured in code (`InProcessExecutor::with_timeout`).
-
 ## Bucket and Feedback Model
 
 - Backend traces are converted to bucket hits (`BucketHit`), each identified by `bucket_id` (string).
@@ -110,7 +105,7 @@ Because each sub-project is independent:
 - OpenVM project (explicit snapshot):
   - `cd projects/openvm-<commit> && cargo build --bin beak-trace`
   - `cd projects/openvm-<commit> && cargo run --bin beak-trace -- --bin <hex_word> ...`
-  - `cd projects/openvm-<commit> && FAST_TEST=1 cargo run --release --bin beak-fuzz -- --seeds-jsonl <path> --iters 500 --timeout-ms 2000`
+  - `cd projects/openvm-<commit> && FAST_TEST=1 cargo run --release --bin beak-fuzz -- --seeds-jsonl <path> --iters 500`
 
 Note: backend projects may pull git dependencies; network access may be required for a first build.
 

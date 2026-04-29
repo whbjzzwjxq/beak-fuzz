@@ -21,7 +21,6 @@ targets.
 cd path/to/beak/projects/openvm-d7eab708f43487b2e7c00524ffd611f835e8e6b5
 cargo run --release -q --bin beak-fuzz -- \
   --initial-limit 500 \
-  --timeout-ms 3000 \
   --semantic-window-before 16 \
   --semantic-window-after 64 \
   --semantic-max-trials-per-bucket 64

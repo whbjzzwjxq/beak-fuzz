@@ -1,9 +1,9 @@
 use clap::{Arg, Command};
 
-use beak_core::trace::{Trace, sorted_signatures_from_hits, sorted_signatures_from_signals};
-use beak_risc0_98387806::RISC0_ORACLE_CODE_BASE;
+use beak_core::trace::{sorted_signatures_from_hits, sorted_signatures_from_signals, Trace};
 use beak_risc0_98387806::backend::run_backend_once;
 use beak_risc0_98387806::trace::Risc0Trace;
+use beak_risc0_98387806::RISC0_ORACLE_CODE_BASE;
 
 fn main() {
     let matches = Command::new("beak-trace")
@@ -58,11 +58,8 @@ fn main() {
 
     let trace = Risc0Trace::from_words(&words).expect("build risc0 trace from input words");
     let inject_kind = matches.get_one::<String>("inject_kind").map(|s| s.as_str());
-    let inject_step: u64 = matches
-        .get_one::<String>("inject_step")
-        .unwrap()
-        .parse()
-        .expect("inject-step");
+    let inject_step: u64 =
+        matches.get_one::<String>("inject_step").unwrap().parse().expect("inject-step");
     let resp = run_backend_once(&words, inject_kind, inject_step);
 
     println!("=== Input: {} instruction word(s) ===", words.len());
@@ -91,17 +88,18 @@ fn main() {
                 println!("  inject_step = {inject_step}");
             }
             if let Some(regs) = &resp.final_regs {
-                println!(
-                    "  final_regs[x1..x3] = x1:{} x2:{} x3:{}",
-                    regs[1], regs[2], regs[3]
-                );
+                println!("  final_regs[x1..x3] = x1:{} x2:{} x3:{}", regs[1], regs[2], regs[3]);
             }
             if let Some(err) = &resp.backend_error {
                 println!("  backend_error = {err}");
             }
             if matches.get_flag("print_buckets") {
                 for hit in &resp.bucket_hits {
-                    println!("  {} {}", hit.bucket_id, serde_json::to_string(&hit.details).unwrap());
+                    println!(
+                        "  {} {}",
+                        hit.bucket_id,
+                        serde_json::to_string(&hit.details).unwrap()
+                    );
                 }
             }
         }

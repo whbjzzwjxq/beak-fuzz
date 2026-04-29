@@ -28,7 +28,6 @@ struct DirectRunStats {
     mismatch_regs: Vec<(u32, u32, u32)>,
     backend_error: Option<String>,
     oracle_error: Option<String>,
-    timed_out: bool,
     eval_duration_ms: u64,
 }
 
@@ -57,10 +56,8 @@ fn now_ts_secs() -> u64 {
 }
 
 fn now_ts_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_millis() as u64
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_millis()
+        as u64
 }
 
 fn decode_words_from_input(input: &BytesInput, max_instructions: usize) -> Vec<u32> {
@@ -198,12 +195,7 @@ fn run_single_eval<B: LoopBackend>(
     let signal_sigs = sorted_signatures_from_signals(&eval.trace_signals);
     let sig = canonical_bucket_sig(&bucket_sigs);
     let signal_sig = canonical_bucket_sig(&signal_sigs);
-    let backend_timed_out =
-        backend_error.as_deref().map(|e| e.contains("timed out")).unwrap_or(false);
     let eval_duration = start.elapsed();
-    let timed_out = ((cfg.timeout_ms > 0)
-        && eval_duration > Duration::from_millis(cfg.timeout_ms))
-        || backend_timed_out;
 
     DirectRunStats {
         bucket_hits_sig: sig,
@@ -213,7 +205,6 @@ fn run_single_eval<B: LoopBackend>(
         mismatch_regs: mismatches,
         backend_error,
         oracle_error,
-        timed_out,
         eval_duration_ms: eval_duration.as_millis() as u64,
     }
 }
@@ -303,7 +294,6 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
                 let injected_found_bug = !injected.mismatch_regs.is_empty()
                     || injected.backend_error.is_some()
                     || injected.oracle_error.is_some()
-                    || injected.timed_out
                     || (injected.backend_error.is_none()
                         && injected.oracle_error.is_none()
                         && !injection_kind_is_noop_prefix(Some(inject_kind.as_str())));
@@ -335,11 +325,9 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
             let corpus = CorpusRecord {
                 zkvm_commit: cfg.zkvm_commit.clone(),
                 rng_seed: cfg.rng_seed,
-                timeout_ms: cfg.timeout_ms,
                 run_started_at_ms,
                 elapsed_ms,
                 eval_duration_ms: stats.eval_duration_ms,
-                timed_out: stats.timed_out,
                 mismatch: baseline_mismatch,
                 bucket_hits_sig: stats.bucket_hits_sig.clone(),
                 signal_sig: stats.signal_sig.clone(),
@@ -371,11 +359,9 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
                 let bug = BugRecord {
                     zkvm_commit: cfg.zkvm_commit.clone(),
                     rng_seed: cfg.rng_seed,
-                    timeout_ms: cfg.timeout_ms,
                     run_started_at_ms,
                     elapsed_ms,
                     eval_duration_ms: stats.eval_duration_ms,
-                    timed_out: stats.timed_out,
                     bucket_hits_sig: stats.bucket_hits_sig.clone(),
                     signal_sig: stats.signal_sig.clone(),
                     micro_op_count: stats.micro_op_count,

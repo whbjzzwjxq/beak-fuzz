@@ -20,7 +20,6 @@ pub struct BenchmarkConfig {
     pub zkvm_tag: String,
     pub zkvm_commit: String,
     pub rng_seed: u64,
-    pub timeout_ms: u64,
     pub oracle: OracleConfig,
 
     pub seeds_jsonl: PathBuf,
@@ -96,7 +95,6 @@ struct EvalStats {
     mismatch_regs: Vec<(u32, u32, u32)>,
     backend_error: Option<String>,
     oracle_error: Option<String>,
-    timed_out: bool,
     phase: String,
     semantic_class: Option<String>,
     inject_kind: Option<String>,
@@ -117,10 +115,8 @@ fn injection_kind_is_noop_prefix(kind: Option<&str>) -> bool {
 }
 
 fn now_ts_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_millis() as u64
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_millis()
+        as u64
 }
 
 fn decode_words_from_input(input: &BytesInput, max_instructions: usize) -> Vec<u32> {
@@ -220,7 +216,6 @@ fn canonical_bucket_sig(sigs: &[String]) -> String {
 
 fn eval_once<B: BenchmarkBackend>(
     cfg: &BenchmarkConfig,
-    timeout: Option<Duration>,
     backend: &mut B,
     words: &[u32],
 ) -> EvalStats {
@@ -260,10 +255,7 @@ fn eval_once<B: BenchmarkBackend>(
     let signal_sigs = sorted_signatures_from_signals(&eval.trace_signals);
     let sig = canonical_bucket_sig(&bucket_sigs);
     let signal_sig = canonical_bucket_sig(&signal_sigs);
-    let backend_timed_out =
-        backend_error.as_deref().map(|e| e.contains("timed out")).unwrap_or(false);
     let eval_duration = start.elapsed();
-    let timed_out = timeout.map(|limit| eval_duration > limit).unwrap_or(false) || backend_timed_out;
 
     EvalStats {
         bucket_hits_sig: sig,
@@ -273,7 +265,6 @@ fn eval_once<B: BenchmarkBackend>(
         mismatch_regs: mismatches,
         backend_error,
         oracle_error,
-        timed_out,
         phase: "baseline".to_string(),
         semantic_class: None,
         inject_kind: None,
@@ -299,7 +290,7 @@ fn bug_kind(stats: &EvalStats) -> Option<&'static str> {
     if stats.phase == "semantic_search" && !stats.semantic_injection_applied {
         return None;
     }
-    if stats.backend_error.is_some() || stats.oracle_error.is_some() || stats.timed_out {
+    if stats.backend_error.is_some() || stats.oracle_error.is_some() {
         Some("exception")
     } else if baseline_mismatch {
         Some("mismatch")
@@ -351,12 +342,10 @@ fn write_run_record(
     let rec = RunRecord {
         zkvm_commit: cfg.zkvm_commit.clone(),
         rng_seed: cfg.rng_seed,
-        timeout_ms: cfg.timeout_ms,
         run_started_at_ms,
         elapsed_ms,
         eval_duration_ms: stats.eval_duration_ms,
         eval_id,
-        timed_out: stats.timed_out,
         bucket_hits_sig: stats.bucket_hits_sig.clone(),
         signal_sig: stats.signal_sig.clone(),
         micro_op_count: stats.micro_op_count,
@@ -388,11 +377,9 @@ fn write_corpus_record(
     let rec = CorpusRecord {
         zkvm_commit: cfg.zkvm_commit.clone(),
         rng_seed: cfg.rng_seed,
-        timeout_ms: cfg.timeout_ms,
         run_started_at_ms,
         elapsed_ms,
         eval_duration_ms: stats.eval_duration_ms,
-        timed_out: stats.timed_out,
         mismatch: is_baseline_mismatch(stats),
         bucket_hits_sig: stats.bucket_hits_sig.clone(),
         signal_sig: stats.signal_sig.clone(),
@@ -436,11 +423,9 @@ fn write_bug_record(
     let rec = BugRecord {
         zkvm_commit: cfg.zkvm_commit.clone(),
         rng_seed: cfg.rng_seed,
-        timeout_ms: cfg.timeout_ms,
         run_started_at_ms,
         elapsed_ms,
         eval_duration_ms: stats.eval_duration_ms,
-        timed_out: stats.timed_out,
         bucket_hits_sig: stats.bucket_hits_sig.clone(),
         signal_sig: stats.signal_sig.clone(),
         micro_op_count: stats.micro_op_count,
@@ -590,7 +575,6 @@ pub fn run_benchmark<B: BenchmarkBackend>(
         return Err(format!("No usable initial seeds loaded from {}", cfg.seeds_jsonl.display()));
     }
 
-    let timeout = (cfg.timeout_ms > 0).then(|| Duration::from_millis(cfg.timeout_ms));
     let take_n =
         if cfg.initial_limit == 0 { seeds.len() } else { cfg.initial_limit.min(seeds.len()) };
 
@@ -632,7 +616,7 @@ pub fn run_benchmark<B: BenchmarkBackend>(
         }
 
         backend.clear_semantic_injection();
-        let baseline = eval_once(&cfg, timeout, &mut backend, &words);
+        let baseline = eval_once(&cfg, &mut backend, &words);
         eval_id = eval_id.saturating_add(1);
         let elapsed_ms = run_start.elapsed().as_millis() as u64;
         write_corpus_record(
@@ -694,7 +678,7 @@ pub fn run_benchmark<B: BenchmarkBackend>(
                 backend.clear_semantic_injection();
                 backend.arm_semantic_injection(&candidate.inject_kind, step)?;
 
-                let mut injected = eval_once(&cfg, timeout, &mut backend, &words);
+                let mut injected = eval_once(&cfg, &mut backend, &words);
                 injected.phase = "semantic_search".to_string();
                 injected.semantic_class = Some(candidate.semantic_class.clone());
                 injected.inject_kind = Some(candidate.inject_kind.clone());
@@ -704,7 +688,6 @@ pub fn run_benchmark<B: BenchmarkBackend>(
                 injected.baseline_bucket_hits_sig = Some(baseline.bucket_hits_sig.clone());
                 injected.underconstrained_candidate = injected.backend_error.is_none()
                     && injected.oracle_error.is_none()
-                    && !injected.timed_out
                     && injected.semantic_injection_applied
                     && !injection_kind_is_noop_prefix(injected.inject_kind.as_deref());
 
@@ -797,7 +780,6 @@ mod tests {
             zkvm_tag: "test".to_string(),
             zkvm_commit: "test".to_string(),
             rng_seed: 0,
-            timeout_ms: 0,
             oracle: OracleConfig::default(),
             seeds_jsonl: Default::default(),
             out_dir: Default::default(),
@@ -872,17 +854,11 @@ mod tests {
     }
 
     #[test]
-    fn eval_once_treats_zero_timeout_as_disabled() {
+    fn eval_once_records_eval_duration() {
         let cfg = test_config();
         let mut backend = SleepyBackend { sleep_for: Duration::from_millis(5) };
 
-        let no_timeout = eval_once(&cfg, None, &mut backend, &[]);
-        assert!(!no_timeout.timed_out);
-        assert!(no_timeout.eval_duration_ms >= 1);
-
-        let mut backend = SleepyBackend { sleep_for: Duration::from_millis(5) };
-        let with_timeout = eval_once(&cfg, Some(Duration::from_millis(1)), &mut backend, &[]);
-        assert!(with_timeout.timed_out);
-        assert!(with_timeout.eval_duration_ms >= 1);
+        let stats = eval_once(&cfg, &mut backend, &[]);
+        assert!(stats.eval_duration_ms >= 1);
     }
 }

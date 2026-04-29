@@ -1,6 +1,6 @@
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::observations::UpperImmediateInsnObservation;
-use beak_core::trace::{BucketHit, Trace, semantic, semantic_matchers};
+use beak_core::trace::{semantic, semantic_matchers, BucketHit, Trace};
 use common::constants::RAM_START_ADDRESS;
 use serde_json::json;
 

@@ -17,5 +17,5 @@ Minimal smoke checks:
 
 ```bash
 cargo run --bin beak-trace -- --bin "00100093 00112023 00012183" --print-buckets
-cargo run --bin beak-fuzz -- --bin "00100093 00112023 00012183" --initial-limit 1 --semantic-max-trials-per-bucket 4 --timeout-ms 5000
+cargo run --bin beak-fuzz -- --bin "00100093 00112023 00012183" --initial-limit 1 --semantic-max-trials-per-bucket 4
 ```

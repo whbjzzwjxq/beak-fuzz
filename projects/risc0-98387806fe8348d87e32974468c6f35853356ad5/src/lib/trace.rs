@@ -3,7 +3,7 @@ use beak_core::trace::observations::{
     DivisionInsnObservation, EcallInsnObservation, RdBitDecompositionObservation,
     SequenceInsnObservation, SequenceSemanticMatcherProfile, ZeroRegisterWriteObservation,
 };
-use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic, semantic_matchers};
+use beak_core::trace::{semantic, semantic_matchers, BucketHit, Trace, TraceSignal};
 use serde_json::json;
 
 #[derive(Debug, Clone)]
@@ -16,8 +16,7 @@ pub struct Risc0Trace {
 fn writes_rd(mnemonic: &str) -> bool {
     !matches!(
         mnemonic,
-        "sb"
-            | "sh"
+        "sb" | "sh"
             | "sw"
             | "beq"
             | "bne"
@@ -31,11 +30,10 @@ fn writes_rd(mnemonic: &str) -> bool {
     )
 }
 
-fn details_kv(entries: &[(&str, serde_json::Value)]) -> std::collections::HashMap<String, serde_json::Value> {
-    entries
-        .iter()
-        .map(|(key, value)| ((*key).to_string(), value.clone()))
-        .collect()
+fn details_kv(
+    entries: &[(&str, serde_json::Value)],
+) -> std::collections::HashMap<String, serde_json::Value> {
+    entries.iter().map(|(key, value)| ((*key).to_string(), value.clone())).collect()
 }
 
 fn supports_exec_source_binding(dec: &RV32IMInstruction) -> bool {
@@ -47,17 +45,7 @@ fn supports_exec_dest_binding(dec: &RV32IMInstruction) -> bool {
 }
 
 fn supports_exec_op_selector_binding(dec: &RV32IMInstruction) -> bool {
-    matches!(
-        dec.mnemonic.as_str(),
-        "div"
-            | "divu"
-            | "rem"
-            | "remu"
-            | "lb"
-            | "lbu"
-            | "lh"
-            | "lhu"
-    )
+    matches!(dec.mnemonic.as_str(), "div" | "divu" | "rem" | "remu" | "lb" | "lbu" | "lh" | "lhu")
 }
 
 fn supports_exec_control_binding(dec: &RV32IMInstruction) -> bool {
@@ -68,10 +56,7 @@ fn supports_exec_control_binding(dec: &RV32IMInstruction) -> bool {
 }
 
 fn supports_exec_memory_binding(dec: &RV32IMInstruction) -> bool {
-    matches!(
-        dec.mnemonic.as_str(),
-        "lb" | "lh" | "lw" | "lbu" | "lhu" | "sb" | "sh" | "sw"
-    )
+    matches!(dec.mnemonic.as_str(), "lb" | "lh" | "lw" | "lbu" | "lhu" | "sb" | "sh" | "sw")
 }
 
 fn exec_bucket_hits_for_instruction(
@@ -266,8 +251,8 @@ impl Trace for Risc0Trace {
 
 #[cfg(test)]
 mod tests {
-    use beak_core::trace::Trace;
     use beak_core::trace::semantic;
+    use beak_core::trace::Trace;
 
     use super::Risc0Trace;
 
@@ -275,11 +260,7 @@ mod tests {
     fn risc0_trace_emits_risc0_semantics() {
         let words = [0x0010_0093, 0x0231_50b3, 0x0000_0073];
         let trace = Risc0Trace::from_words(&words).expect("trace");
-        let sigs = trace
-            .bucket_hits()
-            .iter()
-            .map(|hit| hit.bucket_id.as_str())
-            .collect::<Vec<_>>();
+        let sigs = trace.bucket_hits().iter().map(|hit| hit.bucket_id.as_str()).collect::<Vec<_>>();
         assert!(sigs.iter().all(|id| semantic::by_id(id).is_some()));
         assert!(sigs.contains(&semantic::decode::RD_BIT_DECOMPOSITION.id));
         assert!(sigs.contains(&semantic::decode::OPERAND_INDEX_ROUTING.id));

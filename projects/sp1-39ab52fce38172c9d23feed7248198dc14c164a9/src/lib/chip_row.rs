@@ -33,19 +33,8 @@ pub type Sp1ChipRow = Sp1ChipRowEnvelope;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Sp1ChipRowPayload {
-    Cpu {
-        mnemonic: String,
-        rd: Option<u32>,
-        rs1: Option<u32>,
-        rs2: Option<u32>,
-        imm: Option<i32>,
-    },
-    Memory {
-        is_load: bool,
-        is_store: bool,
-        base_reg: Option<u32>,
-        offset: Option<i32>,
-    },
+    Cpu { mnemonic: String, rd: Option<u32>, rs1: Option<u32>, rs2: Option<u32>, imm: Option<i32> },
+    Memory { is_load: bool, is_store: bool, base_reg: Option<u32>, offset: Option<i32> },
     Padding,
 }
 

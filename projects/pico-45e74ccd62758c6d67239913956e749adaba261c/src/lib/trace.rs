@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::observations::{SequenceInsnObservation, SequenceSemanticMatcherProfile};
-use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic_matchers};
+use beak_core::trace::{semantic_matchers, BucketHit, Trace, TraceSignal};
 
 use crate::chip_row::{PicoChipRow, PicoChipRowBase, PicoChipRowKind, PicoChipRowPayload};
 use crate::insn::PicoInsn;
@@ -156,10 +156,7 @@ impl PicoTrace {
             let step = ia.base().step_idx as usize;
             Self::ensure_len(&mut interactions_by_step, step);
             interactions_by_step[step].push(i);
-            interactions_by_row_id
-                .entry(ia.base().row_id.clone())
-                .or_default()
-                .push(i);
+            interactions_by_row_id.entry(ia.base().row_id.clone()).or_default().push(i);
         }
 
         let mut out = Self {
@@ -228,24 +225,15 @@ impl PicoTrace {
     }
 
     pub fn chip_row_indices_for_step(&self, step_idx: usize) -> &[usize] {
-        self.chip_rows_by_step
-            .get(step_idx)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.chip_rows_by_step.get(step_idx).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     pub fn interaction_indices_for_step(&self, step_idx: usize) -> &[usize] {
-        self.interactions_by_step
-            .get(step_idx)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.interactions_by_step.get(step_idx).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     pub fn interaction_indices_by_row_id(&self, row_id: &str) -> &[usize] {
-        self.interactions_by_row_id
-            .get(row_id)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.interactions_by_row_id.get(row_id).map(|v| v.as_slice()).unwrap_or(&[])
     }
 }
 

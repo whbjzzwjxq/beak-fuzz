@@ -71,10 +71,9 @@ fn main() {
 
     let print_micro_ops = matches.get_flag("print_micro_ops");
     let print_buckets = matches.get_flag("print_buckets");
-    let oracle_memory_model = OracleMemoryModel::parse(
-        matches.get_one::<String>("oracle_memory_model").unwrap(),
-    )
-    .expect("oracle-memory-model");
+    let oracle_memory_model =
+        OracleMemoryModel::parse(matches.get_one::<String>("oracle_memory_model").unwrap())
+            .expect("oracle-memory-model");
     let oracle_code_base =
         parse_u32_arg(matches.get_one::<String>("oracle_code_base").unwrap(), "oracle-code-base");
     let oracle_data_size_bytes = parse_u32_arg(
@@ -149,10 +148,7 @@ fn main() {
     let mut mismatch = false;
     for i in 0..32 {
         if oracle_regs[i] != sp1_regs[i] {
-            println!(
-                "  MISMATCH x{i}: oracle=0x{:08x}  sp1=0x{:08x}",
-                oracle_regs[i], sp1_regs[i]
-            );
+            println!("  MISMATCH x{i}: oracle=0x{:08x}  sp1=0x{:08x}", oracle_regs[i], sp1_regs[i]);
             mismatch = true;
         }
     }

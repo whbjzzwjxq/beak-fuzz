@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::observations::{SequenceInsnObservation, SequenceSemanticMatcherProfile};
-use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic_matchers};
+use beak_core::trace::{semantic_matchers, BucketHit, Trace, TraceSignal};
 use sp1_core_executor::{
     ExecutionRecord, Executor, ExecutorMode, Instruction as SP1Instruction, Opcode, Program,
 };
@@ -64,56 +64,370 @@ pub fn decode_word_to_sp1_instruction(word: u32) -> Result<SP1Instruction, Strin
     let dec = RV32IMInstruction::from_word(word).map_err(|e| format!("rv32 decode failed: {e}"))?;
     let m = dec.mnemonic.as_str();
 
-    let req_imm = |v: Option<i32>| -> Result<i32, String> {
-        v.ok_or_else(|| format!("missing imm for {m}"))
-    };
+    let req_imm =
+        |v: Option<i32>| -> Result<i32, String> { v.ok_or_else(|| format!("missing imm for {m}")) };
 
     let insn = match m {
-        "add" => SP1Instruction::new(Opcode::ADD, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "addi" => SP1Instruction::new(Opcode::ADD, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sub" => SP1Instruction::new(Opcode::SUB, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "xor" => SP1Instruction::new(Opcode::XOR, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "xori" => SP1Instruction::new(Opcode::XOR, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "or" => SP1Instruction::new(Opcode::OR, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "ori" => SP1Instruction::new(Opcode::OR, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "and" => SP1Instruction::new(Opcode::AND, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "andi" => SP1Instruction::new(Opcode::AND, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sll" => SP1Instruction::new(Opcode::SLL, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "slli" => SP1Instruction::new(Opcode::SLL, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "srl" => SP1Instruction::new(Opcode::SRL, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "srli" => SP1Instruction::new(Opcode::SRL, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sra" => SP1Instruction::new(Opcode::SRA, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "srai" => SP1Instruction::new(Opcode::SRA, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "slt" => SP1Instruction::new(Opcode::SLT, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "slti" => SP1Instruction::new(Opcode::SLT, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sltu" => SP1Instruction::new(Opcode::SLTU, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "sltiu" => SP1Instruction::new(Opcode::SLTU, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lb" => SP1Instruction::new(Opcode::LB, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lh" => SP1Instruction::new(Opcode::LH, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lw" => SP1Instruction::new(Opcode::LW, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lbu" => SP1Instruction::new(Opcode::LBU, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lhu" => SP1Instruction::new(Opcode::LHU, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sb" => SP1Instruction::new(Opcode::SB, reg_as_u8("rs2", dec.rs2, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sh" => SP1Instruction::new(Opcode::SH, reg_as_u8("rs2", dec.rs2, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "sw" => SP1Instruction::new(Opcode::SW, reg_as_u8("rs2", dec.rs2, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "beq" => SP1Instruction::new(Opcode::BEQ, reg_as_u8("rs1", dec.rs1, m)?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "bne" => SP1Instruction::new(Opcode::BNE, reg_as_u8("rs1", dec.rs1, m)?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "blt" => SP1Instruction::new(Opcode::BLT, reg_as_u8("rs1", dec.rs1, m)?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "bge" => SP1Instruction::new(Opcode::BGE, reg_as_u8("rs1", dec.rs1, m)?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "bltu" => SP1Instruction::new(Opcode::BLTU, reg_as_u8("rs1", dec.rs1, m)?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "bgeu" => SP1Instruction::new(Opcode::BGEU, reg_as_u8("rs1", dec.rs1, m)?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "jal" => SP1Instruction::new(Opcode::JAL, reg_as_u8("rd", dec.rd, m)?, imm_as_u32(req_imm(dec.imm)?), 0, true, true),
-        "jalr" => SP1Instruction::new(Opcode::JALR, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, imm_as_u32(req_imm(dec.imm)?), false, true),
-        "lui" => SP1Instruction::new(Opcode::ADD, reg_as_u8("rd", dec.rd, m)?, 0, imm_as_u32(req_imm(dec.imm)?), true, true),
-        "auipc" => SP1Instruction::new(Opcode::AUIPC, reg_as_u8("rd", dec.rd, m)?, imm_as_u32(req_imm(dec.imm)?), 0, true, true),
-        "mul" => SP1Instruction::new(Opcode::MUL, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "mulh" => SP1Instruction::new(Opcode::MULH, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "mulhu" => SP1Instruction::new(Opcode::MULHU, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "mulhsu" => SP1Instruction::new(Opcode::MULHSU, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "div" => SP1Instruction::new(Opcode::DIV, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "divu" => SP1Instruction::new(Opcode::DIVU, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "rem" => SP1Instruction::new(Opcode::REM, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
-        "remu" => SP1Instruction::new(Opcode::REMU, reg_as_u8("rd", dec.rd, m)?, dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?, dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?, false, false),
+        "add" => SP1Instruction::new(
+            Opcode::ADD,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "addi" => SP1Instruction::new(
+            Opcode::ADD,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "sub" => SP1Instruction::new(
+            Opcode::SUB,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "xor" => SP1Instruction::new(
+            Opcode::XOR,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "xori" => SP1Instruction::new(
+            Opcode::XOR,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "or" => SP1Instruction::new(
+            Opcode::OR,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "ori" => SP1Instruction::new(
+            Opcode::OR,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "and" => SP1Instruction::new(
+            Opcode::AND,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "andi" => SP1Instruction::new(
+            Opcode::AND,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "sll" => SP1Instruction::new(
+            Opcode::SLL,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "slli" => SP1Instruction::new(
+            Opcode::SLL,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "srl" => SP1Instruction::new(
+            Opcode::SRL,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "srli" => SP1Instruction::new(
+            Opcode::SRL,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "sra" => SP1Instruction::new(
+            Opcode::SRA,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "srai" => SP1Instruction::new(
+            Opcode::SRA,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "slt" => SP1Instruction::new(
+            Opcode::SLT,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "slti" => SP1Instruction::new(
+            Opcode::SLT,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "sltu" => SP1Instruction::new(
+            Opcode::SLTU,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "sltiu" => SP1Instruction::new(
+            Opcode::SLTU,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "lb" => SP1Instruction::new(
+            Opcode::LB,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "lh" => SP1Instruction::new(
+            Opcode::LH,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "lw" => SP1Instruction::new(
+            Opcode::LW,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "lbu" => SP1Instruction::new(
+            Opcode::LBU,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "lhu" => SP1Instruction::new(
+            Opcode::LHU,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "sb" => SP1Instruction::new(
+            Opcode::SB,
+            reg_as_u8("rs2", dec.rs2, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "sh" => SP1Instruction::new(
+            Opcode::SH,
+            reg_as_u8("rs2", dec.rs2, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "sw" => SP1Instruction::new(
+            Opcode::SW,
+            reg_as_u8("rs2", dec.rs2, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "beq" => SP1Instruction::new(
+            Opcode::BEQ,
+            reg_as_u8("rs1", dec.rs1, m)?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "bne" => SP1Instruction::new(
+            Opcode::BNE,
+            reg_as_u8("rs1", dec.rs1, m)?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "blt" => SP1Instruction::new(
+            Opcode::BLT,
+            reg_as_u8("rs1", dec.rs1, m)?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "bge" => SP1Instruction::new(
+            Opcode::BGE,
+            reg_as_u8("rs1", dec.rs1, m)?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "bltu" => SP1Instruction::new(
+            Opcode::BLTU,
+            reg_as_u8("rs1", dec.rs1, m)?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "bgeu" => SP1Instruction::new(
+            Opcode::BGEU,
+            reg_as_u8("rs1", dec.rs1, m)?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "jal" => SP1Instruction::new(
+            Opcode::JAL,
+            reg_as_u8("rd", dec.rd, m)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            0,
+            true,
+            true,
+        ),
+        "jalr" => SP1Instruction::new(
+            Opcode::JALR,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            imm_as_u32(req_imm(dec.imm)?),
+            false,
+            true,
+        ),
+        "lui" => SP1Instruction::new(
+            Opcode::ADD,
+            reg_as_u8("rd", dec.rd, m)?,
+            0,
+            imm_as_u32(req_imm(dec.imm)?),
+            true,
+            true,
+        ),
+        "auipc" => SP1Instruction::new(
+            Opcode::AUIPC,
+            reg_as_u8("rd", dec.rd, m)?,
+            imm_as_u32(req_imm(dec.imm)?),
+            0,
+            true,
+            true,
+        ),
+        "mul" => SP1Instruction::new(
+            Opcode::MUL,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "mulh" => SP1Instruction::new(
+            Opcode::MULH,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "mulhu" => SP1Instruction::new(
+            Opcode::MULHU,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "mulhsu" => SP1Instruction::new(
+            Opcode::MULHSU,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "div" => SP1Instruction::new(
+            Opcode::DIV,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "divu" => SP1Instruction::new(
+            Opcode::DIVU,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "rem" => SP1Instruction::new(
+            Opcode::REM,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
+        "remu" => SP1Instruction::new(
+            Opcode::REMU,
+            reg_as_u8("rd", dec.rd, m)?,
+            dec.rs1.ok_or_else(|| format!("missing rs1 for {m}"))?,
+            dec.rs2.ok_or_else(|| format!("missing rs2 for {m}"))?,
+            false,
+            false,
+        ),
         // SP1 models ECALL with fixed operand registers x5/x10/x11.
         "ecall" => SP1Instruction::new(Opcode::ECALL, 5, 10, 11, false, false),
         "ebreak" => SP1Instruction::new(Opcode::EBREAK, 0, 0, 0, false, false),
@@ -233,14 +547,15 @@ impl Sp1Trace {
         let program = build_sp1_program(words)?;
         let mut executor = Executor::new(program, SP1CoreOpts::default());
         executor.executor_mode = ExecutorMode::Trace;
-        executor
-            .run()
-            .map_err(|e| format!("sp1 executor run failed while building trace: {e}"))?;
+        executor.run().map_err(|e| format!("sp1 executor run failed while building trace: {e}"))?;
         let records = std::mem::take(&mut executor.records);
         Self::from_execution_records(words, &records)
     }
 
-    pub fn from_execution_records(words: &[u32], records: &[ExecutionRecord]) -> Result<Self, String> {
+    pub fn from_execution_records(
+        words: &[u32],
+        records: &[ExecutionRecord],
+    ) -> Result<Self, String> {
         let mut instructions = Vec::new();
         let mut chip_rows = Vec::new();
         let mut interactions = Vec::new();
@@ -435,10 +750,7 @@ impl Sp1Trace {
             let step = ia.base().step_idx as usize;
             Self::ensure_len(&mut interactions_by_step, step);
             interactions_by_step[step].push(i);
-            interactions_by_row_id
-                .entry(ia.base().row_id.clone())
-                .or_default()
-                .push(i);
+            interactions_by_row_id.entry(ia.base().row_id.clone()).or_default().push(i);
         }
 
         let mut out = Self {
@@ -507,24 +819,15 @@ impl Sp1Trace {
     }
 
     pub fn chip_row_indices_for_step(&self, step_idx: usize) -> &[usize] {
-        self.chip_rows_by_step
-            .get(step_idx)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.chip_rows_by_step.get(step_idx).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     pub fn interaction_indices_for_step(&self, step_idx: usize) -> &[usize] {
-        self.interactions_by_step
-            .get(step_idx)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.interactions_by_step.get(step_idx).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     pub fn interaction_indices_by_row_id(&self, row_id: &str) -> &[usize] {
-        self.interactions_by_row_id
-            .get(row_id)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.interactions_by_row_id.get(row_id).map(|v| v.as_slice()).unwrap_or(&[])
     }
 }
 

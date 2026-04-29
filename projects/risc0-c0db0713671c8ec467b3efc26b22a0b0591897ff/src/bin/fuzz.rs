@@ -4,11 +4,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Arg, Command};
 use serde_json::json;
 
-use beak_core::fuzz::benchmark::{BenchmarkConfig, DEFAULT_RNG_SEED, run_benchmark_threaded};
+use beak_core::fuzz::benchmark::{run_benchmark_threaded, BenchmarkConfig, DEFAULT_RNG_SEED};
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
-use beak_risc0_c0db0713::RISC0_ORACLE_CODE_BASE;
 use beak_risc0_c0db0713::backend::Risc0Backend;
+use beak_risc0_c0db0713::RISC0_ORACLE_CODE_BASE;
 
 const ZKVM_COMMIT: &str = "c0db0713671c8ec467b3efc26b22a0b0591897ff";
 
@@ -21,7 +21,11 @@ fn workspace_root() -> PathBuf {
 
 fn resolve_path(root: &Path, arg: &str) -> PathBuf {
     let p = PathBuf::from(arg);
-    if p.is_absolute() { p } else { root.join(p) }
+    if p.is_absolute() {
+        p
+    } else {
+        root.join(p)
+    }
 }
 
 fn parse_u32_arg(value: &str, name: &str) -> u32 {
@@ -55,16 +59,11 @@ fn collect_bin_words(matches: &clap::ArgMatches) -> Vec<u32> {
 }
 
 fn write_inline_seed_jsonl(root: &Path, words: &[u32]) -> PathBuf {
-    let ts_millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
+    let ts_millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
     let dir = root.join("storage/fuzzing_seeds");
     std::fs::create_dir_all(&dir).expect("create storage/fuzzing_seeds");
-    let path = dir.join(format!(
-        ".tmp-inline-risc0-c0db0713-{ts_millis}-pid{}.jsonl",
-        std::process::id()
-    ));
+    let path =
+        dir.join(format!(".tmp-inline-risc0-c0db0713-{ts_millis}-pid{}.jsonl", std::process::id()));
     let line = json!({
         "instructions": words,
         "metadata": {
@@ -92,7 +91,6 @@ fn main() {
                 .long("seeds-jsonl")
                 .default_value("storage/fuzzing_seeds/initial.jsonl"),
         )
-        .arg(Arg::new("timeout_ms").long("timeout-ms").default_value("5000"))
         .arg(Arg::new("initial_limit").long("initial-limit").default_value("0"))
         .arg(Arg::new("max_instructions").long("max-instructions").default_value("256"))
         .arg(Arg::new("semantic_window_before").long("semantic-window-before").default_value("8"))
@@ -132,9 +130,6 @@ fn main() {
     } else {
         write_inline_seed_jsonl(&root, &inline_words)
     };
-
-    let timeout_ms: u64 =
-        matches.get_one::<String>("timeout_ms").unwrap().parse().expect("timeout-ms");
     let requested_initial_limit: usize =
         matches.get_one::<String>("initial_limit").unwrap().parse().expect("initial-limit");
     let requested_max_instructions: usize =
@@ -164,10 +159,9 @@ fn main() {
         .unwrap()
         .parse()
         .expect("semantic-max-trials-per-bucket");
-    let oracle_memory_model = OracleMemoryModel::parse(
-        matches.get_one::<String>("oracle_memory_model").unwrap(),
-    )
-    .expect("oracle-memory-model");
+    let oracle_memory_model =
+        OracleMemoryModel::parse(matches.get_one::<String>("oracle_memory_model").unwrap())
+            .expect("oracle-memory-model");
     let oracle_code_base =
         parse_u32_arg(matches.get_one::<String>("oracle_code_base").unwrap(), "oracle-code-base");
     let oracle_data_size_bytes = parse_u32_arg(
@@ -186,7 +180,6 @@ fn main() {
         zkvm_tag: "risc0".to_string(),
         zkvm_commit: ZKVM_COMMIT.to_string(),
         rng_seed: DEFAULT_RNG_SEED,
-        timeout_ms,
         oracle: OracleConfig {
             memory_model: oracle_memory_model,
             code_base: oracle_code_base,
@@ -207,7 +200,7 @@ fn main() {
     };
 
     println!("oracle_code_base = 0x{RISC0_ORACLE_CODE_BASE:08x}");
-    let res = run_benchmark_threaded(cfg, move || Risc0Backend::new(max_instructions, timeout_ms));
+    let res = run_benchmark_threaded(cfg, move || Risc0Backend::new(max_instructions));
     match res {
         Ok(out) => {
             println!("Wrote corpus JSONL: {}", out.corpus_path.display());

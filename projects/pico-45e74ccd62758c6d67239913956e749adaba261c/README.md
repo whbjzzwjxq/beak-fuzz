@@ -27,7 +27,6 @@ Run the initial-corpus benchmark with semantic witness search:
 cd path/to/beak/projects/pico-45e74ccd62758c6d67239913956e749adaba261c
 cargo run --release -q --bin beak-fuzz -- \
   --initial-limit 1000 \
-  --timeout-ms 3000 \
   --semantic-window-before 16 \
   --semantic-window-after 64 \
   --semantic-max-trials-per-bucket 64

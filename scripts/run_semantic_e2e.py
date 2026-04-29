@@ -20,7 +20,6 @@ class Case:
     name: str
     project_dir: str
     words: tuple[str, ...]
-    timeout_ms: int = 5000
     semantic_window_before: int = 16
     semantic_window_after: int = 64
     semantic_step_stride: int = 1
@@ -33,7 +32,6 @@ CASES: dict[str, Case] = {
         name="openvm-336.o5",
         project_dir="projects/openvm-336f1a475e5aa3513c4c5a266399f4128c119bba",
         words=("01400313", "14001073", "14002573", "00000393", "00754533"),
-        timeout_ms=15000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -44,7 +42,6 @@ CASES: dict[str, Case] = {
         name="nexus.store_load_flow",
         project_dir="projects/nexus-636ccb360d0f4ae657ae4bb64e1e275ccec8826",
         words=("00100093", "00112023", "00012183"),
-        timeout_ms=5000,
         semantic_window_before=16,
         semantic_window_after=64,
         semantic_step_stride=1,
@@ -55,7 +52,6 @@ CASES: dict[str, Case] = {
         name="risc0.regzero",
         project_dir="projects/risc0-c0db0713671c8ec467b3efc26b22a0b0591897ff",
         words=("00100893", "00000513", "000105b7", "00400613", "00000073", "000002b3"),
-        timeout_ms=5000,
         semantic_window_before=4,
         semantic_window_after=12,
         semantic_step_stride=1,
@@ -66,7 +62,6 @@ CASES: dict[str, Case] = {
         name="risc0.regzero_explicit_x0_write",
         project_dir="projects/risc0-c0db0713671c8ec467b3efc26b22a0b0591897ff",
         words=("00100893", "00000513", "000105b7", "00400613", "00000073", "00100013", "000002b3"),
-        timeout_ms=5000,
         semantic_window_before=4,
         semantic_window_after=12,
         semantic_step_stride=1,
@@ -77,7 +72,6 @@ CASES: dict[str, Case] = {
         name="risc0.divrem",
         project_dir="projects/risc0-c0db0713671c8ec467b3efc26b22a0b0591897ff",
         words=("00700113", "00500193", "023150b3"),
-        timeout_ms=5000,
         semantic_window_before=4,
         semantic_window_after=12,
         semantic_step_stride=1,
@@ -88,7 +82,6 @@ CASES: dict[str, Case] = {
         name="risc0.ecall_len_decomp",
         project_dir="projects/risc0-c0db0713671c8ec467b3efc26b22a0b0591897ff",
         words=("00100893", "00000513", "005005b7", "00400613", "00000073"),
-        timeout_ms=5000,
         semantic_window_before=4,
         semantic_window_after=12,
         semantic_step_stride=1,
@@ -103,7 +96,6 @@ class Config:
     name: str
     project_dir: Path
     words: tuple[str, ...]
-    timeout_ms: int
     semantic_window_before: int
     semantic_window_after: int
     semantic_step_stride: int
@@ -223,7 +215,6 @@ def summarize_records(cfg: Config, cmd: list[str], corpus: Path, bugs: Path, run
         "baseline": {
             "bucket_hits_sig": baseline.get("bucket_hits_sig") if baseline else None,
             "backend_error": baseline.get("backend_error") if baseline else None,
-            "timed_out": baseline.get("timed_out") if baseline else None,
         },
         "semantic_attempts": len(semantic_runs),
         "semantic_applied_attempts": len(applied_runs),
@@ -265,8 +256,6 @@ def make_cmd(cfg: Config) -> list[str]:
         str(binary),
         "--bin",
         " ".join(cfg.words),
-        "--timeout-ms",
-        str(cfg.timeout_ms),
         "--semantic-window-before",
         str(cfg.semantic_window_before),
         "--semantic-window-after",
@@ -289,7 +278,6 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--bin-words", help="Space or comma separated hex words for an inline seed.")
     ap.add_argument("--word", action="append", default=[], help="Add one hex instruction word. Can be repeated.")
     ap.add_argument("--name", help="Case name for manual mode.")
-    ap.add_argument("--timeout-ms", type=int, default=5000)
     ap.add_argument("--semantic-window-before", type=int, default=16)
     ap.add_argument("--semantic-window-after", type=int, default=64)
     ap.add_argument("--semantic-step-stride", type=int, default=1)
@@ -307,7 +295,6 @@ def make_config(args: argparse.Namespace) -> Config:
             name=case.name,
             project_dir=(REPO_ROOT / case.project_dir).resolve(),
             words=case.words,
-            timeout_ms=case.timeout_ms,
             semantic_window_before=case.semantic_window_before,
             semantic_window_after=case.semantic_window_after,
             semantic_step_stride=case.semantic_step_stride,
@@ -338,7 +325,6 @@ def make_config(args: argparse.Namespace) -> Config:
         name=args.name or f"manual.{project_dir.name}",
         project_dir=project_dir,
         words=words,
-        timeout_ms=args.timeout_ms,
         semantic_window_before=args.semantic_window_before,
         semantic_window_after=args.semantic_window_after,
         semantic_step_stride=args.semantic_step_stride,

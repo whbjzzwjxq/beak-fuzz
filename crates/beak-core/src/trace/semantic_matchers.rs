@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::trace::observations::{
     ArithmeticSpecialCaseObservation, AuipcPcLimbObservation, BoundaryOriginObservation,
@@ -10,7 +10,7 @@ use crate::trace::observations::{
     TimestampedLoadPathObservation, UpperImmediateInsnObservation, VolatileBoundaryObservation,
     XorMultiplicityObservation, ZeroRegisterWriteObservation,
 };
-use crate::trace::{BucketHit, TraceSignal, semantic};
+use crate::trace::{semantic, BucketHit, TraceSignal};
 
 fn details_kv(kvs: &[(&str, Value)]) -> HashMap<String, Value> {
     let mut out = HashMap::new();
@@ -90,8 +90,7 @@ pub fn match_sequence_semantic_hits(
         if let Some((access_width_name, access_size_bytes)) =
             memory_access_shape(insn.mnemonic.as_str())
         {
-            let is_load =
-                matches!(insn.mnemonic.as_str(), "lb" | "lbu" | "lh" | "lhu" | "lw");
+            let is_load = matches!(insn.mnemonic.as_str(), "lb" | "lbu" | "lh" | "lhu" | "lw");
             let is_store = matches!(insn.mnemonic.as_str(), "sb" | "sh" | "sw");
             let required_alignment = if access_size_bytes >= 4 {
                 4
@@ -191,10 +190,7 @@ pub fn match_sequence_semantic_hits(
                         ("step_idx", json!(insn.step_idx)),
                         ("word", json!(format!("0x{:08x}", insn.word))),
                         ("mnemonic", json!(insn.mnemonic)),
-                        (
-                            "access_kind",
-                            json!(if is_load { "load" } else { "store" }),
-                        ),
+                        ("access_kind", json!(if is_load { "load" } else { "store" })),
                         ("semantic_family", json!("memory_opcode_selector_binding")),
                     ]),
                 );
@@ -658,7 +654,7 @@ pub fn match_ecall_semantic_hits(observations: &[EcallInsnObservation]) -> Vec<B
 mod tests {
     use super::{match_sequence_semantic_hits, sequence_trace_signals};
     use crate::trace::observations::{SequenceInsnObservation, SequenceSemanticMatcherProfile};
-    use crate::trace::{TraceSignal, semantic};
+    use crate::trace::{semantic, TraceSignal};
 
     #[test]
     fn semantic_matchers_only_emit_registered_semantic_ids() {

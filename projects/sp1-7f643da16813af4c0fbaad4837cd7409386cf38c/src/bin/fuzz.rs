@@ -1,6 +1,6 @@
 use std::io::{BufRead, Write};
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Arg, Command};
 use serde_json::json;
@@ -60,10 +60,7 @@ fn collect_bin_words(matches: &clap::ArgMatches) -> Vec<u32> {
 }
 
 fn write_inline_seed_jsonl(root: &Path, words: &[u32]) -> PathBuf {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let dir = root.join("storage/fuzzing_seeds");
     std::fs::create_dir_all(&dir).expect("create storage/fuzzing_seeds");
     let path = dir.join(format!(".tmp-inline-sp1-7f643da1-{ts}.jsonl"));
@@ -96,12 +93,6 @@ fn main() {
                 .help(
                     "Path to the initial seed JSONL (relative to workspace root unless absolute).",
                 ),
-        )
-        .arg(
-            Arg::new("timeout_ms")
-                .long("timeout-ms")
-                .default_value("500")
-                .help("Best-effort per-seed wall-time timeout in milliseconds."),
         )
         .arg(
             Arg::new("initial_limit")
@@ -185,9 +176,6 @@ fn main() {
     } else {
         write_inline_seed_jsonl(&root, &inline_words)
     };
-
-    let timeout_ms: u64 =
-        matches.get_one::<String>("timeout_ms").unwrap().parse().expect("timeout-ms");
     let requested_initial_limit: usize =
         matches.get_one::<String>("initial_limit").unwrap().parse().expect("initial-limit");
     let requested_max_instructions: usize =
@@ -217,10 +205,9 @@ fn main() {
         .unwrap()
         .parse()
         .expect("semantic-max-trials-per-bucket");
-    let oracle_memory_model = OracleMemoryModel::parse(
-        matches.get_one::<String>("oracle_memory_model").unwrap(),
-    )
-    .expect("oracle-memory-model");
+    let oracle_memory_model =
+        OracleMemoryModel::parse(matches.get_one::<String>("oracle_memory_model").unwrap())
+            .expect("oracle-memory-model");
     let oracle_code_base =
         parse_u32_arg(matches.get_one::<String>("oracle_code_base").unwrap(), "oracle-code-base");
     let oracle_data_size_bytes = parse_u32_arg(
@@ -228,11 +215,7 @@ fn main() {
         "oracle-data-size-bytes",
     );
 
-    let initial_limit: usize = if inline_words.is_empty() {
-        requested_initial_limit
-    } else {
-        1
-    };
+    let initial_limit: usize = if inline_words.is_empty() { requested_initial_limit } else { 1 };
     let max_instructions: usize = if inline_words.is_empty() {
         requested_max_instructions
     } else {
@@ -243,7 +226,6 @@ fn main() {
         zkvm_tag: "sp1".to_string(),
         zkvm_commit: ZKVM_COMMIT.to_string(),
         rng_seed: DEFAULT_RNG_SEED,
-        timeout_ms,
         oracle: OracleConfig {
             memory_model: oracle_memory_model,
             code_base: oracle_code_base,
@@ -263,7 +245,7 @@ fn main() {
         stack_size_bytes: 256 * 1024 * 1024,
     };
 
-    let res = run_benchmark_threaded(cfg, move || Sp1Backend::new(max_instructions, timeout_ms));
+    let res = run_benchmark_threaded(cfg, move || Sp1Backend::new(max_instructions));
     match res {
         Ok(out) => {
             println!("Wrote corpus JSONL: {}", out.corpus_path.display());
@@ -305,7 +287,6 @@ fn run_worker_loop() {
                     run_backend_once(
                         req.request_id,
                         &req.words,
-                        req.timeout_ms,
                         req.iteration,
                         req.inject_kind.as_deref(),
                         req.inject_step,

@@ -76,15 +76,11 @@ fn main() {
 
     let print_buckets = matches.get_flag("print_buckets");
     let inject_kind = matches.get_one::<String>("inject_kind").map(|s| s.as_str());
-    let inject_step: u64 = matches
-        .get_one::<String>("inject_step")
-        .unwrap()
-        .parse()
-        .expect("inject-step");
-    let oracle_memory_model = OracleMemoryModel::parse(
-        matches.get_one::<String>("oracle_memory_model").unwrap(),
-    )
-    .expect("oracle-memory-model");
+    let inject_step: u64 =
+        matches.get_one::<String>("inject_step").unwrap().parse().expect("inject-step");
+    let oracle_memory_model =
+        OracleMemoryModel::parse(matches.get_one::<String>("oracle_memory_model").unwrap())
+            .expect("oracle-memory-model");
     let oracle_code_base =
         parse_u32_arg(matches.get_one::<String>("oracle_code_base").unwrap(), "oracle-code-base");
     let oracle_data_size_bytes = parse_u32_arg(

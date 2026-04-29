@@ -531,7 +531,7 @@ pub struct JoltBackend {
 }
 
 impl JoltBackend {
-    pub fn new(max_instructions: usize, _timeout_ms: u64) -> Self {
+    pub fn new(max_instructions: usize) -> Self {
         Self {
             max_instructions,
             eval: BackendEval::default(),

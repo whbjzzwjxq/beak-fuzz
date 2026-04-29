@@ -1,17 +1,17 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Arg, Command};
 use risc0_binfmt::{MemoryImage, Program};
 use risc0_circuit_rv32im::{
-    MAX_INSN_CYCLES,
     execute::{
-        DEFAULT_SEGMENT_LIMIT_PO2, Executor, Syscall, SyscallContext,
         platform::{REG_A0, REG_A1, REG_A2, REG_T0, REG_T1, USER_REGS_ADDR, WORD_SIZE},
         testutil::DEFAULT_SESSION_LIMIT,
+        Executor, Syscall, SyscallContext, DEFAULT_SEGMENT_LIMIT_PO2,
     },
     prove::segment_prover,
+    MAX_INSN_CYCLES,
 };
 
 struct Cli {
@@ -24,9 +24,7 @@ impl Cli {
             .about("Reproduce the RISC0 v1compat x0 overwrite PoC on the 98387806 snapshot.")
             .arg(Arg::new("fill").long("fill").default_value("0x12"))
             .get_matches();
-        Self {
-            fill: matches.get_one::<String>("fill").unwrap().clone(),
-        }
+        Self { fill: matches.get_one::<String>("fill").unwrap().clone() }
     }
 }
 
@@ -35,8 +33,7 @@ fn parse_fill_byte(value: &str) -> Result<u8> {
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u8::from_str_radix(hex, 16).with_context(|| format!("invalid fill byte: {value}"))
     } else {
-        s.parse::<u8>()
-            .with_context(|| format!("invalid fill byte: {value}"))
+        s.parse::<u8>().with_context(|| format!("invalid fill byte: {value}"))
     }
 }
 
@@ -152,15 +149,10 @@ fn main() -> Result<()> {
     let mut segments = Vec::new();
     let mut exec = Executor::new(image, &syscall, None, Vec::new());
     let result = exec
-        .run(
-            DEFAULT_SEGMENT_LIMIT_PO2,
-            MAX_INSN_CYCLES,
-            DEFAULT_SESSION_LIMIT,
-            |segment| {
-                segments.push(segment);
-                Ok(())
-            },
-        )
+        .run(DEFAULT_SEGMENT_LIMIT_PO2, MAX_INSN_CYCLES, DEFAULT_SESSION_LIMIT, |segment| {
+            segments.push(segment);
+            Ok(())
+        })
         .context("executing v1compat regzero PoC")?;
 
     let mut post_image = result.post_image.clone();
@@ -186,8 +178,7 @@ fn main() -> Result<()> {
     let prover = segment_prover().context("creating segment prover")?;
     for (idx, segment) in segments.iter().enumerate() {
         let seal = prover.prove(segment).with_context(|| format!("proving segment[{idx}]"))?;
-        risc0_circuit_rv32im::verify(&seal)
-            .with_context(|| format!("verifying segment[{idx}]"))?;
+        risc0_circuit_rv32im::verify(&seal).with_context(|| format!("verifying segment[{idx}]"))?;
         println!("segment[{idx}] verify=ok seal_len={}", seal.len());
     }
 

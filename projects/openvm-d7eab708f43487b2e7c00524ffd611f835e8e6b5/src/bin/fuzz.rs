@@ -50,12 +50,6 @@ fn main() {
                 ),
         )
         .arg(
-            Arg::new("timeout_ms")
-                .long("timeout-ms")
-                .default_value("500")
-                .help("Best-effort per-seed wall-time timeout in milliseconds."),
-        )
-        .arg(
             Arg::new("initial_limit")
                 .long("initial-limit")
                 .default_value("0")
@@ -126,9 +120,6 @@ fn main() {
     let root = workspace_root();
     let seeds_arg = matches.get_one::<String>("seeds_jsonl").unwrap().to_string();
     let seeds_path = resolve_path(&root, &seeds_arg);
-
-    let timeout_ms: u64 =
-        matches.get_one::<String>("timeout_ms").unwrap().parse().expect("timeout-ms");
     let initial_limit: usize =
         matches.get_one::<String>("initial_limit").unwrap().parse().expect("initial-limit");
     let max_instructions: usize =
@@ -153,10 +144,9 @@ fn main() {
         .unwrap()
         .parse()
         .expect("semantic-max-trials-per-bucket");
-    let oracle_memory_model = OracleMemoryModel::parse(
-        matches.get_one::<String>("oracle_memory_model").unwrap(),
-    )
-    .expect("oracle-memory-model");
+    let oracle_memory_model =
+        OracleMemoryModel::parse(matches.get_one::<String>("oracle_memory_model").unwrap())
+            .expect("oracle-memory-model");
     let oracle_code_base =
         parse_u32_arg(matches.get_one::<String>("oracle_code_base").unwrap(), "oracle-code-base");
     let oracle_data_size_bytes = parse_u32_arg(
@@ -168,7 +158,6 @@ fn main() {
         zkvm_tag: "openvm".to_string(),
         zkvm_commit: ZKVM_COMMIT.to_string(),
         rng_seed: DEFAULT_RNG_SEED,
-        timeout_ms,
         oracle: OracleConfig {
             memory_model: oracle_memory_model,
             code_base: oracle_code_base,
@@ -188,7 +177,7 @@ fn main() {
         stack_size_bytes: 256 * 1024 * 1024,
     };
 
-    let res = run_benchmark_threaded(cfg, move || OpenVmBackend::new(max_instructions, timeout_ms));
+    let res = run_benchmark_threaded(cfg, move || OpenVmBackend::new(max_instructions));
     match res {
         Ok(out) => {
             println!("Wrote corpus JSONL: {}", out.corpus_path.display());

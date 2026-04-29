@@ -24,7 +24,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 fn build_vm_config() -> SdkVmConfig {
     let mut vm_config = SdkVmConfig::builder()
@@ -249,34 +249,34 @@ pub fn run_backend_once(
         steps.sort_unstable();
         steps.dedup();
     }
-    let injection_applied =
-        inject_kind
-            .and_then(|kind| applied_injection_sites.get(base_inject_kind(kind)))
-            .map(|steps| {
+    let injection_applied = inject_kind
+        .and_then(|kind| applied_injection_sites.get(base_inject_kind(kind)))
+        .map(
+            |steps| {
                 if inject_step == u64::MAX {
                     !steps.is_empty()
                 } else {
                     steps.contains(&inject_step)
                 }
+            },
+        )
+        .or_else(|| {
+            inject_kind.and_then(|kind| {
+                (base_inject_kind(kind) == "openvm.semantic.lookup.xor_multiplicity_consistency")
+                    .then(|| {
+                        let rank = inject_variant_param_usize(kind, "rank").unwrap_or(0);
+                        let xor_hits = eval
+                            .bucket_hits
+                            .iter()
+                            .filter(|hit| {
+                                hit.bucket_id == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id
+                            })
+                            .count();
+                        rank < xor_hits
+                    })
             })
-            .or_else(|| {
-                inject_kind.and_then(|kind| {
-                    (base_inject_kind(kind) == "openvm.semantic.lookup.xor_multiplicity_consistency")
-                        .then(|| {
-                            let rank = inject_variant_param_usize(kind, "rank").unwrap_or(0);
-                            let xor_hits = eval
-                                .bucket_hits
-                                .iter()
-                                .filter(|hit| {
-                                    hit.bucket_id
-                                        == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id
-                                })
-                                .count();
-                            rank < xor_hits
-                        })
-                })
-            })
-            .unwrap_or(false);
+        })
+        .unwrap_or(false);
 
     Ok(WorkerResponse {
         request_id,
@@ -305,7 +305,6 @@ struct WitnessInjectionPlan {
 
 pub struct OpenVmBackend {
     max_instructions: usize,
-    timeout_ms: u64,
     eval: BackendEval,
     last_words: Vec<u32>,
     last_observed_injection_sites: BTreeMap<String, Vec<u64>>,
@@ -316,10 +315,9 @@ pub struct OpenVmBackend {
 }
 
 impl OpenVmBackend {
-    pub fn new(max_instructions: usize, timeout_ms: u64) -> Self {
+    pub fn new(max_instructions: usize) -> Self {
         Self {
             max_instructions,
-            timeout_ms,
             eval: BackendEval::default(),
             last_words: Vec::new(),
             last_observed_injection_sites: BTreeMap::new(),
@@ -765,7 +763,6 @@ impl BenchmarkBackend for OpenVmBackend {
     }
 
     fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
-        let timeout = (self.timeout_ms > 0).then(|| Duration::from_millis(self.timeout_ms));
         self.eval.backend_error = None;
         self.eval.bucket_hits.clear();
         self.eval.micro_op_count = 0;
@@ -797,29 +794,11 @@ impl BenchmarkBackend for OpenVmBackend {
             worker.stdin.flush().map_err(|e| format!("flush worker request failed: {e}"))?;
         }
 
-        let started = Instant::now();
         let worker_resp = loop {
             let recv = {
                 let worker =
                     self.worker.as_ref().ok_or_else(|| "backend worker unavailable".to_string())?;
-                if let Some(limit) = timeout {
-                    let elapsed = started.elapsed();
-                    if elapsed >= limit {
-                        self.stop_worker();
-                        let msg = format!(
-                            "backend trace build timed out after {} ms (worker killed)",
-                            self.timeout_ms
-                        );
-                        self.eval.backend_error = Some(msg.clone());
-                        return Err(msg);
-                    }
-                    worker.responses_rx.recv_timeout(limit.saturating_sub(elapsed))
-                } else {
-                    worker
-                        .responses_rx
-                        .recv()
-                        .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-                }
+                worker.responses_rx.recv()
             };
             match recv {
                 Ok(Ok(resp)) => {
@@ -832,16 +811,7 @@ impl BenchmarkBackend for OpenVmBackend {
                     self.eval.backend_error = Some(e.clone());
                     return Err(e);
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    self.stop_worker();
-                    let msg = format!(
-                        "backend trace build timed out after {} ms (worker killed)",
-                        self.timeout_ms
-                    );
-                    self.eval.backend_error = Some(msg.clone());
-                    return Err(msg);
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(_) => {
                     self.stop_worker();
                     let msg = "backend worker disconnected".to_string();
                     self.eval.backend_error = Some(msg.clone());

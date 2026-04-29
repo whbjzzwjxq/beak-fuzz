@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::observations::{SequenceInsnObservation, SequenceSemanticMatcherProfile};
-use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic_matchers};
+use beak_core::trace::{semantic_matchers, BucketHit, Trace, TraceSignal};
 use sp1_core_executor::{Instruction as SP1Instruction, Opcode, Program};
 
 use crate::chip_row::Sp1ChipRow;
@@ -53,9 +53,8 @@ pub fn decode_word_to_sp1_instruction(word: u32) -> Result<SP1Instruction, Strin
     let req_u64 = |name: &str, v: Option<u32>| -> Result<u32, String> {
         v.ok_or_else(|| format!("missing {name} for {m}"))
     };
-    let req_imm = |v: Option<i32>| -> Result<i32, String> {
-        v.ok_or_else(|| format!("missing imm for {m}"))
-    };
+    let req_imm =
+        |v: Option<i32>| -> Result<i32, String> { v.ok_or_else(|| format!("missing imm for {m}")) };
 
     let insn = match m {
         "add" => SP1Instruction::new(
@@ -426,12 +425,14 @@ pub fn decode_word_to_sp1_instruction(word: u32) -> Result<SP1Instruction, Strin
     Ok(insn)
 }
 
-fn decoded_ops_from_executor_instruction(insn: &SP1Instruction) -> (Option<u32>, Option<u32>, Option<u32>, Option<i32>) {
+fn decoded_ops_from_executor_instruction(
+    insn: &SP1Instruction,
+) -> (Option<u32>, Option<u32>, Option<u32>, Option<i32>) {
     use Opcode::*;
 
     match insn.opcode {
-        ADD | SUB | XOR | OR | AND | SLL | SRL | SRA | SLT | SLTU | MUL | MULH | MULHU
-        | MULHSU | DIV | DIVU | REM | REMU => {
+        ADD | SUB | XOR | OR | AND | SLL | SRL | SRA | SLT | SLTU | MUL | MULH | MULHU | MULHSU
+        | DIV | DIVU | REM | REMU => {
             if insn.imm_c {
                 (
                     Some(insn.op_a as u32),
@@ -440,50 +441,23 @@ fn decoded_ops_from_executor_instruction(insn: &SP1Instruction) -> (Option<u32>,
                     Some(op_u64_to_i32(insn.op_c)),
                 )
             } else {
-                (
-                    Some(insn.op_a as u32),
-                    Some(insn.op_b as u32),
-                    Some(insn.op_c as u32),
-                    None,
-                )
+                (Some(insn.op_a as u32), Some(insn.op_b as u32), Some(insn.op_c as u32), None)
             }
         }
-        LB | LH | LW | LBU | LHU => (
-            Some(insn.op_a as u32),
-            Some(insn.op_b as u32),
-            None,
-            Some(op_u64_to_i32(insn.op_c)),
-        ),
-        SB | SH | SW => (
-            None,
-            Some(insn.op_b as u32),
-            Some(insn.op_a as u32),
-            Some(op_u64_to_i32(insn.op_c)),
-        ),
-        BEQ | BNE | BLT | BGE | BLTU | BGEU => (
-            None,
-            Some(insn.op_a as u32),
-            Some(insn.op_b as u32),
-            Some(op_u64_to_i32(insn.op_c)),
-        ),
-        JAL => (
-            Some(insn.op_a as u32),
-            None,
-            None,
-            Some(op_u64_to_i32(insn.op_b)),
-        ),
-        JALR => (
-            Some(insn.op_a as u32),
-            Some(insn.op_b as u32),
-            None,
-            Some(op_u64_to_i32(insn.op_c)),
-        ),
-        AUIPC => (
-            Some(insn.op_a as u32),
-            None,
-            None,
-            Some(op_u64_to_i32(insn.op_b)),
-        ),
+        LB | LH | LW | LBU | LHU => {
+            (Some(insn.op_a as u32), Some(insn.op_b as u32), None, Some(op_u64_to_i32(insn.op_c)))
+        }
+        SB | SH | SW => {
+            (None, Some(insn.op_b as u32), Some(insn.op_a as u32), Some(op_u64_to_i32(insn.op_c)))
+        }
+        BEQ | BNE | BLT | BGE | BLTU | BGEU => {
+            (None, Some(insn.op_a as u32), Some(insn.op_b as u32), Some(op_u64_to_i32(insn.op_c)))
+        }
+        JAL => (Some(insn.op_a as u32), None, None, Some(op_u64_to_i32(insn.op_b))),
+        JALR => {
+            (Some(insn.op_a as u32), Some(insn.op_b as u32), None, Some(op_u64_to_i32(insn.op_c)))
+        }
+        AUIPC => (Some(insn.op_a as u32), None, None, Some(op_u64_to_i32(insn.op_b))),
         ECALL | EBREAK | UNIMP => (None, None, None, None),
     }
 }
@@ -644,24 +618,15 @@ impl Sp1Trace {
     }
 
     pub fn chip_row_indices_for_step(&self, step_idx: usize) -> &[usize] {
-        self.chip_rows_by_step
-            .get(step_idx)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.chip_rows_by_step.get(step_idx).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     pub fn interaction_indices_for_step(&self, step_idx: usize) -> &[usize] {
-        self.interactions_by_step
-            .get(step_idx)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.interactions_by_step.get(step_idx).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     pub fn interaction_indices_by_row_id(&self, row_id: &str) -> &[usize] {
-        self.interactions_by_row_id
-            .get(row_id)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+        self.interactions_by_row_id.get(row_id).map(|v| v.as_slice()).unwrap_or(&[])
     }
 }
 
