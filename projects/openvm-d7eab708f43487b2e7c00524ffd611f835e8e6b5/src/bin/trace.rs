@@ -27,6 +27,17 @@ fn main() {
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
+            Arg::new("inject_kind")
+                .long("inject-kind")
+                .help("Semantic witness injection kind for a single injected replay."),
+        )
+        .arg(
+            Arg::new("inject_step")
+                .long("inject-step")
+                .default_value("0")
+                .help("Semantic witness injection step for --inject-kind."),
+        )
+        .arg(
             Arg::new("oracle_memory_model")
                 .long("oracle-memory-model")
                 .default_value("shared-code-data")
@@ -73,6 +84,9 @@ fn main() {
     let args = input_words;
     let print_micro_ops = matches.get_flag("print_micro_ops");
     let print_buckets = matches.get_flag("print_buckets");
+    let inject_kind = matches.get_one::<String>("inject_kind").cloned();
+    let inject_step: u64 =
+        matches.get_one::<String>("inject_step").unwrap().parse().expect("inject-step");
     let oracle_memory_model =
         OracleMemoryModel::parse(matches.get_one::<String>("oracle_memory_model").unwrap())
             .expect("oracle-memory-model");
@@ -102,7 +116,16 @@ fn main() {
     let result = std::thread::Builder::new()
         .name("trace-main".into())
         .stack_size(256 * 1024 * 1024)
-        .spawn(move || run_trace(&words, print_micro_ops, print_buckets, oracle_cfg))
+        .spawn(move || {
+            run_trace(
+                &words,
+                print_micro_ops,
+                print_buckets,
+                oracle_cfg,
+                inject_kind.as_deref(),
+                inject_step,
+            )
+        })
         .expect("spawn thread")
         .join()
         .expect("thread panicked");
@@ -117,6 +140,8 @@ fn run_trace(
     print_micro_ops: bool,
     print_buckets: bool,
     oracle_cfg: OracleConfig,
+    inject_kind: Option<&str>,
+    inject_step: u64,
 ) -> bool {
     // --- 1. Oracle ---
     println!("\n=== Oracle (rrs-lib) ===");
@@ -129,7 +154,11 @@ fn run_trace(
 
     // --- 2. Backend (same single-run implementation used by fuzz worker path) ---
     println!("\n=== OpenVM backend (run_backend_once) ===");
-    let backend_resp = match run_backend_once(1, words, 0) {
+    if let Some(kind) = inject_kind {
+        println!("  inject_kind = {kind}");
+        println!("  inject_step = {inject_step}");
+    }
+    let backend_resp = match run_backend_once(1, words, 0, inject_kind, inject_step) {
         Ok(resp) => resp,
         Err(e) => {
             eprintln!("  backend error: {e}");
@@ -137,6 +166,10 @@ fn run_trace(
         }
     };
     println!("  micro_op_count = {}", backend_resp.micro_op_count);
+    println!("  semantic_injection_applied = {}", backend_resp.injection_applied);
+    if !backend_resp.observed_injection_sites.is_empty() {
+        println!("  observed_injection_sites = {:?}", backend_resp.observed_injection_sites);
+    }
 
     if let Some(err) = &backend_resp.backend_error {
         println!("  backend_error = {err}");
@@ -180,6 +213,11 @@ fn run_trace(
     }
     if mismatch {
         println!("\n*** SOUNDNESS BUG DETECTED ***");
+    } else if inject_kind.is_some()
+        && backend_resp.injection_applied
+        && backend_resp.backend_error.is_none()
+    {
+        println!("\n*** UNDERCONSTRAINED CANDIDATE DETECTED ***");
     } else {
         println!("  All 32 registers match.");
     }

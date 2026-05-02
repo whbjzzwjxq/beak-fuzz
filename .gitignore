@@ -38,6 +38,11 @@ scripts/__pycache__/
 out/
 logs/
 
+# Local Codex/agent run dumps, prompts, lead notes, and process sentinels.
+agent_runs/
+AGENTS.md
+OPENVM_336_REMAINING_OBLIGATION_GAPS.md
+
 # Mac OS X
 .DS_Store
 .omx/

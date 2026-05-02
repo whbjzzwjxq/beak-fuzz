@@ -92,7 +92,10 @@ This preserves differential checking and bucket extraction while keeping per-inp
 ## Bucket and Feedback Model
 
 - Backend traces are converted to bucket hits (`BucketHit`), each identified by `bucket_id` (string).
-- OpenVM bucket IDs are defined in `projects/openvm-<commit>/src/lib/bucket_id.rs` using `strum`.
+- Obligation-derived semantic buckets are registered in `crates/beak-core/src/trace/semantic.rs`.
+- `docs/OBLIGATIONS.md` defines the high-level obligation/cell taxonomy.
+- `docs/OBLIGATION_IMPLEMENTATION_CONTRACT.md` defines the cross-VM contract for bucket names, `BucketHit.details`, injection kinds, and install instrumentation.
+- `docs/OBLIGATION_IMPLEMENTATION_MATRIX.md` tracks per-VM implementation status.
 - Loop1 canonicalizes hit bucket IDs into a stable signature (`bucket_hits_sig`, separated by `;`) for novelty tracking.
 - Mutator arm selection is controlled by a multi-armed bandit (`crates/beak-core/src/fuzz/bandit.rs`).
 

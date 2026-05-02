@@ -20,9 +20,8 @@ use pico_vm::{
     primitives::consts::RISCV_NUM_PVS,
 };
 use rrs_lib::{
-    InstructionProcessor,
     instruction_formats::{BType, IType, ITypeCSR, ITypeShamt, JType, RType, SType, UType},
-    process_instruction,
+    process_instruction, InstructionProcessor,
 };
 use serde::{Deserialize, Serialize};
 
@@ -43,30 +42,57 @@ struct RunnerResponse {
     error: Option<String>,
     observed_injection_sites: BTreeMap<String, Vec<u64>>,
     injection_applied: bool,
+    executed_insns: Vec<ExecutedInsn>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ExecutedInsn {
+    step_idx: u64,
+    chunk: u32,
+    clk: u32,
+    pc: u32,
+    next_pc: u32,
+    word: u32,
+    opcode: String,
+    a: u32,
+    b: u32,
+    c: u32,
+    memory: Option<u32>,
 }
 
 const TIMESTAMP_INJECT_KIND: &str = "pico.semantic.memory.timestamped_load_path";
 const BOOL_INJECT_KIND: &str = "pico.semantic.lookup.boolean_multiplicity";
-const H1_INJECT_KIND: &str = "pico.semantic.exec.op_selector_binding";
-const H8_INJECT_KIND: &str = "pico.semantic.control.ecall_word_validity";
+const OP_SELECTOR_INJECT_KIND: &str = "pico.semantic.exec.op_selector_binding";
+const ECALL_WORD_INJECT_KIND: &str = "pico.semantic.control.ecall_word_validity";
+const ZERO_REG_INJECT_KIND: &str = "pico.semantic.decode.zero_register_immutability";
+const OPERAND_ROUTING_INJECT_KIND: &str = "pico.semantic.decode.operand_index_routing";
+const DEST_BINDING_INJECT_KIND: &str = "pico.semantic.exec.dest_binding";
+const FIELD_RANGE_INJECT_KIND: &str = "pico.semantic.decode.field_range";
+const IMM_SIGN_INJECT_KIND: &str = "pico.semantic.decode.immediate_sign_extension";
+const UPPER_IMM_INJECT_KIND: &str = "pico.semantic.decode.upper_immediate_materialization";
+const FORMAT_IMM_INJECT_KIND: &str = "pico.semantic.decode.format_immediate_reassembly";
+const ALU_IMM_INJECT_KIND: &str = "pico.semantic.alu.immediate_limb_consistency";
+const SHIFT_INJECT_KIND: &str = "pico.semantic.alu.shift_mod32";
+const CMP_BOOL_INJECT_KIND: &str = "pico.semantic.alu.comparison_booleanity";
+const SUB_BORROW_INJECT_KIND: &str = "pico.semantic.alu.subtraction_borrow_chain";
+const CMP_AUX_INJECT_KIND: &str = "pico.semantic.alu.comparison_auxiliary_chain";
+const DIV_SPECIAL_INJECT_KIND: &str = "pico.semantic.arithmetic.special_case_consistency";
+const DIV_BOUND_INJECT_KIND: &str = "pico.semantic.arithmetic.division_remainder_bound";
+const PRODUCT_INJECT_KIND: &str = "pico.semantic.arithmetic.product_decomposition";
+const MULHSU_INJECT_KIND: &str = "pico.semantic.arithmetic.signed_unsigned_product_correction";
+const MEM_STORE_LOAD_INJECT_KIND: &str = "pico.semantic.memory.store_load_payload_flow";
+const MEM_ADDR_ALIGN_INJECT_KIND: &str = "pico.semantic.memory.address_alignment_consistency";
+const MEM_LOAD_VALUE_INJECT_KIND: &str = "pico.semantic.memory.load_value_binding";
+const MEM_WRITE_PAYLOAD_INJECT_KIND: &str = "pico.semantic.memory.write_payload_consistency";
+const MEM_ADDR_BOUNDARY_INJECT_KIND: &str = "pico.semantic.memory.address_boundary_range";
+const MEM_ADDR_PROGRESS_INJECT_KIND: &str = "pico.semantic.memory.address_progression_consistency";
+const MEM_KIND_INJECT_KIND: &str = "pico.semantic.memory.kind_selector_consistency";
+const CONTROL_FLOW_INJECT_KIND: &str = "pico.semantic.exec.control_flow_binding";
+const ENTRYPOINT_INJECT_KIND: &str = "pico.semantic.control.entrypoint_binding";
+const TIME_BOUNDARY_INJECT_KIND: &str = "pico.semantic.time.boundary_origin_consistency";
 
 fn base_inject_kind(kind: &str) -> &str {
     kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
-}
-
-fn inject_variant_value<'a>(kind: &'a str, key: &str) -> Option<&'a str> {
-    let (_, variant) = kind.split_once("::")?;
-    for field in variant.split(',') {
-        let (field_key, field_value) = field.split_once('=')?;
-        if field_key == key {
-            return Some(field_value);
-        }
-    }
-    None
-}
-
-fn inject_variant_mode(kind: &str) -> Option<&str> {
-    inject_variant_value(kind, "mode")
 }
 
 fn mapped_env_inject_kind(kind: &str) -> String {
@@ -286,6 +312,7 @@ fn mutate_records_for_injection(
     inject_kind: Option<&str>,
     inject_step: u64,
 ) -> Result<(), String> {
+    std::env::remove_var("BEAK_PICO_WITNESS_INJECTION_APPLIED");
     let kind = inject_kind.unwrap_or("");
     std::env::set_var(
         "BEAK_PICO_WITNESS_INJECT_KIND",
@@ -293,8 +320,39 @@ fn mutate_records_for_injection(
     );
     std::env::set_var("BEAK_PICO_WITNESS_INJECT_STEP", inject_step.to_string());
     if !kind.is_empty() {
+        if kind.contains("::") {
+            return Err(format!("unsupported pico inject variant: {kind}"));
+        }
         match base_inject_kind(kind) {
-            TIMESTAMP_INJECT_KIND | BOOL_INJECT_KIND | H1_INJECT_KIND | H8_INJECT_KIND => {}
+            TIMESTAMP_INJECT_KIND
+            | BOOL_INJECT_KIND
+            | OP_SELECTOR_INJECT_KIND
+            | ZERO_REG_INJECT_KIND
+            | OPERAND_ROUTING_INJECT_KIND
+            | DEST_BINDING_INJECT_KIND
+            | FIELD_RANGE_INJECT_KIND
+            | IMM_SIGN_INJECT_KIND
+            | UPPER_IMM_INJECT_KIND
+            | FORMAT_IMM_INJECT_KIND
+            | ALU_IMM_INJECT_KIND
+            | SHIFT_INJECT_KIND
+            | CMP_BOOL_INJECT_KIND
+            | SUB_BORROW_INJECT_KIND
+            | CMP_AUX_INJECT_KIND
+            | DIV_SPECIAL_INJECT_KIND
+            | DIV_BOUND_INJECT_KIND
+            | PRODUCT_INJECT_KIND
+            | MULHSU_INJECT_KIND
+            | MEM_STORE_LOAD_INJECT_KIND
+            | MEM_ADDR_ALIGN_INJECT_KIND
+            | MEM_LOAD_VALUE_INJECT_KIND
+            | MEM_WRITE_PAYLOAD_INJECT_KIND
+            | MEM_ADDR_BOUNDARY_INJECT_KIND
+            | MEM_ADDR_PROGRESS_INJECT_KIND
+            | MEM_KIND_INJECT_KIND
+            | CONTROL_FLOW_INJECT_KIND
+            | ENTRYPOINT_INJECT_KIND
+            | TIME_BOUNDARY_INJECT_KIND => {}
             _ => return Err(format!("unsupported inject_kind={kind}")),
         }
     }
@@ -308,6 +366,10 @@ fn record_site(sites: &mut BTreeMap<String, Vec<u64>>, kind: &str, step: u64) {
     }
 }
 
+fn is_store_opcode(opcode: Opcode) -> bool {
+    matches!(opcode, Opcode::SB | Opcode::SH | Opcode::SW)
+}
+
 fn collect_observed_injection_sites(records: &[EmulationRecord]) -> BTreeMap<String, Vec<u64>> {
     let mut sites = BTreeMap::<String, Vec<u64>>::new();
     let mut memory_step = 0u64;
@@ -317,15 +379,77 @@ fn collect_observed_injection_sites(records: &[EmulationRecord]) -> BTreeMap<Str
 
     for record in records {
         for event in &record.cpu_events {
+            let cpu_anchor = event.clk as u64;
             if event.instruction.is_memory_instruction() {
                 record_site(&mut sites, TIMESTAMP_INJECT_KIND, memory_step);
-                record_site(&mut sites, H1_INJECT_KIND, memory_step);
+                record_site(&mut sites, MEM_STORE_LOAD_INJECT_KIND, memory_step);
+                record_site(&mut sites, MEM_ADDR_ALIGN_INJECT_KIND, memory_step);
+                record_site(&mut sites, MEM_LOAD_VALUE_INJECT_KIND, memory_step);
+                record_site(&mut sites, MEM_WRITE_PAYLOAD_INJECT_KIND, memory_step);
+                record_site(&mut sites, MEM_ADDR_BOUNDARY_INJECT_KIND, memory_step);
+                record_site(&mut sites, MEM_ADDR_PROGRESS_INJECT_KIND, memory_step);
+                record_site(&mut sites, MEM_KIND_INJECT_KIND, memory_step);
                 memory_step = memory_step.saturating_add(1);
             }
+            record_site(&mut sites, OP_SELECTOR_INJECT_KIND, cpu_step);
+            record_site(&mut sites, FIELD_RANGE_INJECT_KIND, cpu_anchor);
+            record_site(&mut sites, CONTROL_FLOW_INJECT_KIND, cpu_anchor);
+            if cpu_step == 0 {
+                record_site(&mut sites, ENTRYPOINT_INJECT_KIND, cpu_anchor);
+                record_site(&mut sites, TIME_BOUNDARY_INJECT_KIND, cpu_anchor);
+            }
+            if event.instruction.op_a == 0 {
+                record_site(&mut sites, ZERO_REG_INJECT_KIND, cpu_anchor);
+            } else if !event.instruction.is_branch_instruction()
+                && !is_store_opcode(event.instruction.opcode)
+            {
+                record_site(&mut sites, DEST_BINDING_INJECT_KIND, cpu_anchor);
+            }
+            if !event.instruction.imm_b || !event.instruction.imm_c {
+                record_site(&mut sites, OPERAND_ROUTING_INJECT_KIND, cpu_anchor);
+            }
+            if event.instruction.imm_b || event.instruction.imm_c {
+                record_site(&mut sites, IMM_SIGN_INJECT_KIND, cpu_anchor);
+                record_site(&mut sites, FORMAT_IMM_INJECT_KIND, cpu_anchor);
+                record_site(&mut sites, UPPER_IMM_INJECT_KIND, cpu_anchor);
+            }
             if event.instruction.opcode == Opcode::ECALL {
-                record_site(&mut sites, H8_INJECT_KIND, cpu_step);
+                record_site(&mut sites, ECALL_WORD_INJECT_KIND, cpu_step);
             }
             cpu_step = cpu_step.saturating_add(1);
+        }
+        let mut add_sub_step = 0u64;
+        for event in record.add_events.iter().chain(record.sub_events.iter()) {
+            record_site(&mut sites, ALU_IMM_INJECT_KIND, add_sub_step);
+            if event.opcode == Opcode::SUB {
+                record_site(&mut sites, SUB_BORROW_INJECT_KIND, add_sub_step);
+            }
+            add_sub_step = add_sub_step.saturating_add(1);
+        }
+        for (step, _) in record.shift_left_events.iter().enumerate() {
+            record_site(&mut sites, ALU_IMM_INJECT_KIND, step as u64);
+            record_site(&mut sites, SHIFT_INJECT_KIND, step as u64);
+        }
+        for (step, _) in record.shift_right_events.iter().enumerate() {
+            record_site(&mut sites, ALU_IMM_INJECT_KIND, step as u64);
+            record_site(&mut sites, SHIFT_INJECT_KIND, step as u64);
+        }
+        for (step, _) in record.lt_events.iter().enumerate() {
+            record_site(&mut sites, ALU_IMM_INJECT_KIND, step as u64);
+            record_site(&mut sites, CMP_BOOL_INJECT_KIND, step as u64);
+            record_site(&mut sites, CMP_AUX_INJECT_KIND, step as u64);
+        }
+        for event in &record.mul_events {
+            let step = event.clk as u64;
+            record_site(&mut sites, PRODUCT_INJECT_KIND, step);
+            if event.opcode == Opcode::MULHSU {
+                record_site(&mut sites, MULHSU_INJECT_KIND, step);
+            }
+        }
+        for event in &record.divrem_events {
+            let step = event.clk as u64;
+            record_site(&mut sites, DIV_SPECIAL_INJECT_KIND, step);
+            record_site(&mut sites, DIV_BOUND_INJECT_KIND, step);
         }
         for _ in record.get_local_mem_events() {
             record_site(&mut sites, BOOL_INJECT_KIND, local_step);
@@ -344,28 +468,41 @@ fn collect_observed_injection_sites(records: &[EmulationRecord]) -> BTreeMap<Str
     sites
 }
 
-fn injection_applies(
-    inject_kind: Option<&str>,
-    inject_step: u64,
-    observed_injection_sites: &BTreeMap<String, Vec<u64>>,
-) -> bool {
-    let Some(kind) = inject_kind else {
-        return false;
-    };
-    if matches!(inject_variant_mode(kind), Some("noop_prefix")) {
-        return false;
+fn collect_executed_insns(
+    records: &[EmulationRecord],
+    words: &[u32],
+    entry_pc: u32,
+) -> Vec<ExecutedInsn> {
+    let mut out = Vec::new();
+    for record in records {
+        for event in &record.cpu_events {
+            if event.pc < entry_pc {
+                continue;
+            }
+            let word_idx = ((event.pc - entry_pc) / 4) as usize;
+            let Some(&word) = words.get(word_idx) else {
+                continue;
+            };
+            out.push(ExecutedInsn {
+                step_idx: out.len() as u64,
+                chunk: event.chunk,
+                clk: event.clk,
+                pc: event.pc,
+                next_pc: event.next_pc,
+                word,
+                opcode: event.instruction.opcode.mnemonic().to_string(),
+                a: event.a,
+                b: event.b,
+                c: event.c,
+                memory: event.memory,
+            });
+        }
     }
-    let key = match base_inject_kind(kind) {
-        LEGACY_BOOL_INJECT_KIND => BOOL_INJECT_KIND,
-        other => other,
-    };
-    let Some(steps) = observed_injection_sites.get(key) else {
-        return false;
-    };
-    if inject_step == u64::MAX {
-        return !steps.is_empty();
-    }
-    steps.contains(&inject_step)
+    out
+}
+
+fn injection_applied_from_site_metadata() -> bool {
+    std::env::var("BEAK_PICO_WITNESS_INJECTION_APPLIED").ok().as_deref() == Some("1")
 }
 
 fn run_one(
@@ -398,7 +535,7 @@ fn run_one(
     }
     let regs = emulator.registers();
     let observed_injection_sites = collect_observed_injection_sites(&records);
-    let injection_applied = injection_applies(inject_kind, inject_step, &observed_injection_sites);
+    let executed_insns = collect_executed_insns(&records, words, ENTRY_PC);
 
     mutate_records_for_injection(&mut records, inject_kind, inject_step)?;
 
@@ -410,7 +547,8 @@ fn run_one(
             verify_ok: false,
             error: None,
             observed_injection_sites,
-            injection_applied,
+            injection_applied: false,
+            executed_insns,
         });
     }
 
@@ -434,7 +572,8 @@ fn run_one(
                 verify_ok: false,
                 error: Some(e),
                 observed_injection_sites,
-                injection_applied,
+                injection_applied: injection_applied_from_site_metadata(),
+                executed_insns,
             });
         }
         Err(p) => {
@@ -445,7 +584,8 @@ fn run_one(
                 verify_ok: false,
                 error: Some(format!("prove/verify panic: {}", panic_payload_to_string(p.as_ref()))),
                 observed_injection_sites,
-                injection_applied,
+                injection_applied: injection_applied_from_site_metadata(),
+                executed_insns,
             });
         }
     };
@@ -457,7 +597,8 @@ fn run_one(
         verify_ok,
         error: if verify_ok { None } else { Some("verify failed".to_string()) },
         observed_injection_sites,
-        injection_applied,
+        injection_applied: injection_applied_from_site_metadata(),
+        executed_insns,
     })
 }
 
@@ -475,6 +616,7 @@ fn main() {
                 error: Some("failed to read stdin".to_string()),
                 observed_injection_sites: BTreeMap::new(),
                 injection_applied: false,
+                executed_insns: Vec::new(),
             })
             .unwrap_or_else(|_| "{\"error\":\"failed to serialize error\"}".to_string())
         );
@@ -495,6 +637,7 @@ fn main() {
                     error: Some(format!("invalid request json: {e}")),
                     observed_injection_sites: BTreeMap::new(),
                     injection_applied: false,
+                    executed_insns: Vec::new(),
                 })
                 .unwrap_or_else(|_| "{\"error\":\"failed to serialize error\"}".to_string())
             );
@@ -514,6 +657,7 @@ fn main() {
             error: Some(e),
             observed_injection_sites: BTreeMap::new(),
             injection_applied: false,
+            executed_insns: Vec::new(),
         },
         Err(p) => RunnerResponse {
             final_regs: None,
@@ -523,6 +667,7 @@ fn main() {
             error: Some(format!("runner panic: {}", panic_payload_to_string(p.as_ref()))),
             observed_injection_sites: BTreeMap::new(),
             injection_applied: false,
+            executed_insns: Vec::new(),
         },
     };
 

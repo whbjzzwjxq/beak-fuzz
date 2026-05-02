@@ -33,6 +33,15 @@ cd path/to/beak/projects/sp1-39ab52fce38172c9d23feed7248198dc14c164a9
 cargo run --release --bin beak-trace -- --bin "00012183" --print-buckets
 ```
 
+Injected replay example:
+
+```bash
+cargo run --release --bin beak-trace -- --bin "00012183" \
+  --inject-kind sp1.semantic.exec.memory_effect_binding \
+  --inject-step 0 \
+  --print-buckets
+```
+
 ## Benchmark
 
 ```bash
@@ -43,3 +52,9 @@ make sp1-fuzz SP1_COMMIT=39ab52fce38172c9d23feed7248198dc14c164a9
 The semantic injection kind for the real audit issue is:
 
 - `sp1.semantic.exec.memory_effect_binding`
+
+Additional installed SP1 hooks currently mapped by the target backend:
+
+- `sp1.semantic.memory.timestamped_load_path`
+- `sp1.semantic.lookup.boolean_multiplicity`
+- `sp1.semantic.exec.control_flow_binding`

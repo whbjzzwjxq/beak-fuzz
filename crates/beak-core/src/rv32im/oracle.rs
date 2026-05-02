@@ -12,6 +12,13 @@ pub struct OracleExecution {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OracleExecutedStep {
+    pub step_idx: u32,
+    pub pc: u32,
+    pub word: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OracleMemoryModel {
     /// Legacy model: code and data share one region at address 0.
     SharedCodeData,
@@ -132,5 +139,82 @@ impl RISCVOracle {
         }
         regs[0] = 0; // x0 is always 0
         OracleExecution { regs, steps, hit_step_limit: steps >= max_steps }
+    }
+
+    pub fn executed_steps_with_config(
+        words: &[u32],
+        cfg: OracleConfig,
+        max_steps: u32,
+    ) -> Vec<OracleExecutedStep> {
+        if words.is_empty() {
+            return Vec::new();
+        }
+
+        let code_len_bytes = (words.len() * 4) as u32;
+        let mut mem_space = MemorySpace::new();
+        let mut hart = HartState::new();
+        let code_base = match cfg.memory_model {
+            OracleMemoryModel::SharedCodeData => {
+                let unified_bytes = cfg.data_size_bytes.max(code_len_bytes).max(4);
+                let unified_words = ((unified_bytes as usize) + 3) / 4;
+                let mut unified = vec![0u32; unified_words];
+                let copy_len = words.len().min(unified.len());
+                unified[..copy_len].copy_from_slice(&words[..copy_len]);
+                mem_space
+                    .add_memory(0, (unified_words * 4) as u32, Box::new(VecMemory::new(unified)))
+                    .expect("add unified code+data region");
+                hart.pc = 0;
+                0
+            }
+            OracleMemoryModel::SplitCodeData => {
+                let data_bytes = cfg.data_size_bytes.max(4);
+                let data_words = ((data_bytes as usize) + 3) / 4;
+                let data_region_len = (data_words * 4) as u32;
+                mem_space
+                    .add_memory(0, data_region_len, Box::new(VecMemory::new(vec![0; data_words])))
+                    .expect("add zeroed data region");
+
+                let min_code_base = data_region_len.saturating_add(4);
+                let mut code_base = cfg.code_base.max(min_code_base);
+                code_base &= !0x3;
+                mem_space
+                    .add_memory(code_base, code_len_bytes, Box::new(VecMemory::new(words.to_vec())))
+                    .expect("add code region");
+                hart.pc = code_base;
+                code_base
+            }
+        };
+
+        let mut executor = InstructionExecutor { hart_state: &mut hart, mem: &mut mem_space };
+        let mut out = Vec::new();
+        let mut steps = 0u32;
+        while steps < max_steps {
+            let pc = executor.hart_state.pc;
+            let idx = pc
+                .checked_sub(code_base)
+                .filter(|offset| offset % 4 == 0)
+                .map(|offset| (offset / 4) as usize);
+            let Some(idx) = idx else {
+                break;
+            };
+            let Some(&word) = words.get(idx) else {
+                break;
+            };
+            match executor.step() {
+                Ok(()) => {
+                    out.push(OracleExecutedStep { step_idx: steps, pc, word });
+                    steps += 1;
+                }
+                Err(
+                    InstructionException::FetchError(_)
+                    | InstructionException::IllegalInstruction(_, _)
+                    | InstructionException::LoadAccessFault(_)
+                    | InstructionException::StoreAccessFault(_)
+                    | InstructionException::AlignmentFault(_),
+                ) => break,
+            }
+        }
+
+        out
     }
 }

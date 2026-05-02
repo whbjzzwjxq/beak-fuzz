@@ -207,6 +207,8 @@ pub enum OpenVMChipRowPayload {
         from_pc: Pc,
         to_pc: Pc,
         rs1_val: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_before_lsb_clear: Option<Pc>,
         rd_data: Vec<u8>,
     },
 

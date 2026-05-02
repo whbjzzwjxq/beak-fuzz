@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::{cell::RefCell, rc::Rc};
 
 use beak_core::fuzz::benchmark::{
@@ -26,7 +27,7 @@ use risc0_circuit_rv32im::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::trace::Risc0Trace;
+use crate::trace::{executed_instructions, Risc0Trace};
 
 const ZERO_REGISTER_INJECT_KIND: &str = "risc0.semantic.decode.zero_register_immutability";
 const OPERAND_ROUTE_INJECT_KIND: &str = "risc0.semantic.decode.operand_index_routing";
@@ -242,15 +243,19 @@ fn oracle_fallback_regs(words: &[u32]) -> [u32; 32] {
 
 fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
     let mut sites = BTreeMap::<String, Vec<u64>>::new();
-    for (step, &word) in words.iter().enumerate() {
-        let Some(dec) = RV32IMInstruction::decode(word) else {
-            continue;
-        };
+    let Ok(instructions) = executed_instructions(words) else {
+        return sites;
+    };
+    for insn in instructions {
         let mut kinds = BTreeSet::<&str>::new();
-        match dec.mnemonic.as_str() {
+        match insn.mnemonic.as_str() {
             "div" | "divu" | "rem" | "remu" => {
                 kinds.insert(OPERAND_ROUTE_INJECT_KIND);
-                kinds.insert(DIV_REM_BOUND_INJECT_KIND);
+                if let Some(rs2) = insn.rs2 {
+                    if insn.regs_before[rs2 as usize] != 0 {
+                        kinds.insert(DIV_REM_BOUND_INJECT_KIND);
+                    }
+                }
             }
             "ecall" => {
                 kinds.insert(ZERO_REGISTER_INJECT_KIND);
@@ -258,11 +263,11 @@ fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
             }
             _ => {}
         }
-        if dec.rd == Some(0) {
+        if insn.rd == Some(0) {
             kinds.insert(ZERO_REGISTER_INJECT_KIND);
-        } else if dec.rd.unwrap_or(0) != 0
+        } else if insn.rd.unwrap_or(0) != 0
             && !matches!(
-                dec.mnemonic.as_str(),
+                insn.mnemonic.as_str(),
                 "sb" | "sh"
                     | "sw"
                     | "beq"
@@ -279,7 +284,7 @@ fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
             kinds.insert(RD_BITS_INJECT_KIND);
         }
         for kind in kinds {
-            sites.entry(kind.to_string()).or_default().push(step as u64);
+            sites.entry(kind.to_string()).or_default().push(insn.step_idx);
         }
     }
     sites
@@ -359,12 +364,21 @@ pub fn run_backend_once(
     let plan =
         inject_kind.map(|kind| BeakInjectionPlan { kind: kind.to_string(), step: inject_step });
     let mut witness_mutation_observed = false;
+    let mut backend_error = None;
 
     for segment in &segments {
-        let (seal, applied) = prove_segment_with_injection(segment, plan.as_ref())
-            .map_err(|e| format!("risc0 prove failed: {e}"))?;
-        risc0_circuit_rv32im::verify(&seal).map_err(|e| format!("risc0 verify failed: {e}"))?;
+        let proved =
+            catch_unwind(AssertUnwindSafe(|| prove_segment_with_injection(segment, plan.as_ref())));
+        let (seal, applied) = match proved {
+            Ok(Ok(result)) => result,
+            Ok(Err(err)) => return Err(format!("risc0 prove failed: {err}")),
+            Err(_) => return Err("risc0 prove panicked during semantic injection".to_string()),
+        };
         witness_mutation_observed |= applied;
+        if let Err(err) = risc0_circuit_rv32im::verify(&seal) {
+            backend_error = Some(format!("risc0 verify failed: {err}"));
+            break;
+        }
     }
     let injection_applied = witness_mutation_observed;
 
@@ -386,7 +400,7 @@ pub fn run_backend_once(
         micro_op_count: trace.instruction_count(),
         bucket_hits,
         trace_signals: trace.trace_signals().to_vec(),
-        backend_error: None,
+        backend_error,
         observed_injection_sites,
         injection_applied,
     })

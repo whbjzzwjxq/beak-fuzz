@@ -32,9 +32,33 @@ impl SemanticBucket {
 pub mod alu {
     use super::{SemanticBucket, SemanticBucketCategory};
 
+    pub const COMPARISON_AUXILIARY_CHAIN: SemanticBucket = SemanticBucket::new(
+        "sem.alu.comparison_auxiliary_chain",
+        "semantic.alu.comparison_auxiliary_chain",
+        SemanticBucketCategory::Alu,
+    );
+
+    pub const COMPARISON_BOOLEANITY: SemanticBucket = SemanticBucket::new(
+        "sem.alu.comparison_booleanity",
+        "semantic.alu.comparison_booleanity",
+        SemanticBucketCategory::Alu,
+    );
+
     pub const IMMEDIATE_LIMB_CONSISTENCY: SemanticBucket = SemanticBucket::new(
         "sem.alu.immediate_limb_consistency",
         "semantic.alu.immediate_limb_consistency",
+        SemanticBucketCategory::Alu,
+    );
+
+    pub const SHIFT_MOD32: SemanticBucket = SemanticBucket::new(
+        "sem.alu.shift_mod32",
+        "semantic.alu.shift_mod32",
+        SemanticBucketCategory::Alu,
+    );
+
+    pub const SUBTRACTION_BORROW_CHAIN: SemanticBucket = SemanticBucket::new(
+        "sem.alu.subtraction_borrow_chain",
+        "semantic.alu.subtraction_borrow_chain",
         SemanticBucketCategory::Alu,
     );
 }
@@ -45,6 +69,18 @@ pub mod arithmetic {
     pub const DIVISION_REMAINDER_BOUND: SemanticBucket = SemanticBucket::new(
         "sem.arithmetic.division_remainder_bound",
         "semantic.arithmetic.division_remainder_bound",
+        SemanticBucketCategory::Arithmetic,
+    );
+
+    pub const PRODUCT_DECOMPOSITION: SemanticBucket = SemanticBucket::new(
+        "sem.arithmetic.product_decomposition",
+        "semantic.arithmetic.product_decomposition",
+        SemanticBucketCategory::Arithmetic,
+    );
+
+    pub const SIGNED_UNSIGNED_PRODUCT_CORRECTION: SemanticBucket = SemanticBucket::new(
+        "sem.arithmetic.signed_unsigned_product_correction",
+        "semantic.arithmetic.signed_unsigned_product_correction",
         SemanticBucketCategory::Arithmetic,
     );
 
@@ -85,6 +121,24 @@ pub mod control {
 
 pub mod decode {
     use super::{SemanticBucket, SemanticBucketCategory};
+
+    pub const FIELD_RANGE: SemanticBucket = SemanticBucket::new(
+        "sem.decode.field_range",
+        "semantic.decode.field_range",
+        SemanticBucketCategory::Decode,
+    );
+
+    pub const FORMAT_IMMEDIATE_REASSEMBLY: SemanticBucket = SemanticBucket::new(
+        "sem.decode.format_immediate_reassembly",
+        "semantic.decode.format_immediate_reassembly",
+        SemanticBucketCategory::Decode,
+    );
+
+    pub const IMMEDIATE_SIGN_EXTENSION: SemanticBucket = SemanticBucket::new(
+        "sem.decode.immediate_sign_extension",
+        "semantic.decode.immediate_sign_extension",
+        SemanticBucketCategory::Decode,
+    );
 
     pub const OPERAND_INDEX_ROUTING: SemanticBucket = SemanticBucket::new(
         "sem.decode.operand_index_routing",
@@ -198,9 +252,27 @@ pub mod memory {
         SemanticBucketCategory::Memory,
     );
 
+    pub const ADDRESS_BOUNDARY_RANGE: SemanticBucket = SemanticBucket::new(
+        "sem.memory.address_boundary_range",
+        "semantic.memory.address_boundary_range",
+        SemanticBucketCategory::Memory,
+    );
+
     pub const IMMEDIATE_SIGN_CONSISTENCY: SemanticBucket = SemanticBucket::new(
         "sem.memory.immediate_sign_consistency",
         "semantic.memory.immediate_sign_consistency",
+        SemanticBucketCategory::Memory,
+    );
+
+    pub const FINALIZATION_CONSISTENCY: SemanticBucket = SemanticBucket::new(
+        "sem.memory.finalization_consistency",
+        "semantic.memory.finalization_consistency",
+        SemanticBucketCategory::Memory,
+    );
+
+    pub const INITIAL_VALUE_BINDING: SemanticBucket = SemanticBucket::new(
+        "sem.memory.initial_value_binding",
+        "semantic.memory.initial_value_binding",
         SemanticBucketCategory::Memory,
     );
 
@@ -259,16 +331,31 @@ pub mod time {
         "semantic.time.boundary_origin_consistency",
         SemanticBucketCategory::Time,
     );
+
+    pub const MONOTONIC_ACCESS_ORDERING: SemanticBucket = SemanticBucket::new(
+        "sem.time.monotonic_access_ordering",
+        "semantic.time.monotonic_access_ordering",
+        SemanticBucketCategory::Time,
+    );
 }
 
 pub const ALL_BUCKETS: &[SemanticBucket] = &[
+    alu::COMPARISON_AUXILIARY_CHAIN,
+    alu::COMPARISON_BOOLEANITY,
     alu::IMMEDIATE_LIMB_CONSISTENCY,
+    alu::SHIFT_MOD32,
+    alu::SUBTRACTION_BORROW_CHAIN,
     arithmetic::DIVISION_REMAINDER_BOUND,
+    arithmetic::PRODUCT_DECOMPOSITION,
+    arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION,
     arithmetic::SPECIAL_CASE_CONSISTENCY,
     control::AUIPC_PC_LIMB_CONSISTENCY,
     control::ECALL_ARGUMENT_DECOMPOSITION,
     control::ECALL_WORD_VALIDITY,
     control::ENTRYPOINT_BINDING,
+    decode::FIELD_RANGE,
+    decode::FORMAT_IMMEDIATE_REASSEMBLY,
+    decode::IMMEDIATE_SIGN_EXTENSION,
     decode::OPERAND_INDEX_ROUTING,
     decode::RD_BIT_DECOMPOSITION,
     decode::UPPER_IMMEDIATE_MATERIALIZATION,
@@ -283,9 +370,12 @@ pub const ALL_BUCKETS: &[SemanticBucket] = &[
     lookup::BOOLEAN_MULTIPLICITY,
     lookup::XOR_MULTIPLICITY_CONSISTENCY,
     memory::ADDRESS_ALIGNMENT_CONSISTENCY,
+    memory::ADDRESS_BOUNDARY_RANGE,
     memory::ADDRESS_PROGRESSION_CONSISTENCY,
     memory::ADDRESS_SPACE_CONSISTENCY,
+    memory::FINALIZATION_CONSISTENCY,
     memory::IMMEDIATE_SIGN_CONSISTENCY,
+    memory::INITIAL_VALUE_BINDING,
     memory::KIND_SELECTOR_CONSISTENCY,
     memory::LOAD_VALUE_BINDING,
     memory::STORE_LOAD_PAYLOAD_FLOW,
@@ -294,6 +384,7 @@ pub const ALL_BUCKETS: &[SemanticBucket] = &[
     memory::WRITE_PAYLOAD_CONSISTENCY,
     row::PADDING_INTERACTION_SEND,
     time::BOUNDARY_ORIGIN_CONSISTENCY,
+    time::MONOTONIC_ACCESS_ORDERING,
 ];
 
 pub fn by_id(id: &str) -> Option<SemanticBucket> {

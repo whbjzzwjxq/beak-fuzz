@@ -22,6 +22,7 @@ clap = "4.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 strum = { version = "0.26", features = ["derive"] }
+fuzzer_utils = { path = "../../beak-py/out/sp1-7f643da16813af4c0fbaad4837cd7409386cf38c/sp1-src/crates/fuzzer_utils" }
 sp1-core-executor = { path = "../../beak-py/out/sp1-7f643da16813af4c0fbaad4837cd7409386cf38c/sp1-src/crates/core/executor" }
 sp1-core-machine = { path = "../../beak-py/out/sp1-7f643da16813af4c0fbaad4837cd7409386cf38c/sp1-src/crates/core/machine" }
 sp1-prover = { path = "../../beak-py/out/sp1-7f643da16813af4c0fbaad4837cd7409386cf38c/sp1-src/crates/prover" }

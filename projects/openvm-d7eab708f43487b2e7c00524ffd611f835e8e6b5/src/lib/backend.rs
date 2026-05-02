@@ -1,6 +1,8 @@
-use beak_core::fuzz::benchmark::{BackendEval, BenchmarkBackend};
+use beak_core::fuzz::benchmark::{
+    BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
+};
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::trace::{Trace, TraceSignal};
+use beak_core::trace::{semantic, Trace, TraceSignal};
 
 use crate::trace::OpenVMTrace;
 use openvm_instructions::exe::VmExe;
@@ -15,6 +17,7 @@ use openvm_sdk::prover::vm::new_local_prover;
 use openvm_sdk::{DefaultStarkEngine, Sdk, StdIn, F};
 use openvm_transpiler::transpiler::Transpiler;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -61,6 +64,8 @@ pub struct WorkerRequest {
     pub request_id: u64,
     pub words: Vec<u32>,
     pub iteration: u64,
+    pub inject_kind: Option<String>,
+    pub inject_step: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,17 +76,26 @@ pub struct WorkerResponse {
     pub bucket_hits: Vec<beak_core::trace::BucketHit>,
     pub trace_signals: Vec<TraceSignal>,
     pub backend_error: Option<String>,
+    pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
+    pub injection_applied: bool,
 }
 
 const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
+
+fn base_inject_kind(kind: &str) -> &str {
+    kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
+}
 
 pub fn run_backend_once(
     request_id: u64,
     words: &[u32],
     current_iteration: u64,
+    inject_kind: Option<&str>,
+    inject_step: u64,
 ) -> Result<WorkerResponse, String> {
     let t_total = Instant::now();
     let mut eval = BackendEval::default();
+    fuzzer_utils::configure_witness_injection(inject_kind, inject_step);
     let _ = fuzzer_utils::take_json_logs();
 
     let t0 = Instant::now();
@@ -167,12 +181,30 @@ pub fn run_backend_once(
     let ms_read_regs = t3.elapsed().as_millis();
 
     let t4 = Instant::now();
+    let observed_injection_sites = fuzzer_utils::take_observed_witness_sites();
+    let applied_injection_sites = fuzzer_utils::take_applied_witness_sites();
+    let injection_applied =
+        inject_kind
+            .and_then(|kind| applied_injection_sites.get(base_inject_kind(kind)))
+            .map(|steps| {
+                if inject_step == u64::MAX {
+                    !steps.is_empty()
+                } else {
+                    steps.contains(&inject_step)
+                }
+            })
+            .unwrap_or(false);
     let logs = fuzzer_utils::take_json_logs();
     let ms_take_logs = t4.elapsed().as_millis();
     let logs_len = logs.len();
+    if std::env::var("BEAK_OPENVM_DUMP_RAW_LOGS").as_deref() == Ok("1") {
+        for (idx, log) in logs.iter().enumerate() {
+            eprintln!("[openvm-raw-log:{idx}] {log}");
+        }
+    }
 
     let t5 = Instant::now();
-    match OpenVMTrace::from_logs(logs) {
+    match OpenVMTrace::from_logs_with_words(logs, words) {
         Ok(trace) => {
             let insn_count = trace.instructions().len();
             let row_count = trace.chip_rows().len();
@@ -205,6 +237,8 @@ pub fn run_backend_once(
         bucket_hits: eval.bucket_hits,
         trace_signals: eval.trace_signals,
         backend_error: eval.backend_error,
+        observed_injection_sites,
+        injection_applied,
     })
 }
 
@@ -215,12 +249,20 @@ struct WorkerProcess {
     reader_thread: JoinHandle<()>,
 }
 
+#[derive(Debug, Clone)]
+struct WitnessInjectionPlan {
+    kind: String,
+    step: u64,
+}
+
 pub struct OpenVmBackend {
     max_instructions: usize,
     eval: BackendEval,
     last_words: Vec<u32>,
+    last_observed_injection_sites: BTreeMap<String, Vec<u64>>,
     current_iteration: u64,
     next_request_id: u64,
+    pending_injection: Option<WitnessInjectionPlan>,
     worker: Option<WorkerProcess>,
 }
 
@@ -230,10 +272,149 @@ impl OpenVmBackend {
             max_instructions,
             eval: BackendEval::default(),
             last_words: Vec::new(),
+            last_observed_injection_sites: BTreeMap::new(),
             current_iteration: 0,
             next_request_id: 1,
+            pending_injection: None,
             worker: None,
         }
+    }
+
+    fn ordered_steps_around_anchor(steps: &[u64], anchor: u64) -> Vec<u64> {
+        let mut ordered = steps.to_vec();
+        ordered.sort_by_key(|step| {
+            let dist = if *step >= anchor {
+                step.saturating_sub(anchor)
+            } else {
+                anchor.saturating_sub(*step)
+            };
+            (dist, *step)
+        });
+        ordered.dedup();
+        ordered
+    }
+
+    fn step_from_hit(hit: &beak_core::trace::BucketHit) -> u64 {
+        hit.details
+            .get("op_idx")
+            .and_then(|v| v.as_u64())
+            .or_else(|| hit.details.get("step_idx").and_then(|v| v.as_u64()))
+            .unwrap_or(0)
+    }
+
+    fn semantic_candidate_from_hit(
+        &self,
+        hit: &beak_core::trace::BucketHit,
+    ) -> Vec<SemanticInjectionCandidate> {
+        let bucket_id = hit.bucket_id.as_str();
+        let anchor = Self::step_from_hit(hit);
+        let (semantic_class, inject_kind, fallback_schedule) =
+            if bucket_id == semantic::control::ENTRYPOINT_BINDING.id {
+                (
+                    semantic::control::ENTRYPOINT_BINDING.semantic_class,
+                    "openvm.semantic.control.entrypoint_binding",
+                    InjectionSchedule::Exact(0),
+                )
+            } else if bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id {
+                (
+                    semantic::exec::CONTROL_FLOW_BINDING.semantic_class,
+                    "openvm.semantic.exec.control_flow_binding",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id {
+                (
+                    semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.semantic_class,
+                    "openvm.semantic.time.boundary_origin_consistency",
+                    InjectionSchedule::Exact(0),
+                )
+            } else if bucket_id == semantic::control::AUIPC_PC_LIMB_CONSISTENCY.id {
+                (
+                    semantic::control::AUIPC_PC_LIMB_CONSISTENCY.semantic_class,
+                    "openvm.semantic.control.auipc_pc_limb_consistency",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id {
+                (
+                    semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.semantic_class,
+                    "openvm.semantic.alu.immediate_limb_consistency",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::alu::SHIFT_MOD32.id {
+                (
+                    semantic::alu::SHIFT_MOD32.semantic_class,
+                    "openvm.semantic.alu.shift_mod32",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::alu::COMPARISON_BOOLEANITY.id {
+                (
+                    semantic::alu::COMPARISON_BOOLEANITY.semantic_class,
+                    "openvm.semantic.alu.comparison_booleanity",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::alu::SUBTRACTION_BORROW_CHAIN.id {
+                (
+                    semantic::alu::SUBTRACTION_BORROW_CHAIN.semantic_class,
+                    "openvm.semantic.alu.subtraction_borrow_chain",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::alu::COMPARISON_AUXILIARY_CHAIN.id {
+                (
+                    semantic::alu::COMPARISON_AUXILIARY_CHAIN.semantic_class,
+                    "openvm.semantic.alu.comparison_auxiliary_chain",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.id {
+                (
+                    semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.semantic_class,
+                    "openvm.semantic.arithmetic.special_case_consistency",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::arithmetic::DIVISION_REMAINDER_BOUND.id {
+                (
+                    semantic::arithmetic::DIVISION_REMAINDER_BOUND.semantic_class,
+                    "openvm.semantic.arithmetic.division_remainder_bound",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::arithmetic::PRODUCT_DECOMPOSITION.id {
+                (
+                    semantic::arithmetic::PRODUCT_DECOMPOSITION.semantic_class,
+                    "openvm.semantic.arithmetic.product_decomposition",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION.id {
+                (
+                    semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION.semantic_class,
+                    "openvm.semantic.arithmetic.signed_unsigned_product_correction",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else {
+                return Vec::new();
+            };
+
+        let schedule = self
+            .last_observed_injection_sites
+            .get(base_inject_kind(inject_kind))
+            .map(|steps| {
+                InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor))
+            })
+            .unwrap_or(fallback_schedule);
+
+        vec![
+            SemanticInjectionCandidate {
+                bucket_id: hit.bucket_id.clone(),
+                trigger_signal_id: None,
+                semantic_class: semantic_class.to_string(),
+                inject_kind: inject_kind.to_string(),
+                schedule,
+            },
+            SemanticInjectionCandidate {
+                bucket_id: hit.bucket_id.clone(),
+                trigger_signal_id: None,
+                semantic_class: semantic_class.to_string(),
+                inject_kind: inject_kind.to_string(),
+                schedule: InjectionSchedule::Exact(u64::MAX),
+            },
+        ]
     }
 
     fn start_worker(&mut self) -> Result<(), String> {
@@ -329,12 +510,19 @@ impl BenchmarkBackend for OpenVmBackend {
         self.eval.bucket_hits.clear();
         self.eval.micro_op_count = 0;
         self.eval.final_regs = None;
+        self.eval.semantic_injection_applied = false;
+        self.last_observed_injection_sites.clear();
         self.last_words = words.to_vec();
         self.start_worker()?;
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
-        let req =
-            WorkerRequest { request_id, words: words.to_vec(), iteration: self.current_iteration };
+        let req = WorkerRequest {
+            request_id,
+            words: words.to_vec(),
+            iteration: self.current_iteration,
+            inject_kind: self.pending_injection.as_ref().map(|p| p.kind.clone()),
+            inject_step: self.pending_injection.as_ref().map(|p| p.step).unwrap_or(0),
+        };
 
         {
             let worker =
@@ -380,6 +568,8 @@ impl BenchmarkBackend for OpenVmBackend {
         self.eval.trace_signals = worker_resp.trace_signals;
         self.eval.backend_error = worker_resp.backend_error.clone();
         self.eval.final_regs = worker_resp.final_regs;
+        self.eval.semantic_injection_applied = worker_resp.injection_applied;
+        self.last_observed_injection_sites = worker_resp.observed_injection_sites;
 
         match worker_resp.final_regs {
             Some(regs) => Ok(regs),
@@ -391,6 +581,22 @@ impl BenchmarkBackend for OpenVmBackend {
 
     fn collect_eval(&mut self) -> BackendEval {
         self.eval.clone()
+    }
+
+    fn clear_semantic_injection(&mut self) {
+        self.pending_injection = None;
+    }
+
+    fn arm_semantic_injection(&mut self, kind: &str, step: u64) -> Result<(), String> {
+        self.pending_injection = Some(WitnessInjectionPlan { kind: kind.to_string(), step });
+        Ok(())
+    }
+
+    fn semantic_injection_candidates(
+        &self,
+        hits: &[beak_core::trace::BucketHit],
+    ) -> Vec<SemanticInjectionCandidate> {
+        hits.iter().flat_map(|hit| self.semantic_candidate_from_hit(hit)).collect()
     }
 }
 

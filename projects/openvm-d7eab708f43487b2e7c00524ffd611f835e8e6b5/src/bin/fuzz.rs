@@ -216,7 +216,13 @@ fn run_worker_loop() {
                     }
                 };
                 let resp = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_backend_once(req.request_id, &req.words, req.iteration)
+                    run_backend_once(
+                        req.request_id,
+                        &req.words,
+                        req.iteration,
+                        req.inject_kind.as_deref(),
+                        req.inject_step,
+                    )
                 })) {
                     Ok(Ok(v)) => v,
                     Ok(Err(e)) => WorkerResponse {
@@ -226,6 +232,8 @@ fn run_worker_loop() {
                         bucket_hits: Vec::new(),
                         trace_signals: Vec::new(),
                         backend_error: Some(e),
+                        observed_injection_sites: Default::default(),
+                        injection_applied: false,
                     },
                     Err(p) => WorkerResponse {
                         request_id: req.request_id,
@@ -237,6 +245,8 @@ fn run_worker_loop() {
                             "worker panic in run_backend_once: {}",
                             panic_payload_to_string(p.as_ref())
                         )),
+                        observed_injection_sites: Default::default(),
+                        injection_applied: false,
                     },
                 };
                 let payload = match serde_json::to_vec(&resp) {

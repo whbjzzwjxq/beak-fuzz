@@ -16,6 +16,9 @@ use sp1_stark::CpuProver;
 use crate::trace::{build_sp1_program, decode_word_to_sp1_instruction, Sp1Trace};
 
 const IS_MEMORY_INJECT_KIND: &str = "sp1.semantic.exec.memory_effect_binding";
+const TIMESTAMPED_LOAD_INJECT_KIND: &str = "sp1.semantic.memory.timestamped_load_path";
+const LOOKUP_BOOLEAN_INJECT_KIND: &str = "sp1.semantic.lookup.boolean_multiplicity";
+const CONTROL_FLOW_INJECT_KIND: &str = "sp1.semantic.exec.control_flow_binding";
 const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
 
 #[derive(Debug, Clone)]
@@ -85,6 +88,22 @@ fn collect_observed_injection_sites(words: &[u32]) -> Result<BTreeMap<String, Ve
         let instruction = decode_word_to_sp1_instruction(word)?;
         if instruction.is_memory_load_instruction() || instruction.is_memory_store_instruction() {
             record_site(&mut sites, IS_MEMORY_INJECT_KIND, step as u64);
+            record_site(&mut sites, TIMESTAMPED_LOAD_INJECT_KIND, step as u64);
+            record_site(&mut sites, LOOKUP_BOOLEAN_INJECT_KIND, step as u64);
+        }
+        if matches!(
+            instruction.opcode,
+            sp1_core_executor::Opcode::BEQ
+                | sp1_core_executor::Opcode::BNE
+                | sp1_core_executor::Opcode::BLT
+                | sp1_core_executor::Opcode::BGE
+                | sp1_core_executor::Opcode::BLTU
+                | sp1_core_executor::Opcode::BGEU
+                | sp1_core_executor::Opcode::JAL
+                | sp1_core_executor::Opcode::JALR
+                | sp1_core_executor::Opcode::ECALL
+        ) {
+            record_site(&mut sites, CONTROL_FLOW_INJECT_KIND, step as u64);
         }
     }
     Ok(sites)
@@ -96,10 +115,17 @@ fn resolve_injection_step(
     observed_injection_sites: &BTreeMap<String, Vec<u64>>,
 ) -> Option<u64> {
     let kind = inject_kind?;
-    if base_inject_kind(kind) != IS_MEMORY_INJECT_KIND {
+    let base = base_inject_kind(kind);
+    if !matches!(
+        base,
+        IS_MEMORY_INJECT_KIND
+            | TIMESTAMPED_LOAD_INJECT_KIND
+            | LOOKUP_BOOLEAN_INJECT_KIND
+            | CONTROL_FLOW_INJECT_KIND
+    ) {
         return None;
     }
-    let steps = observed_injection_sites.get(IS_MEMORY_INJECT_KIND)?;
+    let steps = observed_injection_sites.get(base)?;
     if inject_step == u64::MAX {
         steps.first().copied()
     } else if steps.contains(&inject_step) {
@@ -156,7 +182,15 @@ fn run_sp1_prove_verify(
     };
 
     let prove_result = with_scoped_injection_env(
-        inject_kind.filter(|kind| base_inject_kind(kind) == IS_MEMORY_INJECT_KIND),
+        inject_kind.filter(|kind| {
+            matches!(
+                base_inject_kind(kind),
+                IS_MEMORY_INJECT_KIND
+                    | TIMESTAMPED_LOAD_INJECT_KIND
+                    | LOOKUP_BOOLEAN_INJECT_KIND
+                    | CONTROL_FLOW_INJECT_KIND
+            )
+        }),
         resolved_step,
         || {
             run_test::<CpuProver<_, _>>(program, SP1Stdin::new())
@@ -310,16 +344,24 @@ impl Sp1Backend {
 
     fn semantic_candidate_from_hit(&self, hit: &BucketHit) -> Vec<SemanticInjectionCandidate> {
         let bucket_id = hit.bucket_id.as_str();
-        if bucket_id != semantic::memory::TIMESTAMPED_LOAD_PATH.id
-            && bucket_id != semantic::lookup::BOOLEAN_MULTIPLICITY.id
+        let (semantic_class, inject_kind) = if bucket_id
+            == semantic::memory::TIMESTAMPED_LOAD_PATH.id
         {
+            (semantic::memory::TIMESTAMPED_LOAD_PATH.semantic_class, TIMESTAMPED_LOAD_INJECT_KIND)
+        } else if bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id {
+            (semantic::lookup::BOOLEAN_MULTIPLICITY.semantic_class, LOOKUP_BOOLEAN_INJECT_KIND)
+        } else if bucket_id == semantic::exec::MEMORY_EFFECT_BINDING.id {
+            (semantic::exec::MEMORY_EFFECT_BINDING.semantic_class, IS_MEMORY_INJECT_KIND)
+        } else if bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id {
+            (semantic::exec::CONTROL_FLOW_BINDING.semantic_class, CONTROL_FLOW_INJECT_KIND)
+        } else {
             return Vec::new();
-        }
+        };
 
         let anchor = Self::step_from_hit(hit);
         let schedule = self
             .last_observed_injection_sites
-            .get(IS_MEMORY_INJECT_KIND)
+            .get(inject_kind)
             .map(|steps| {
                 InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor))
             })
@@ -328,12 +370,8 @@ impl Sp1Backend {
         vec![SemanticInjectionCandidate {
             bucket_id: hit.bucket_id.clone(),
             trigger_signal_id: None,
-            semantic_class: if bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id {
-                semantic::memory::TIMESTAMPED_LOAD_PATH.semantic_class.to_string()
-            } else {
-                semantic::lookup::BOOLEAN_MULTIPLICITY.semantic_class.to_string()
-            },
-            inject_kind: IS_MEMORY_INJECT_KIND.to_string(),
+            semantic_class: semantic_class.to_string(),
+            inject_kind: inject_kind.to_string(),
             schedule,
         }]
     }
@@ -342,10 +380,14 @@ impl Sp1Backend {
         let bucket_id = candidate.bucket_id.as_str();
         if bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id {
             0
-        } else if bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id {
+        } else if bucket_id == semantic::exec::MEMORY_EFFECT_BINDING.id {
             1
-        } else {
+        } else if bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id {
             2
+        } else if bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id {
+            3
+        } else {
+            4
         }
     }
 

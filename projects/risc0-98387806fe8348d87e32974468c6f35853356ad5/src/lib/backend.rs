@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::{cell::RefCell, rc::Rc};
 
 use beak_core::fuzz::benchmark::{
@@ -26,7 +27,7 @@ use risc0_circuit_rv32im::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::trace::Risc0Trace;
+use crate::trace::{executed_instructions, Risc0Trace};
 
 const ZERO_REGISTER_INJECT_KIND: &str = "risc0.semantic.decode.zero_register_immutability";
 const OPERAND_ROUTE_INJECT_KIND: &str = "risc0.semantic.decode.operand_index_routing";
@@ -347,21 +348,12 @@ fn final_regs_for_oracle(words: &[u32]) -> Result<[u32; 32], String> {
 
 fn runtime_source_binding_sites(words: &[u32]) -> Result<BTreeSet<u64>, String> {
     let mut sites = BTreeSet::<u64>::new();
-    let cfg = OracleConfig {
-        memory_model: OracleMemoryModel::SplitCodeData,
-        code_base: crate::RISC0_ORACLE_CODE_BASE,
-        data_size_bytes: 0,
-    };
-    for (step, &word) in words.iter().enumerate() {
-        let Some(dec) = RV32IMInstruction::decode(word) else {
+    for insn in executed_instructions(words)? {
+        let (Some(rs1), Some(rs2)) = (insn.rs1, insn.rs2) else {
             continue;
         };
-        let (Some(rs1), Some(rs2)) = (dec.rs1, dec.rs2) else {
-            continue;
-        };
-        let regs = RISCVOracle::execute_with_step_limit(words, cfg, step as u32).regs;
-        if regs[rs1 as usize] != regs[rs2 as usize] {
-            sites.insert(step as u64);
+        if insn.regs_before[rs1 as usize] != insn.regs_before[rs2 as usize] {
+            sites.insert(insn.step_idx);
         }
     }
     Ok(sites)
@@ -381,15 +373,19 @@ fn oracle_fallback_regs(words: &[u32]) -> [u32; 32] {
 fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
     let mut sites = BTreeMap::<String, Vec<u64>>::new();
     let runtime_source_sites = runtime_source_binding_sites(words).ok();
-    for (step, &word) in words.iter().enumerate() {
-        let Some(dec) = RV32IMInstruction::decode(word) else {
-            continue;
-        };
+    let Ok(instructions) = executed_instructions(words) else {
+        return sites;
+    };
+    for insn in instructions {
         let mut kinds = BTreeSet::<&str>::new();
-        match dec.mnemonic.as_str() {
+        match insn.mnemonic.as_str() {
             "div" | "divu" | "rem" | "remu" => {
                 kinds.insert(OPERAND_ROUTE_INJECT_KIND);
-                kinds.insert(DIV_REM_BOUND_INJECT_KIND);
+                if let Some(rs2) = insn.rs2 {
+                    if insn.regs_before[rs2 as usize] != 0 {
+                        kinds.insert(DIV_REM_BOUND_INJECT_KIND);
+                    }
+                }
             }
             "ecall" => {
                 kinds.insert(ZERO_REGISTER_INJECT_KIND);
@@ -397,11 +393,11 @@ fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
             }
             _ => {}
         }
-        if dec.rd == Some(0) {
+        if insn.rd == Some(0) {
             kinds.insert(ZERO_REGISTER_INJECT_KIND);
-        } else if dec.rd.unwrap_or(0) != 0
+        } else if insn.rd.unwrap_or(0) != 0
             && !matches!(
-                dec.mnemonic.as_str(),
+                insn.mnemonic.as_str(),
                 "sb" | "sh"
                     | "sw"
                     | "beq"
@@ -417,18 +413,18 @@ fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
         {
             kinds.insert(RD_BITS_INJECT_KIND);
         }
-        if dec.rs1.is_some()
-            && dec.rs2.is_some()
+        if insn.rs1.is_some()
+            && insn.rs2.is_some()
             && runtime_source_sites
                 .as_ref()
-                .map(|steps| steps.contains(&(step as u64)))
+                .map(|steps| steps.contains(&insn.step_idx))
                 .unwrap_or(true)
         {
             kinds.insert(EXEC_SOURCE_BINDING_INJECT_KIND);
         }
-        if dec.rd.is_some_and(|rd| rd != 0)
+        if insn.rd.is_some_and(|rd| rd != 0)
             && !matches!(
-                dec.mnemonic.as_str(),
+                insn.mnemonic.as_str(),
                 "sb" | "sh"
                     | "sw"
                     | "beq"
@@ -445,7 +441,7 @@ fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
             kinds.insert(EXEC_DEST_BINDING_INJECT_KIND);
         }
         if matches!(
-            dec.mnemonic.as_str(),
+            insn.mnemonic.as_str(),
             "div"
                 | "divu"
                 | "rem"
@@ -464,17 +460,17 @@ fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
             kinds.insert(EXEC_OP_SELECTOR_BINDING_INJECT_KIND);
         }
         if matches!(
-            dec.mnemonic.as_str(),
+            insn.mnemonic.as_str(),
             "beq" | "bne" | "blt" | "bge" | "bltu" | "bgeu" | "jal" | "jalr" | "ecall"
         ) {
             kinds.insert(EXEC_CONTROL_FLOW_BINDING_INJECT_KIND);
         }
-        if matches!(dec.mnemonic.as_str(), "lb" | "lh" | "lw" | "lbu" | "lhu" | "sb" | "sh" | "sw")
+        if matches!(insn.mnemonic.as_str(), "lb" | "lh" | "lw" | "lbu" | "lhu" | "sb" | "sh" | "sw")
         {
             kinds.insert(EXEC_MEMORY_EFFECT_BINDING_INJECT_KIND);
         }
         for kind in kinds {
-            sites.entry(kind.to_string()).or_default().push(step as u64);
+            sites.entry(kind.to_string()).or_default().push(insn.step_idx);
         }
     }
     sites
@@ -565,12 +561,24 @@ pub fn run_backend_once(
         inject_kind.map(|kind| BeakInjectionPlan { kind: kind.to_string(), step: inject_step });
     let mut witness_mutation_observed = false;
 
+    let mut backend_error = None;
     for segment in &segments {
-        let (seal, applied) = prove_segment_with_injection(segment, plan.as_ref())
-            .map_err(|e| format!("risc0 prove failed: {e}"))?;
-        risc0_circuit_rv32im::verify(&seal).map_err(|e| format!("risc0 verify failed: {e}"))?;
-        ensure_seal_matches_segment_claim(segment, &seal)?;
+        let proved =
+            catch_unwind(AssertUnwindSafe(|| prove_segment_with_injection(segment, plan.as_ref())));
+        let (seal, applied) = match proved {
+            Ok(Ok(result)) => result,
+            Ok(Err(err)) => return Err(format!("risc0 prove failed: {err}")),
+            Err(_) => return Err("risc0 prove panicked during semantic injection".to_string()),
+        };
         witness_mutation_observed |= applied;
+        if let Err(err) = risc0_circuit_rv32im::verify(&seal) {
+            backend_error = Some(format!("risc0 verify failed: {err}"));
+            break;
+        }
+        if let Err(err) = ensure_seal_matches_segment_claim(segment, &seal) {
+            backend_error = Some(err);
+            break;
+        }
     }
     let injection_applied = witness_mutation_observed;
 
@@ -592,7 +600,7 @@ pub fn run_backend_once(
         micro_op_count: trace.instruction_count(),
         bucket_hits,
         trace_signals: trace.trace_signals().to_vec(),
-        backend_error: None,
+        backend_error,
         observed_injection_sites,
         injection_applied,
     })
@@ -628,8 +636,6 @@ impl Risc0Backend {
             (semantic::decode::ZERO_REGISTER_IMMUTABILITY.semantic_class, ZERO_REGISTER_INJECT_KIND)
         } else if bucket_id == semantic::decode::OPERAND_INDEX_ROUTING.id {
             (semantic::decode::OPERAND_INDEX_ROUTING.semantic_class, OPERAND_ROUTE_INJECT_KIND)
-        } else if bucket_id == semantic::decode::RD_BIT_DECOMPOSITION.id {
-            (semantic::decode::RD_BIT_DECOMPOSITION.semantic_class, RD_BITS_INJECT_KIND)
         } else if bucket_id == semantic::arithmetic::DIVISION_REMAINDER_BOUND.id {
             (
                 semantic::arithmetic::DIVISION_REMAINDER_BOUND.semantic_class,
@@ -640,30 +646,10 @@ impl Risc0Backend {
                 semantic::control::ECALL_ARGUMENT_DECOMPOSITION.semantic_class,
                 ECALL_ARG_DECOMP_INJECT_KIND,
             )
-        } else if bucket_id == semantic::exec::SOURCE_OPERAND_BINDING.id {
-            (
-                semantic::exec::SOURCE_OPERAND_BINDING.semantic_class,
-                "risc0.semantic.exec.source_operand_binding::src2_from_src1_word",
-            )
-        } else if bucket_id == semantic::exec::DEST_BINDING.id {
-            (
-                semantic::exec::DEST_BINDING.semantic_class,
-                "risc0.semantic.exec.dest_binding::rd_plus_one_word",
-            )
         } else if bucket_id == semantic::exec::OP_SELECTOR_BINDING.id {
             (
                 semantic::exec::OP_SELECTOR_BINDING.semantic_class,
                 "risc0.semantic.exec.op_selector_binding::toggle_selector_word",
-            )
-        } else if bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id {
-            (
-                semantic::exec::CONTROL_FLOW_BINDING.semantic_class,
-                "risc0.semantic.exec.control_flow_binding::branch_negate_word",
-            )
-        } else if bucket_id == semantic::exec::MEMORY_EFFECT_BINDING.id {
-            (
-                semantic::exec::MEMORY_EFFECT_BINDING.semantic_class,
-                "risc0.semantic.exec.memory_effect_binding::memory_route_word",
             )
         } else {
             return Vec::new();
@@ -829,18 +815,13 @@ mod tests {
     }
 
     #[test]
-    fn source_binding_candidates_skip_equal_runtime_operands() {
-        let words = [0xfec0_0593u32, 0x0060_0613, 0x02c5_c733, 0xffd0_0393, 0x0077_4533];
-        let mut backend = super::Risc0Backend::new(16, 0);
-        backend.last_observed_injection_sites = observe_sites_for_words(&words);
+    fn source_binding_bucket_is_not_backend_mapped() {
+        let mut backend = super::Risc0Backend::new(16);
+        backend.last_observed_injection_sites =
+            observe_sites_for_words(&[0x0010_0093, 0x0020_0113, 0x0020_81b3]);
         let hit = BucketHit {
             bucket_id: super::semantic::exec::SOURCE_OPERAND_BINDING.id.to_string(),
-            details: HashMap::from([
-                ("op_idx".to_string(), json!(4)),
-                ("mnemonic".to_string(), json!("xor")),
-                ("rs1".to_string(), json!(14)),
-                ("rs2".to_string(), json!(7)),
-            ]),
+            details: HashMap::from([("op_idx".to_string(), json!(2))]),
         };
 
         let candidates = backend.semantic_candidate_from_hit(&hit);

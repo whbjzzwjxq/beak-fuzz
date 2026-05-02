@@ -13,7 +13,7 @@ use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
 use serde::{Deserialize, Serialize};
 
-use crate::trace::PicoTrace;
+use crate::trace::{PicoExecutedInsn, PicoTrace};
 
 #[derive(Debug, Clone)]
 struct WitnessInjectionPlan {
@@ -63,12 +63,39 @@ struct RealRunnerResponse {
     error: Option<String>,
     observed_injection_sites: BTreeMap<String, Vec<u64>>,
     injection_applied: bool,
+    #[serde(default)]
+    executed_insns: Vec<PicoExecutedInsn>,
 }
 
 const TIMESTAMP_INJECT_KIND: &str = "pico.semantic.memory.timestamped_load_path";
 const BOOL_INJECT_KIND: &str = "pico.semantic.lookup.boolean_multiplicity";
-const H1_INJECT_KIND: &str = "pico.semantic.exec.op_selector_binding";
-const H8_INJECT_KIND: &str = "pico.semantic.control.ecall_word_validity";
+const OP_SELECTOR_INJECT_KIND: &str = "pico.semantic.exec.op_selector_binding";
+const ZERO_REG_INJECT_KIND: &str = "pico.semantic.decode.zero_register_immutability";
+const OPERAND_ROUTING_INJECT_KIND: &str = "pico.semantic.decode.operand_index_routing";
+const DEST_BINDING_INJECT_KIND: &str = "pico.semantic.exec.dest_binding";
+const FIELD_RANGE_INJECT_KIND: &str = "pico.semantic.decode.field_range";
+const IMM_SIGN_INJECT_KIND: &str = "pico.semantic.decode.immediate_sign_extension";
+const UPPER_IMM_INJECT_KIND: &str = "pico.semantic.decode.upper_immediate_materialization";
+const FORMAT_IMM_INJECT_KIND: &str = "pico.semantic.decode.format_immediate_reassembly";
+const ALU_IMM_INJECT_KIND: &str = "pico.semantic.alu.immediate_limb_consistency";
+const SHIFT_INJECT_KIND: &str = "pico.semantic.alu.shift_mod32";
+const CMP_BOOL_INJECT_KIND: &str = "pico.semantic.alu.comparison_booleanity";
+const SUB_BORROW_INJECT_KIND: &str = "pico.semantic.alu.subtraction_borrow_chain";
+const CMP_AUX_INJECT_KIND: &str = "pico.semantic.alu.comparison_auxiliary_chain";
+const DIV_SPECIAL_INJECT_KIND: &str = "pico.semantic.arithmetic.special_case_consistency";
+const DIV_BOUND_INJECT_KIND: &str = "pico.semantic.arithmetic.division_remainder_bound";
+const PRODUCT_INJECT_KIND: &str = "pico.semantic.arithmetic.product_decomposition";
+const MULHSU_INJECT_KIND: &str = "pico.semantic.arithmetic.signed_unsigned_product_correction";
+const MEM_STORE_LOAD_INJECT_KIND: &str = "pico.semantic.memory.store_load_payload_flow";
+const MEM_ADDR_ALIGN_INJECT_KIND: &str = "pico.semantic.memory.address_alignment_consistency";
+const MEM_LOAD_VALUE_INJECT_KIND: &str = "pico.semantic.memory.load_value_binding";
+const MEM_WRITE_PAYLOAD_INJECT_KIND: &str = "pico.semantic.memory.write_payload_consistency";
+const MEM_ADDR_BOUNDARY_INJECT_KIND: &str = "pico.semantic.memory.address_boundary_range";
+const MEM_ADDR_PROGRESS_INJECT_KIND: &str = "pico.semantic.memory.address_progression_consistency";
+const MEM_KIND_INJECT_KIND: &str = "pico.semantic.memory.kind_selector_consistency";
+const CONTROL_FLOW_INJECT_KIND: &str = "pico.semantic.exec.control_flow_binding";
+const ENTRYPOINT_INJECT_KIND: &str = "pico.semantic.control.entrypoint_binding";
+const TIME_BOUNDARY_INJECT_KIND: &str = "pico.semantic.time.boundary_origin_consistency";
 
 fn base_inject_kind(kind: &str) -> &str {
     kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
@@ -194,14 +221,14 @@ pub fn run_backend_once(
         run_pico_real_backend(words, inject_kind, inject_step)
     }));
 
-    match runner_res {
+    match &runner_res {
         Ok(Ok(resp)) => {
-            observed_injection_sites = resp.observed_injection_sites;
+            observed_injection_sites = resp.observed_injection_sites.clone();
             injection_applied = resp.injection_applied;
             eval.final_regs = resp.final_regs;
             eval.micro_op_count = resp.micro_op_count;
-            if let Some(err) = resp.error {
-                eval.backend_error = Some(err);
+            if let Some(err) = &resp.error {
+                eval.backend_error = Some(err.clone());
             } else if !resp.prove_ok || !resp.verify_ok {
                 eval.backend_error = Some(format!(
                     "pico real backend did not complete prove+verify successfully (prove_ok={}, verify_ok={})",
@@ -210,7 +237,7 @@ pub fn run_backend_once(
             }
         }
         Ok(Err(e)) => {
-            eval.backend_error = Some(e);
+            eval.backend_error = Some(e.clone());
         }
         Err(p) => {
             let msg = if let Some(s) = p.downcast_ref::<&str>() {
@@ -224,7 +251,11 @@ pub fn run_backend_once(
         }
     }
 
-    let trace = PicoTrace::from_words(words)?;
+    let trace = if let Ok(Ok(resp)) = &runner_res {
+        PicoTrace::from_executed(&resp.executed_insns)?
+    } else {
+        PicoTrace::from_words(words)?
+    };
     if eval.micro_op_count == 0 {
         eval.micro_op_count = trace.instruction_count();
     }
@@ -296,51 +327,11 @@ impl PicoBackend {
     }
 
     fn timestamp_variant_specs() -> Vec<String> {
-        let mut specs = Vec::new();
-        for rank in 0..1024u32 {
-            specs.push(format!("mode=noop_prefix,rank={rank}"));
-        }
-        specs.push("mode=prev_timestamp_zero".to_string());
-        specs.push("mode=prev_chunk_alias".to_string());
-        specs.push("mode=memory_pos_c".to_string());
-        specs.push("mode=memory_pos_b".to_string());
-        specs.push("mode=memory_pos_a".to_string());
-        specs.push("mode=legacy_wrap".to_string());
-        specs
+        vec![String::new()]
     }
 
     fn bool_variant_specs() -> Vec<String> {
-        let mut specs = Vec::new();
-        for rank in 0..1024u32 {
-            specs.push(format!("mode=noop_prefix,rank={rank}"));
-        }
-        specs.push("mode=is_real_zero".to_string());
-        specs.push("mode=legacy_is_real_twice".to_string());
-        specs.push("mode=is_real_shadow_zero".to_string());
-        specs
-    }
-
-    fn h1_variant_specs() -> Vec<String> {
-        let mut specs = Vec::new();
-        for rank in 0..512u32 {
-            specs.push(format!("mode=noop_prefix,rank={rank}"));
-        }
-        specs.push("mode=auto_toggle".to_string());
-        specs.push("mode=lw_to_lbu".to_string());
-        specs.push("mode=lh_to_lhu".to_string());
-        specs.push("mode=sw_to_sb".to_string());
-        specs
-    }
-
-    fn h8_variant_specs() -> Vec<String> {
-        let mut specs = Vec::new();
-        for rank in 0..256u32 {
-            specs.push(format!("mode=noop_prefix,rank={rank}"));
-        }
-        specs.push("mode=xor_low_byte".to_string());
-        specs.push("mode=add_one".to_string());
-        specs.push("mode=flip_sign_bit".to_string());
-        specs
+        vec![String::new()]
     }
 
     fn inject_kinds_for_base(inject_kind: &str) -> Vec<String> {
@@ -350,14 +341,6 @@ impl PicoBackend {
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
             BOOL_INJECT_KIND => Self::bool_variant_specs()
-                .into_iter()
-                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
-                .collect(),
-            H1_INJECT_KIND => Self::h1_variant_specs()
-                .into_iter()
-                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
-                .collect(),
-            H8_INJECT_KIND => Self::h8_variant_specs()
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
@@ -384,13 +367,169 @@ impl PicoBackend {
             } else if bucket_id == semantic::exec::OP_SELECTOR_BINDING.id {
                 (
                     semantic::exec::OP_SELECTOR_BINDING.semantic_class,
-                    H1_INJECT_KIND,
+                    OP_SELECTOR_INJECT_KIND,
                     InjectionSchedule::AroundAnchor(anchor),
                 )
-            } else if bucket_id == semantic::control::ECALL_WORD_VALIDITY.id {
+            } else if bucket_id == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id {
                 (
-                    semantic::control::ECALL_WORD_VALIDITY.semantic_class,
-                    H8_INJECT_KIND,
+                    semantic::decode::ZERO_REGISTER_IMMUTABILITY.semantic_class,
+                    ZERO_REG_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::decode::OPERAND_INDEX_ROUTING.id {
+                (
+                    semantic::decode::OPERAND_INDEX_ROUTING.semantic_class,
+                    OPERAND_ROUTING_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::exec::DEST_BINDING.id {
+                (
+                    semantic::exec::DEST_BINDING.semantic_class,
+                    DEST_BINDING_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::decode::FIELD_RANGE.id {
+                (
+                    semantic::decode::FIELD_RANGE.semantic_class,
+                    FIELD_RANGE_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::decode::IMMEDIATE_SIGN_EXTENSION.id {
+                (
+                    semantic::decode::IMMEDIATE_SIGN_EXTENSION.semantic_class,
+                    IMM_SIGN_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.id {
+                (
+                    semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.semantic_class,
+                    UPPER_IMM_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::decode::FORMAT_IMMEDIATE_REASSEMBLY.id {
+                (
+                    semantic::decode::FORMAT_IMMEDIATE_REASSEMBLY.semantic_class,
+                    FORMAT_IMM_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id {
+                (
+                    semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.semantic_class,
+                    ALU_IMM_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::alu::SHIFT_MOD32.id {
+                (
+                    semantic::alu::SHIFT_MOD32.semantic_class,
+                    SHIFT_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::alu::COMPARISON_BOOLEANITY.id {
+                (
+                    semantic::alu::COMPARISON_BOOLEANITY.semantic_class,
+                    CMP_BOOL_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::alu::SUBTRACTION_BORROW_CHAIN.id {
+                (
+                    semantic::alu::SUBTRACTION_BORROW_CHAIN.semantic_class,
+                    SUB_BORROW_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::alu::COMPARISON_AUXILIARY_CHAIN.id {
+                (
+                    semantic::alu::COMPARISON_AUXILIARY_CHAIN.semantic_class,
+                    CMP_AUX_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.id {
+                (
+                    semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.semantic_class,
+                    DIV_SPECIAL_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::arithmetic::DIVISION_REMAINDER_BOUND.id {
+                (
+                    semantic::arithmetic::DIVISION_REMAINDER_BOUND.semantic_class,
+                    DIV_BOUND_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::arithmetic::PRODUCT_DECOMPOSITION.id {
+                (
+                    semantic::arithmetic::PRODUCT_DECOMPOSITION.semantic_class,
+                    PRODUCT_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION.id {
+                (
+                    semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION.semantic_class,
+                    MULHSU_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::memory::STORE_LOAD_PAYLOAD_FLOW.id {
+                (
+                    semantic::memory::STORE_LOAD_PAYLOAD_FLOW.semantic_class,
+                    MEM_STORE_LOAD_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id {
+                (
+                    semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.semantic_class,
+                    MEM_ADDR_ALIGN_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::memory::LOAD_VALUE_BINDING.id {
+                (
+                    semantic::memory::LOAD_VALUE_BINDING.semantic_class,
+                    MEM_LOAD_VALUE_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::memory::WRITE_PAYLOAD_CONSISTENCY.id {
+                (
+                    semantic::memory::WRITE_PAYLOAD_CONSISTENCY.semantic_class,
+                    MEM_WRITE_PAYLOAD_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::memory::ADDRESS_BOUNDARY_RANGE.id {
+                (
+                    semantic::memory::ADDRESS_BOUNDARY_RANGE.semantic_class,
+                    MEM_ADDR_BOUNDARY_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.id {
+                (
+                    semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.semantic_class,
+                    MEM_ADDR_PROGRESS_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id {
+                (
+                    semantic::memory::KIND_SELECTOR_CONSISTENCY.semantic_class,
+                    MEM_KIND_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id {
+                (
+                    semantic::time::MONOTONIC_ACCESS_ORDERING.semantic_class,
+                    TIMESTAMP_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id {
+                (
+                    semantic::exec::CONTROL_FLOW_BINDING.semantic_class,
+                    CONTROL_FLOW_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::control::ENTRYPOINT_BINDING.id {
+                (
+                    semantic::control::ENTRYPOINT_BINDING.semantic_class,
+                    ENTRYPOINT_INJECT_KIND,
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id {
+                (
+                    semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.semantic_class,
+                    TIME_BOUNDARY_INJECT_KIND,
                     InjectionSchedule::AroundAnchor(anchor),
                 )
             } else {
@@ -419,14 +558,22 @@ impl PicoBackend {
         let bucket_id = candidate.bucket_id.as_str();
         if bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id {
             0
-        } else if bucket_id == semantic::exec::OP_SELECTOR_BINDING.id {
-            1
-        } else if bucket_id == semantic::control::ECALL_WORD_VALIDITY.id {
-            2
         } else if bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id {
+            1
+        } else if bucket_id == semantic::exec::OP_SELECTOR_BINDING.id {
+            2
+        } else if bucket_id.starts_with("sem.decode.")
+            || bucket_id.starts_with("sem.exec.")
+            || bucket_id.starts_with("sem.control.")
+            || bucket_id.starts_with("sem.time.")
+        {
             3
-        } else {
+        } else if bucket_id.starts_with("sem.alu.") || bucket_id.starts_with("sem.arithmetic.") {
             4
+        } else if bucket_id.starts_with("sem.memory.") {
+            5
+        } else {
+            6
         }
     }
 

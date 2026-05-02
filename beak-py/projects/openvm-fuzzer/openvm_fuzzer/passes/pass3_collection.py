@@ -247,6 +247,117 @@ def _patch_regzero_interpreter_preflight_emit_instruction(openvm_install_path: P
     path.write_text(contents)
 
 
+def _patch_336f_segment_emit_instruction(openvm_install_path: Path) -> None:
+    path = openvm_install_path / "crates" / "vm" / "src" / "arch" / "segment.rs"
+    if not path.exists():
+        return
+    _ensure_use_fuzzer_utils(path)
+    c = path.read_text()
+    old = """                if let Some(executor) = chip_complex.inventory.get_mut_executor(&opcode) {
+                    let next_state = InstructionExecutor::execute(
+                        executor,
+                        memory_controller,
+                        instruction,
+                        ExecutionState::new(pc, timestamp),
+                    )?;
+                    fuzzer_utils::fuzzer_assert!(next_state.timestamp > timestamp);
+                    pc = next_state.pc;
+                    timestamp = next_state.timestamp;
+                } else {
+"""
+    new = """                if let Some(executor) = chip_complex.inventory.get_mut_executor(&opcode) {
+                    // BEAK-INSERT: guard.336f.segment.emit_instruction
+                    let beak_from_pc = pc;
+                    let beak_from_timestamp = timestamp;
+                    let beak_operands = [
+                        instruction.a.as_canonical_u32(),
+                        instruction.b.as_canonical_u32(),
+                        instruction.c.as_canonical_u32(),
+                        instruction.d.as_canonical_u32(),
+                        instruction.e.as_canonical_u32(),
+                        instruction.f.as_canonical_u32(),
+                        instruction.g.as_canonical_u32(),
+                    ];
+                    let beak_opcode = opcode.as_usize() as u32;
+                    fuzzer_utils::begin_instruction_step();
+                    // BEAK-INSERT-END
+                    let next_state = InstructionExecutor::execute(
+                        executor,
+                        memory_controller,
+                        instruction,
+                        ExecutionState::new(pc, timestamp),
+                    )?;
+                    fuzzer_utils::fuzzer_assert!(next_state.timestamp > timestamp);
+                    // BEAK-INSERT: guard.336f.segment.emit_instruction.after
+                    fuzzer_utils::emit_instruction_current_step(
+                        beak_from_pc,
+                        beak_from_timestamp,
+                        next_state.pc,
+                        next_state.timestamp,
+                        beak_opcode,
+                        beak_operands,
+                    );
+                    // BEAK-INSERT-END
+                    pc = next_state.pc;
+                    timestamp = next_state.timestamp;
+                } else {
+"""
+    if "// BEAK-INSERT: guard.336f.segment.emit_instruction" not in c and old in c:
+        c = c.replace(old, new, 1)
+    old_f038 = """                if let Some(executor) = chip_complex.inventory.get_mut_executor(&opcode) {
+                    let next_state = InstructionExecutor::execute(
+                        executor,
+                        memory_controller,
+                        instruction,
+                        ExecutionState::new(pc, timestamp),
+                    )?;
+                    fuzzer_utils::fuzzer_assert!(next_state.timestamp > timestamp);
+                    pc = next_state.pc;
+                    timestamp = next_state.timestamp;
+                } else {
+"""
+    new_f038 = """                if let Some(executor) = chip_complex.inventory.get_mut_executor(&opcode) {
+                    // BEAK-INSERT: guard.336f.segment.emit_instruction
+                    let beak_from_pc = pc;
+                    let beak_from_timestamp = timestamp;
+                    let beak_operands = [
+                        instruction.a.as_canonical_u32(),
+                        instruction.b.as_canonical_u32(),
+                        instruction.c.as_canonical_u32(),
+                        instruction.d.as_canonical_u32(),
+                        instruction.e.as_canonical_u32(),
+                        instruction.f.as_canonical_u32(),
+                        instruction.g.as_canonical_u32(),
+                    ];
+                    let beak_opcode = opcode.as_usize() as u32;
+                    fuzzer_utils::begin_instruction_step();
+                    // BEAK-INSERT-END
+                    let next_state = InstructionExecutor::execute(
+                        executor,
+                        memory_controller,
+                        instruction,
+                        ExecutionState::new(pc, timestamp),
+                    )?;
+                    fuzzer_utils::fuzzer_assert!(next_state.timestamp > timestamp);
+                    // BEAK-INSERT: guard.336f.segment.emit_instruction.after
+                    fuzzer_utils::emit_instruction_current_step(
+                        beak_from_pc,
+                        beak_from_timestamp,
+                        next_state.pc,
+                        next_state.timestamp,
+                        beak_opcode,
+                        beak_operands,
+                    );
+                    // BEAK-INSERT-END
+                    pc = next_state.pc;
+                    timestamp = next_state.timestamp;
+                } else {
+"""
+    if "// BEAK-INSERT: guard.336f.segment.emit_instruction" not in c and old_f038 in c:
+        c = c.replace(old_f038, new_f038, 1)
+    path.write_text(c)
+
+
 def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None:
     base = openvm_install_path / "extensions" / "rv32im" / "circuit" / "src"
 
@@ -255,10 +366,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "base_alu" / "core.rs",
             "use crate::adapters::Rv32BaseAluAdapterCols;",
-            "// BEAK-INSERT: guard.rv32im.base_alu",
+            "// BEAK-INSERT: guard.rv32im.base_alu.emit",
             r"""
 
-        // BEAK-INSERT: guard.rv32im.base_alu
+        // BEAK-INSERT: guard.rv32im.base_alu.emit
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_slice.borrow();
@@ -270,17 +381,17 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         let rs2_raw = beak_cols.rs2.as_canonical_u32();
         let rs2_i32 = rs2_raw as i32; // preserve bit-pattern for signed immediates
 
-        fuzzer_utils::emit_base_alu_chip_row(local_opcode as u32, rd_ptr, rs1_ptr, rs2_i32, is_rs2_imm, a, record.b, record.c);
+        fuzzer_utils::emit_base_alu_chip_row(local_opcode as u32, rd_ptr, rs1_ptr, rs2_i32, is_rs2_imm, a, beak_record_b, beak_record_c);
         // BEAK-INSERT-END
 """,
         ),
         (
             base / "shift" / "core.rs",
             "use crate::adapters::Rv32BaseAluAdapterCols;",
-            "// BEAK-INSERT: guard.rv32im.shift",
+            "// BEAK-INSERT: guard.rv32im.shift.emit",
             r"""
 
-        // BEAK-INSERT: guard.rv32im.shift
+        // BEAK-INSERT: guard.rv32im.shift.emit
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_slice.borrow();
@@ -292,17 +403,17 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         let rs2_raw = beak_cols.rs2.as_canonical_u32();
         let rs2_i32 = rs2_raw as i32; // preserve bit-pattern for signed immediates
 
-        fuzzer_utils::emit_shift_chip_row(opcode as u32, rd_ptr, rs1_ptr, rs2_i32, is_rs2_imm, a, record.b, record.c);
+        fuzzer_utils::emit_shift_chip_row(opcode as u32, rd_ptr, rs1_ptr, rs2_i32, is_rs2_imm, a, beak_record_b, beak_record_c);
         // BEAK-INSERT-END
 """,
         ),
         (
             base / "less_than" / "core.rs",
             "use crate::adapters::Rv32BaseAluAdapterCols;",
-            "// BEAK-INSERT: guard.rv32im.less_than",
+            "// BEAK-INSERT: guard.rv32im.less_than.emit",
             r"""
 
-        // BEAK-INSERT: guard.rv32im.less_than
+        // BEAK-INSERT: guard.rv32im.less_than.emit
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32BaseAluAdapterCols<F> = adapter_slice.borrow();
@@ -314,21 +425,21 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         let rs2_raw = beak_cols.rs2.as_canonical_u32();
         let rs2_i32 = rs2_raw as i32; // preserve bit-pattern for signed immediates
 
-        let opcode = LessThanOpcode::from_usize(record.local_opcode as usize);
+        let opcode = LessThanOpcode::from_usize(beak_record_local_opcode as usize);
         let mut a = [0u8; NUM_LIMBS];
         a[0] = cmp_result as u8;
 
-        fuzzer_utils::emit_less_than_chip_row(opcode as u32, rd_ptr, rs1_ptr, rs2_i32, is_rs2_imm, a, record.b, record.c);
+        fuzzer_utils::emit_less_than_chip_row(opcode as u32, rd_ptr, rs1_ptr, rs2_i32, is_rs2_imm, a, beak_record_b, beak_record_c);
         // BEAK-INSERT-END
 """,
         ),
         (
             base / "mul" / "core.rs",
             "use crate::adapters::Rv32MultAdapterCols;",
-            "// BEAK-INSERT: guard.rv32im.mul",
+            "// BEAK-INSERT: guard.rv32im.mul.emit",
             r"""
 
-        // BEAK-INSERT: guard.rv32im.mul
+        // BEAK-INSERT: guard.rv32im.mul.emit
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32MultAdapterCols<F> = adapter_slice.borrow();
@@ -336,17 +447,17 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         let rs1_ptr = beak_cols.rs1_ptr.as_canonical_u32();
         let rs2_ptr = beak_cols.rs2_ptr.as_canonical_u32();
 
-        fuzzer_utils::emit_mul_chip_row(MulOpcode::MUL as u32, rd_ptr, rs1_ptr, rs2_ptr, a, record.b, record.c);
+        fuzzer_utils::emit_mul_chip_row(MulOpcode::MUL as u32, rd_ptr, rs1_ptr, rs2_ptr, a, beak_record_b, beak_record_c);
         // BEAK-INSERT-END
 """,
         ),
         (
             base / "mulh" / "core.rs",
             "use crate::adapters::Rv32MultAdapterCols;",
-            "// BEAK-INSERT: guard.rv32im.mulh",
+            "// BEAK-INSERT: guard.rv32im.mulh.emit",
             r"""
 
-        // BEAK-INSERT: guard.rv32im.mulh
+        // BEAK-INSERT: guard.rv32im.mulh.emit
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32MultAdapterCols<F> = adapter_slice.borrow();
@@ -355,17 +466,17 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         let rs2_ptr = beak_cols.rs2_ptr.as_canonical_u32();
 
         let a_u8 = a.map(|x| x as u8);
-        fuzzer_utils::emit_mulh_chip_row(opcode as u32, rd_ptr, rs1_ptr, rs2_ptr, a_u8, record.b, record.c);
+        fuzzer_utils::emit_mulh_chip_row(opcode as u32, rd_ptr, rs1_ptr, rs2_ptr, a_u8, beak_record_b, beak_record_c);
         // BEAK-INSERT-END
 """,
         ),
         (
             base / "divrem" / "core.rs",
             "use crate::adapters::Rv32MultAdapterCols;",
-            "// BEAK-INSERT: guard.rv32im.divrem",
+            "// BEAK-INSERT: guard.rv32im.divrem.emit",
             r"""
 
-        // BEAK-INSERT: guard.rv32im.divrem
+        // BEAK-INSERT: guard.rv32im.divrem.emit
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32MultAdapterCols<F> = adapter_slice.borrow();
@@ -376,17 +487,17 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         let is_div = matches!(opcode, DivRemOpcode::DIV | DivRemOpcode::DIVU);
         let a_u8 = if is_div { q.map(|x| x as u8) } else { r.map(|x| x as u8) };
 
-        fuzzer_utils::emit_divrem_chip_row(opcode as u32, rd_ptr, rs1_ptr, rs2_ptr, a_u8, record.b, record.c);
+        fuzzer_utils::emit_divrem_chip_row(opcode as u32, rd_ptr, rs1_ptr, rs2_ptr, a_u8, beak_record_b, beak_record_c);
         // BEAK-INSERT-END
 """,
         ),
         (
             base / "branch_eq" / "core.rs",
             "use crate::adapters::Rv32BranchAdapterCols;",
-            "// BEAK-INSERT: guard.rv32im.branch_eq",
+            "// BEAK-INSERT: guard.rv32im.branch_eq.emit",
             r"""
 
-        // BEAK-INSERT: guard.rv32im.branch_eq
+        // BEAK-INSERT: guard.rv32im.branch_eq.emit
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32BranchAdapterCols<F> = adapter_slice.borrow();
@@ -394,12 +505,12 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         let rs2_ptr = beak_cols.rs2_ptr.as_canonical_u32();
         let from_pc = beak_cols.from_state.pc.as_canonical_u32();
 
-        let opcode = BranchEqualOpcode::from_usize(record.local_opcode as usize);
-        let imm_i32 = record.imm as i32; // preserve bit-pattern
+        let opcode = BranchEqualOpcode::from_usize(beak_record_local_opcode as usize);
+        let imm_i32 = beak_record_imm as i32; // preserve bit-pattern
         let is_beq = opcode == BranchEqualOpcode::BEQ;
         let is_taken = if is_beq { cmp_result } else { !cmp_result };
         let to_pc = if is_taken {
-            from_pc.wrapping_add(record.imm)
+            from_pc.wrapping_add(beak_record_imm)
         } else {
             from_pc.wrapping_add(self.pc_step)
         };
@@ -412,8 +523,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             is_taken,
             from_pc,
             to_pc,
-            record.a,
-            record.b,
+            beak_record_a,
+            beak_record_b,
             cmp_result,
         );
         // BEAK-INSERT-END
@@ -422,10 +533,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "branch_lt" / "core.rs",
             "use crate::adapters::Rv32BranchAdapterCols;",
-            "// BEAK-INSERT: guard.rv32im.branch_lt",
+            "// BEAK-INSERT: guard.rv32im.branch_lt.emit",
             r"""
 
-        // BEAK-INSERT: guard.rv32im.branch_lt
+        // BEAK-INSERT: guard.rv32im.branch_lt.emit
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32BranchAdapterCols<F> = adapter_slice.borrow();
@@ -433,11 +544,11 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         let rs2_ptr = beak_cols.rs2_ptr.as_canonical_u32();
         let from_pc = beak_cols.from_state.pc.as_canonical_u32();
 
-        let opcode = BranchLessThanOpcode::from_usize(record.local_opcode as usize);
-        let imm_i32 = record.imm as i32; // preserve bit-pattern
+        let opcode = BranchLessThanOpcode::from_usize(beak_record_local_opcode as usize);
+        let imm_i32 = beak_record_imm as i32; // preserve bit-pattern
         let is_taken = cmp_result;
         let to_pc = if is_taken {
-            from_pc.wrapping_add(record.imm)
+            from_pc.wrapping_add(beak_record_imm)
         } else {
             from_pc.wrapping_add(DEFAULT_PC_STEP)
         };
@@ -450,8 +561,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             is_taken,
             from_pc,
             to_pc,
-            record.a,
-            record.b,
+            beak_record_a,
+            beak_record_b,
             cmp_result,
         );
         // BEAK-INSERT-END
@@ -460,24 +571,24 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "jal_lui" / "core.rs",
             "use crate::adapters::Rv32CondRdWriteAdapterCols;",
-            "// BEAK-INSERT: guard.rv32im.jal_lui",
+            "// BEAK-INSERT: guard.rv32im.jal_lui.emit",
             r"""
 
-        // BEAK-INSERT: guard.rv32im.jal_lui
+        // BEAK-INSERT: guard.rv32im.jal_lui.emit
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32CondRdWriteAdapterCols<F> = adapter_slice.borrow();
         let needs_write = beak_cols.needs_write.as_canonical_u32() == 1;
         let rd_ptr = beak_cols.inner.rd_ptr.as_canonical_u32();
         let from_pc = beak_cols.inner.from_state.pc.as_canonical_u32();
-        let opcode = if record.is_jal {
+        let opcode = if beak_record_is_jal {
             Rv32JalLuiOpcode::JAL
         } else {
             Rv32JalLuiOpcode::LUI
         };
-        let imm = record.imm;
+        let imm = beak_record_imm;
 
-        let to_pc = if record.is_jal {
+        let to_pc = if beak_record_is_jal {
             from_pc.wrapping_add(imm)
         } else {
             from_pc.wrapping_add(DEFAULT_PC_STEP)
@@ -490,8 +601,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             needs_write,
             from_pc,
             to_pc,
-            record.rd_data,
-            record.is_jal,
+            beak_record_rd_data,
+            beak_record_is_jal,
         );
         // BEAK-INSERT-END
 """,
@@ -499,10 +610,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "jalr" / "core.rs",
             "use crate::adapters::Rv32JalrAdapterCols;",
-            "// BEAK-INSERT: guard.rv32im.jalr",
+            "// BEAK-INSERT: guard.rv32im.jalr.emit",
             r"""
 
-        // BEAK-INSERT: guard.rv32im.jalr
+        // BEAK-INSERT: guard.rv32im.jalr.emit
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32JalrAdapterCols<F> = adapter_slice.borrow();
@@ -512,11 +623,12 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         let rs1_ptr = beak_cols.rs1_ptr.as_canonical_u32();
         let from_pc = beak_cols.from_state.pc.as_canonical_u32();
 
-        let imm_u16 = record.imm;
+        let imm_u16 = beak_record_imm;
         // Sign-extend 16-bit immediate into i32 using the explicit sign flag.
-        let imm_i32: i32 = (imm_u16 as i32) - ((record.imm_sign as i32) << 16);
+        let imm_i32: i32 = (imm_u16 as i32) - ((beak_record_imm_sign as i32) << 16);
 
         // Executor clears the least-significant bit of to_pc for control-flow.
+        let target_before_lsb_clear = beak_record_rs1_val.wrapping_add(imm_i32 as u32);
         let to_pc_final = to_pc & !1;
 
         fuzzer_utils::emit_jalr_chip_row(
@@ -524,11 +636,12 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             rd_ptr,
             rs1_ptr,
             imm_i32,
-            record.imm_sign,
+            beak_record_imm_sign,
             needs_write,
             from_pc,
             to_pc_final,
-            record.rs1_val,
+            beak_record_rs1_val,
+            target_before_lsb_clear,
             rd_data,
         );
         // BEAK-INSERT-END
@@ -537,25 +650,25 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "auipc" / "core.rs",
             "use crate::adapters::Rv32RdWriteAdapterCols;",
-            "// BEAK-INSERT: guard.rv32im.auipc",
+            "// BEAK-INSERT: guard.rv32im.auipc.emit",
             r"""
 
-        // BEAK-INSERT: guard.rv32im.auipc
+        // BEAK-INSERT: guard.rv32im.auipc.emit
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32RdWriteAdapterCols<F> = adapter_slice.borrow();
         let rd_ptr = beak_cols.rd_ptr.as_canonical_u32();
-        fuzzer_utils::emit_auipc_chip_row(0, rd_ptr, record.imm, record.from_pc, rd_data);
+        fuzzer_utils::emit_auipc_chip_row(0, rd_ptr, beak_record_imm, beak_record_from_pc, rd_data);
         // BEAK-INSERT-END
 """,
         ),
         (
             base / "loadstore" / "core.rs",
             "use crate::adapters::Rv32LoadStoreAdapterCols;",
-            "// BEAK-INSERT: guard.rv32im.loadstore",
+            "// BEAK-INSERT: guard.rv32im.loadstore.emit",
             r"""
 
-        // BEAK-INSERT: guard.rv32im.loadstore
+        // BEAK-INSERT: guard.rv32im.loadstore.emit
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32LoadStoreAdapterCols<F> = adapter_slice.borrow();
@@ -589,8 +702,8 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             needs_write,
             is_load,
             flags_u32,
-            record.read_data,
-            record.prev_data,
+            beak_record_read_data,
+            beak_record_prev_data,
             write_data,
         );
         // BEAK-INSERT-END
@@ -599,10 +712,10 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         (
             base / "load_sign_extend" / "core.rs",
             "use crate::adapters::Rv32LoadStoreAdapterCols;",
-            "// BEAK-INSERT: guard.rv32im.load_sign_extend",
+            "// BEAK-INSERT: guard.rv32im.load_sign_extend.emit",
             r"""
 
-        // BEAK-INSERT: guard.rv32im.load_sign_extend
+        // BEAK-INSERT: guard.rv32im.load_sign_extend.emit
         // BEAK-INSERT: Emit chip-row micro-op.
         let adapter_slice: &[F] = adapter_row;
         let beak_cols: &Rv32LoadStoreAdapterCols<F> = adapter_slice.borrow();
@@ -622,9 +735,9 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
 
         let needs_write = beak_cols.needs_write.as_canonical_u32() == 1;
 
-        let opcode = if record.is_byte { Rv32LoadStoreOpcode::LOADB } else { Rv32LoadStoreOpcode::LOADH };
+        let opcode = if beak_record_is_byte { Rv32LoadStoreOpcode::LOADB } else { Rv32LoadStoreOpcode::LOADH };
 
-        let mut shifted_read_data = record.read_data;
+        let mut shifted_read_data = beak_record_read_data;
         shifted_read_data.rotate_left((shift & 2) as usize);
 
         fuzzer_utils::emit_load_sign_extend_chip_row(
@@ -636,18 +749,169 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
             mem_as,
             effective_ptr,
             needs_write,
-            record.prev_data,
+            beak_record_prev_data,
             shifted_read_data,
             most_sig_bit != 0,
             shift & 2 == 2,
-            !record.is_byte,
-            record.is_byte && ((shift & 1) == 1),
-            record.is_byte && ((shift & 1) == 0),
+            !beak_record_is_byte,
+            beak_record_is_byte && ((shift & 1) == 1),
+            beak_record_is_byte && ((shift & 1) == 0),
         );
         // BEAK-INSERT-END
 """,
         ),
     ]
+
+    record_copy_blocks: list[tuple[Path, str, str]] = [
+        (
+            base / "base_alu" / "core.rs",
+            "// BEAK-INSERT: guard.rv32im.base_alu.record_copy",
+            r"""
+        // BEAK-INSERT: guard.rv32im.base_alu.record_copy
+        let beak_record_b = record.b;
+        let beak_record_c = record.c;
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            base / "shift" / "core.rs",
+            "// BEAK-INSERT: guard.rv32im.shift.record_copy",
+            r"""
+        // BEAK-INSERT: guard.rv32im.shift.record_copy
+        let beak_record_b = record.b;
+        let beak_record_c = record.c;
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            base / "less_than" / "core.rs",
+            "// BEAK-INSERT: guard.rv32im.less_than.record_copy",
+            r"""
+        // BEAK-INSERT: guard.rv32im.less_than.record_copy
+        let beak_record_local_opcode = record.local_opcode;
+        let beak_record_b = record.b;
+        let beak_record_c = record.c;
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            base / "mul" / "core.rs",
+            "// BEAK-INSERT: guard.rv32im.mul.record_copy",
+            r"""
+        // BEAK-INSERT: guard.rv32im.mul.record_copy
+        let beak_record_b = record.b;
+        let beak_record_c = record.c;
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            base / "mulh" / "core.rs",
+            "// BEAK-INSERT: guard.rv32im.mulh.record_copy",
+            r"""
+        // BEAK-INSERT: guard.rv32im.mulh.record_copy
+        let beak_record_b = record.b;
+        let beak_record_c = record.c;
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            base / "divrem" / "core.rs",
+            "// BEAK-INSERT: guard.rv32im.divrem.record_copy",
+            r"""
+        // BEAK-INSERT: guard.rv32im.divrem.record_copy
+        let beak_record_b = record.b;
+        let beak_record_c = record.c;
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            base / "branch_eq" / "core.rs",
+            "// BEAK-INSERT: guard.rv32im.branch_eq.record_copy",
+            r"""
+        // BEAK-INSERT: guard.rv32im.branch_eq.record_copy
+        let beak_record_local_opcode = record.local_opcode;
+        let beak_record_imm = record.imm;
+        let beak_record_a = record.a;
+        let beak_record_b = record.b;
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            base / "branch_lt" / "core.rs",
+            "// BEAK-INSERT: guard.rv32im.branch_lt.record_copy",
+            r"""
+        // BEAK-INSERT: guard.rv32im.branch_lt.record_copy
+        let beak_record_local_opcode = record.local_opcode;
+        let beak_record_imm = record.imm;
+        let beak_record_a = record.a;
+        let beak_record_b = record.b;
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            base / "jal_lui" / "core.rs",
+            "// BEAK-INSERT: guard.rv32im.jal_lui.record_copy",
+            r"""
+        // BEAK-INSERT: guard.rv32im.jal_lui.record_copy
+        let beak_record_is_jal = record.is_jal;
+        let beak_record_imm = record.imm;
+        let beak_record_rd_data = record.rd_data;
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            base / "jalr" / "core.rs",
+            "// BEAK-INSERT: guard.rv32im.jalr.record_copy",
+            r"""
+        // BEAK-INSERT: guard.rv32im.jalr.record_copy
+        let beak_record_imm = record.imm;
+        let beak_record_imm_sign = record.imm_sign;
+        let beak_record_rs1_val = record.rs1_val;
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            base / "auipc" / "core.rs",
+            "// BEAK-INSERT: guard.rv32im.auipc.record_copy",
+            r"""
+        // BEAK-INSERT: guard.rv32im.auipc.record_copy
+        let beak_record_imm = record.imm;
+        let beak_record_from_pc = record.from_pc;
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            base / "loadstore" / "core.rs",
+            "// BEAK-INSERT: guard.rv32im.loadstore.record_copy",
+            r"""
+        // BEAK-INSERT: guard.rv32im.loadstore.record_copy
+        let beak_record_read_data = record.read_data;
+        let beak_record_prev_data = record.prev_data;
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            base / "load_sign_extend" / "core.rs",
+            "// BEAK-INSERT: guard.rv32im.load_sign_extend.record_copy",
+            r"""
+        // BEAK-INSERT: guard.rv32im.load_sign_extend.record_copy
+        let beak_record_is_byte = record.is_byte;
+        let beak_record_read_data = record.read_data;
+        let beak_record_prev_data = record.prev_data;
+        // BEAK-INSERT-END
+""",
+        ),
+    ]
+
+    for p, guard, block in record_copy_blocks:
+        if not p.exists():
+            continue
+        c = p.read_text()
+        try:
+            c = _insert_before(c, anchor="        let core_row: &mut", insert=block, guard=guard)
+        except RuntimeError:
+            continue
+        p.write_text(c)
 
     for p, import_line, guard, block in targets:
         if not p.exists():
@@ -758,6 +1022,115 @@ def _patch_regzero_system_connector_emit_chip_row(openvm_install_path: Path) -> 
         except RuntimeError:
             pass
         program.write_text(c)
+
+
+def _patch_336f_program_trace_semantic_injection(openvm_install_path: Path) -> None:
+    path = openvm_install_path / "crates" / "vm" / "src" / "system" / "program" / "trace.rs"
+    if not path.exists():
+        return
+    _ensure_use_fuzzer_utils(path)
+    c = path.read_text()
+    old = r"""    rows.par_chunks_mut(width)
+        .zip(instructions)
+        .for_each(|(row, (pc, instruction))| {
+            let row: &mut ProgramExecutionCols<F> = row.borrow_mut();
+            *row = ProgramExecutionCols {
+                pc: F::from_canonical_u32(pc),
+                opcode: instruction.opcode.to_field(),
+                a: instruction.a,
+                b: instruction.b,
+                c: instruction.c,
+                d: instruction.d,
+                e: instruction.e,
+                f: instruction.f,
+                g: instruction.g,
+            };
+        });
+"""
+    new = r"""    rows.par_chunks_mut(width)
+        .zip(instructions.into_par_iter().enumerate())
+        .for_each(|(row, (i, (pc, instruction)))| {
+            let row: &mut ProgramExecutionCols<F> = row.borrow_mut();
+            *row = ProgramExecutionCols {
+                pc: F::from_canonical_u32(pc),
+                opcode: instruction.opcode.to_field(),
+                a: instruction.a,
+                b: instruction.b,
+                c: instruction.c,
+                d: instruction.d,
+                e: instruction.e,
+                f: instruction.f,
+                g: instruction.g,
+            };
+
+            // BEAK-INSERT: guard.336f.program_trace.semantic_injection
+            let beak_program_step = i as u64;
+            if fuzzer_utils::witness_injection_enabled_at(
+                "openvm.semantic.decode.zero_register_immutability",
+                beak_program_step,
+            ) && fuzzer_utils::should_inject_witness(
+                "openvm.semantic.decode.zero_register_immutability",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.decode.zero_register_immutability step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.a += F::from_canonical_u32(1);
+            }
+            if fuzzer_utils::witness_injection_enabled_at(
+                "openvm.semantic.decode.operand_index_routing",
+                beak_program_step,
+            ) && fuzzer_utils::should_inject_witness(
+                "openvm.semantic.decode.operand_index_routing",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.decode.operand_index_routing step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.b += F::from_canonical_u32(1);
+            }
+            if fuzzer_utils::witness_injection_enabled_at(
+                "openvm.semantic.decode.format_immediate_reassembly",
+                beak_program_step,
+            ) && fuzzer_utils::should_inject_witness(
+                "openvm.semantic.decode.format_immediate_reassembly",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.decode.format_immediate_reassembly step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.c += F::from_canonical_u32(1);
+            }
+            let beak_terminate_opcode: F = SystemOpcode::TERMINATE.global_opcode().to_field();
+            if row.opcode == beak_terminate_opcode
+                && fuzzer_utils::witness_injection_enabled_at(
+                    "openvm.semantic.control.ecall_word_validity",
+                    beak_program_step,
+                )
+                && fuzzer_utils::should_inject_witness(
+                    "openvm.semantic.control.ecall_word_validity",
+                    beak_program_step,
+                )
+            {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.control.ecall_word_validity step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.opcode += F::from_canonical_u32(1);
+            }
+            // BEAK-INSERT-END
+        });
+"""
+    if "// BEAK-INSERT: guard.336f.program_trace.semantic_injection" not in c and old in c:
+        c = c.replace(old, new, 1)
+    path.write_text(c)
 
 
 def _patch_336f_base_alu_adapter_emit_chip_row(openvm_install_path: Path) -> None:
@@ -1021,6 +1394,409 @@ def _patch_336f_loadstore_core_emit_chip_row(openvm_install_path: Path) -> None:
     path.write_text(c)
 
 
+def _patch_memory_access_emit_support(openvm_install_path: Path) -> None:
+    path = openvm_install_path / "crates" / "fuzzer_utils" / "src" / "lib.rs"
+    if not path.exists():
+        return
+    c = path.read_text()
+
+    method_anchor = """    pub fn emit_memory_interaction(
+        &mut self,
+        direction: &str,
+        row_id: Option<&str>,
+        address_space: u32,
+        pointer: u32,
+        data: Vec<u32>,
+        timestamp: u32,
+    ) {
+        let payload_data = json!({
+            "address_space": address_space,
+            "pointer": pointer,
+            "data": data,
+            "timestamp": timestamp,
+        });
+        self.emit_interaction_envelope(
+            "memory",
+            direction,
+            row_id,
+            Some(timestamp),
+            "memory",
+            payload_data,
+        );
+    }
+"""
+    method_insert = method_anchor + r"""
+    pub fn emit_memory_access(
+        &mut self,
+        row_op_idx: u64,
+        opcode: u32,
+        rs1_ptr: u32,
+        rd_rs2_ptr: u32,
+        imm: i32,
+        imm_sign: bool,
+        address_space: u32,
+        raw_ptr: u32,
+        effective_ptr: u32,
+        aligned_ptr: u32,
+        byte_offset: u32,
+        width: u32,
+        is_load: bool,
+        is_store: bool,
+        needs_write: bool,
+        timestamp: u32,
+        read_data: Vec<u32>,
+        prev_data: Vec<u32>,
+        write_data: Vec<u32>,
+    ) {
+        let micro_op = json!({
+            "type": "memory_access",
+            "data": {
+                "seq": self.seq,
+                "step_idx": self.step_idx,
+                "op_idx": self.op_idx_in_step,
+                "row_op_idx": row_op_idx,
+                "opcode": opcode,
+                "rs1_ptr": rs1_ptr,
+                "rd_rs2_ptr": rd_rs2_ptr,
+                "imm": imm,
+                "imm_sign": imm_sign,
+                "address_space": address_space,
+                "raw_ptr": raw_ptr,
+                "effective_ptr": effective_ptr,
+                "aligned_ptr": aligned_ptr,
+                "byte_offset": byte_offset,
+                "width": width,
+                "is_load": is_load,
+                "is_store": is_store,
+                "needs_write": needs_write,
+                "timestamp": timestamp,
+                "read_data": read_data,
+                "prev_data": prev_data,
+                "write_data": write_data,
+            }
+        });
+        self.op_idx_in_step += 1;
+        self.emit_micro_op(micro_op);
+    }
+"""
+    if "pub fn emit_memory_access(" not in c and method_anchor in c:
+        c = c.replace(method_anchor, method_insert, 1)
+
+    public_anchor = """pub fn emit_memory_interaction(
+    direction: &str,
+    row_id: Option<&str>,
+    address_space: u32,
+    pointer: u32,
+    data: Vec<u32>,
+    timestamp: u32,
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_memory_interaction(direction, row_id, address_space, pointer, data, timestamp);
+}
+"""
+    public_insert = public_anchor + r"""
+pub fn emit_memory_access(
+    row_op_idx: u64,
+    opcode: u32,
+    rs1_ptr: u32,
+    rd_rs2_ptr: u32,
+    imm: i32,
+    imm_sign: bool,
+    address_space: u32,
+    raw_ptr: u32,
+    effective_ptr: u32,
+    aligned_ptr: u32,
+    byte_offset: u32,
+    width: u32,
+    is_load: bool,
+    is_store: bool,
+    needs_write: bool,
+    timestamp: u32,
+    read_data: Vec<u32>,
+    prev_data: Vec<u32>,
+    write_data: Vec<u32>,
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_memory_access(
+        row_op_idx,
+        opcode,
+        rs1_ptr,
+        rd_rs2_ptr,
+        imm,
+        imm_sign,
+        address_space,
+        raw_ptr,
+        effective_ptr,
+        aligned_ptr,
+        byte_offset,
+        width,
+        is_load,
+        is_store,
+        needs_write,
+        timestamp,
+        read_data,
+        prev_data,
+        write_data,
+    );
+}
+"""
+    if "pub fn emit_memory_access(\n    row_op_idx" not in c and public_anchor in c:
+        c = c.replace(public_anchor, public_insert, 1)
+    if '"write_data": write_data,' not in c and "pub fn emit_memory_access(" in c:
+        c = c.replace(
+            "        prev_data: Vec<u32>,\n    ) {\n",
+            "        prev_data: Vec<u32>,\n        write_data: Vec<u32>,\n    ) {\n",
+            1,
+        )
+        c = c.replace(
+            "                \"prev_data\": prev_data,\n",
+            "                \"prev_data\": prev_data,\n                \"write_data\": write_data,\n",
+            1,
+        )
+        c = c.replace(
+            "    prev_data: Vec<u32>,\n) {\n",
+            "    prev_data: Vec<u32>,\n    write_data: Vec<u32>,\n) {\n",
+            1,
+        )
+        c = c.replace(
+            "        prev_data,\n    );\n",
+            "        prev_data,\n        write_data,\n    );\n",
+            1,
+        )
+
+    path.write_text(c)
+
+
+def _patch_336f_loadstore_core_witness_injection(openvm_install_path: Path) -> None:
+    path = (
+        openvm_install_path
+        / "extensions"
+        / "rv32im"
+        / "circuit"
+        / "src"
+        / "loadstore"
+        / "core.rs"
+    )
+    if not path.exists():
+        return
+    _ensure_use_fuzzer_utils(path)
+    c = path.read_text()
+    try:
+        c = _insert_after(
+            c,
+            anchor="        core_cols.write_data = record.write_data;",
+            guard="// BEAK-INSERT: guard.336f.loadstore.core.witness_memory",
+            insert=r"""
+
+        // BEAK-INSERT: guard.336f.loadstore.core.witness_memory
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.memory.value_payload_consistency", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.memory.value_payload_consistency step={}",
+                beak_witness_step
+            );
+            core_cols.write_data[0] += F::ONE;
+        }
+        if fuzzer_utils::should_inject_witness("openvm.semantic.memory.store_load_payload_flow", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.memory.store_load_payload_flow step={}",
+                beak_witness_step
+            );
+            core_cols.write_data[0] += F::ONE;
+        }
+        if fuzzer_utils::should_inject_witness("openvm.semantic.memory.kind_selector_consistency", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.memory.kind_selector_consistency step={}",
+                beak_witness_step
+            );
+            core_cols.is_load = F::ONE - core_cols.is_load;
+        }
+        // BEAK-INSERT-END
+""",
+        )
+    except RuntimeError:
+        return
+    path.write_text(c)
+
+
+def _patch_336f_memory_timestamp_aux_witness_injection(openvm_install_path: Path) -> None:
+    path = openvm_install_path / "crates" / "vm" / "src" / "system" / "memory" / "controller" / "mod.rs"
+    if not path.exists():
+        return
+    _ensure_use_fuzzer_utils(path)
+    c = path.read_text()
+    old = r"""    pub fn generate_base_aux(&self, record: &MemoryRecord<F>, buffer: &mut MemoryBaseAuxCols<F>) {
+        buffer.prev_timestamp = F::from_canonical_u32(record.prev_timestamp);
+        self.generate_timestamp_lt(
+            record.prev_timestamp,
+            record.timestamp,
+            &mut buffer.timestamp_lt_aux,
+        );
+    }
+"""
+    new = r"""    pub fn generate_base_aux(&self, record: &MemoryRecord<F>, buffer: &mut MemoryBaseAuxCols<F>) {
+        buffer.prev_timestamp = F::from_canonical_u32(record.prev_timestamp);
+        self.generate_timestamp_lt(
+            record.prev_timestamp,
+            record.timestamp,
+            &mut buffer.timestamp_lt_aux,
+        );
+
+        // BEAK-INSERT: guard.336f.memory.timestamp_aux
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.time.monotonic_access_ordering", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.time.monotonic_access_ordering step={} prev_timestamp={} timestamp={}",
+                beak_witness_step,
+                record.prev_timestamp,
+                record.timestamp
+            );
+            buffer.prev_timestamp = F::from_canonical_u32(record.timestamp);
+        }
+        // BEAK-INSERT-END
+    }
+"""
+    if "// BEAK-INSERT: guard.336f.memory.timestamp_aux" not in c and old in c:
+        c = c.replace(old, new, 1)
+    path.write_text(c)
+
+
+def _patch_336f_memory_lifecycle_instrumentation(openvm_install_path: Path) -> None:
+    path = openvm_install_path / "crates" / "vm" / "src" / "system" / "memory" / "controller" / "mod.rs"
+    if not path.exists():
+        return
+    _ensure_use_fuzzer_utils(path)
+    c = path.read_text()
+
+    old_set = r"""    pub fn set_initial_memory(&mut self, memory: MemoryImage<F>) {
+        if self.timestamp() > INITIAL_TIMESTAMP + 1 {
+            panic!("Cannot set initial memory after first timestamp");
+        }
+        let mut offline_memory = self.offline_memory.lock().unwrap();
+        offline_memory.set_initial_memory(memory.clone(), self.mem_config);
+
+        self.memory = Memory::from_image(memory.clone(), self.mem_config.access_capacity);
+"""
+    new_set = r"""    pub fn set_initial_memory(&mut self, memory: MemoryImage<F>) {
+        if self.timestamp() > INITIAL_TIMESTAMP + 1 {
+            panic!("Cannot set initial memory after first timestamp");
+        }
+
+        // BEAK-INSERT: guard.336f.memory.lifecycle.initial
+        let beak_initial_cells: Vec<_> = memory
+            .items()
+            .filter_map(|((address_space, pointer), value)| {
+                let value = value.as_canonical_u32();
+                (value != 0).then_some(((address_space, pointer), value))
+            })
+            .collect();
+        for (beak_init_idx, ((address_space, pointer), value)) in
+            beak_initial_cells.into_iter().enumerate()
+        {
+            let beak_init_idx = beak_init_idx as u64;
+            fuzzer_utils::emit_memory_init(beak_init_idx, address_space, pointer, value);
+        }
+        // BEAK-INSERT-END
+
+        let mut offline_memory = self.offline_memory.lock().unwrap();
+        offline_memory.set_initial_memory(memory.clone(), self.mem_config);
+
+        self.memory = Memory::from_image(memory.clone(), self.mem_config.access_capacity);
+"""
+    if "// BEAK-INSERT: guard.336f.memory.lifecycle.initial" not in c and old_set in c:
+        c = c.replace(old_set, new_set, 1)
+
+    old_final = r"""                let (final_partition, records) = offline_memory.finalize::<CHUNK>();
+                self.access_adapters.extend_records(records);
+
+                boundary_chip.finalize(initial_memory, &final_partition, hasher);
+                let final_memory_values = final_partition
+"""
+    new_final = r"""                let (mut final_partition, records) = offline_memory.finalize::<CHUNK>();
+                self.access_adapters.extend_records(records);
+
+                // BEAK-INSERT: guard.336f.memory.lifecycle.finalization
+                let beak_final_cells: Vec<_> = final_partition
+                    .iter()
+                    .map(|(&(address_space, chunk_label), values)| {
+                        let pointer = chunk_label * CHUNK as u32;
+                        let final_values = values
+                            .values
+                            .iter()
+                            .map(|value| value.as_canonical_u32())
+                            .collect::<Vec<_>>();
+                        let initial_values = (0..CHUNK as u32)
+                            .map(|offset| {
+                                initial_memory
+                                    .get(&(address_space, pointer + offset))
+                                    .copied()
+                                    .unwrap_or(F::ZERO)
+                                    .as_canonical_u32()
+                            })
+                            .collect::<Vec<_>>();
+                        let was_initial = initial_values.iter().any(|value| *value != 0);
+                        let changed_from_initial = final_values != initial_values;
+                        (
+                            (address_space, chunk_label),
+                            pointer,
+                            values.timestamp,
+                            final_values,
+                            was_initial,
+                            changed_from_initial,
+                        )
+                    })
+                    .collect();
+                for (
+                    beak_final_idx,
+                    (
+                        (address_space, chunk_label),
+                        pointer,
+                        timestamp,
+                        final_values,
+                        was_initial,
+                        changed_from_initial,
+                    ),
+                ) in beak_final_cells.into_iter().enumerate()
+                {
+                    let beak_final_idx = beak_final_idx as u64;
+                    fuzzer_utils::emit_memory_finalization(
+                        beak_final_idx,
+                        address_space,
+                        pointer,
+                        timestamp,
+                        final_values,
+                        was_initial,
+                        changed_from_initial,
+                    );
+                    if fuzzer_utils::should_inject_witness(
+                        "openvm.semantic.memory.finalization_consistency",
+                        beak_final_idx,
+                    ) {
+                        eprintln!(
+                            "[beak-witness-inject] kind=openvm.semantic.memory.finalization_consistency step={} address_space={} pointer={} timestamp={}",
+                            beak_final_idx,
+                            address_space,
+                            pointer,
+                            timestamp
+                        );
+                        if let Some(values) =
+                            final_partition.get_mut(&(address_space, chunk_label))
+                        {
+                            values.values[0] += F::from_canonical_u32(1);
+                        }
+                    }
+                }
+                // BEAK-INSERT-END
+
+                boundary_chip.finalize(initial_memory, &final_partition, hasher);
+                let final_memory_values = final_partition
+"""
+    if "// BEAK-INSERT: guard.336f.memory.lifecycle.finalization" not in c and old_final in c:
+        c = c.replace(old_final, new_final, 1)
+
+    path.write_text(c)
+
+
 def _patch_336f_divrem_core_emit_chip_row(openvm_install_path: Path) -> None:
     path = (
         openvm_install_path
@@ -1232,7 +2008,53 @@ def _patch_336f_loadstore_adapter_witness_injection(openvm_install_path: Path) -
             },
         ))
 """
-    new2 = r"""        Ok((
+    new2 = r"""        // BEAK-INSERT: guard.336f.loadstore.adapter.emit_memory_access
+        // BEAK-INSERT: Emit true memory access address metadata from the adapter. The core chip
+        // does not have rs1_data, so its chip-row effective_ptr field is not the source of truth.
+        let beak_width = match local_opcode {
+            LOADW | STOREW => 4u32,
+            LOADH | LOADHU | STOREH => 2u32,
+            LOADB | LOADBU | STOREB => 1u32,
+        };
+        let beak_imm_i32: i32 = (imm as i32) - ((beak_imm_sign as i32) << 16);
+        let beak_effective_ptr = ptr_val.wrapping_add(shift_amount);
+        fuzzer_utils::emit_memory_access(
+            0,
+            local_opcode as u32,
+            b.as_canonical_u32(),
+            a.as_canonical_u32(),
+            beak_imm_i32,
+            beak_imm_sign == 1,
+            e.as_canonical_u32(),
+            beak_effective_ptr,
+            beak_effective_ptr,
+            ptr_val,
+            shift_amount,
+            beak_width,
+            is_load,
+            is_store,
+            is_load,
+            memory.timestamp(),
+            read_record.1.iter().map(|x| x.as_canonical_u32()).collect(),
+            prev_data.iter().map(|x| x.as_canonical_u32()).collect(),
+            read_record.1.iter().map(|x| x.as_canonical_u32()).collect(),
+        );
+        // BEAK-INSERT-END
+
+        // BEAK-INSERT: guard.336f.loadstore.adapter.mem_as_o5
+        let mut beak_mem_as = e;
+        if fuzzer_utils::should_inject_witness("openvm.semantic.memory.address_space_consistency", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.memory.address_space_consistency step={} old_mem_as={}",
+                beak_witness_step,
+                e.as_canonical_u32()
+            );
+            // Force RAM address space as a forged witness value.
+            beak_mem_as = F::ZERO;
+        }
+        // BEAK-INSERT-END
+
+        Ok((
             (
                 [prev_data, read_record.1],
                 F::from_canonical_u32(shift_amount),
@@ -1245,12 +2067,165 @@ def _patch_336f_loadstore_adapter_witness_injection(openvm_install_path: Path) -
                 imm_sign: beak_imm_sign == 1,
                 shift_amount,
                 mem_ptr_limbs,
-                mem_as: e,
+                mem_as: beak_mem_as,
             },
         ))
 """
-    if "imm_sign: beak_imm_sign == 1," not in c and old2 in c:
+    if "// BEAK-INSERT: guard.336f.loadstore.adapter.emit_memory_access" not in c and old2 in c:
         c = c.replace(old2, new2, 1)
+    if "// BEAK-INSERT: guard.336f.loadstore.adapter.emit_memory_access" not in c:
+        try:
+            c = _insert_before(
+                c,
+                anchor="        Ok((\n            (\n                [prev_data, read_record.1],",
+                guard="// BEAK-INSERT: guard.336f.loadstore.adapter.emit_memory_access",
+                insert=r"""
+        // BEAK-INSERT: guard.336f.loadstore.adapter.emit_memory_access
+        // BEAK-INSERT: Emit true memory access address metadata from the adapter. The core chip
+        // does not have rs1_data, so its chip-row effective_ptr field is not the source of truth.
+        let beak_imm_sign = imm_sign;
+        let is_load = matches!(local_opcode, LOADW | LOADB | LOADH | LOADBU | LOADHU);
+        let is_store = matches!(local_opcode, STOREW | STOREH | STOREB);
+        let beak_width = match local_opcode {
+            LOADW | STOREW => 4u32,
+            LOADH | LOADHU | STOREH => 2u32,
+            LOADB | LOADBU | STOREB => 1u32,
+        };
+        let beak_imm_i32: i32 = (imm as i32) - ((beak_imm_sign as i32) << 16);
+        let beak_effective_ptr = ptr_val.wrapping_add(shift_amount);
+        fuzzer_utils::emit_memory_access(
+            0,
+            local_opcode as u32,
+            b.as_canonical_u32(),
+            a.as_canonical_u32(),
+            beak_imm_i32,
+            beak_imm_sign == 1,
+            e.as_canonical_u32(),
+            beak_effective_ptr,
+            beak_effective_ptr,
+            ptr_val,
+            shift_amount,
+            beak_width,
+            is_load,
+            is_store,
+            is_load,
+            memory.timestamp(),
+            read_record.1.iter().map(|x| x.as_canonical_u32()).collect(),
+            prev_data.iter().map(|x| x.as_canonical_u32()).collect(),
+            read_record.1.iter().map(|x| x.as_canonical_u32()).collect(),
+        );
+        // BEAK-INSERT-END
+
+""",
+            )
+        except RuntimeError:
+            pass
+    if (
+        "// BEAK-INSERT: guard.336f.loadstore.adapter.emit_memory_access" in c
+        and "let mut beak_imm_sign" not in c
+        and "let beak_imm_sign = imm_sign;" not in c
+    ):
+        c = c.replace(
+            "        let beak_width = match local_opcode {\n",
+            "        let beak_imm_sign = imm_sign;\n"
+            "        let is_load = matches!(local_opcode, LOADW | LOADB | LOADH | LOADBU | LOADHU);\n"
+            "        let is_store = matches!(local_opcode, STOREW | STOREH | STOREB);\n"
+            "        let beak_width = match local_opcode {\n",
+            1,
+        )
+    if (
+        "// BEAK-INSERT: guard.336f.loadstore.adapter.emit_memory_access" in c
+        and "let beak_effective_ptr = ptr_val.wrapping_add(shift_amount);" not in c
+    ):
+        c = c.replace(
+            "        fuzzer_utils::emit_memory_access(\n",
+            "        let beak_effective_ptr = ptr_val.wrapping_add(shift_amount);\n"
+            "        let beak_imm_i32: i32 = (imm as i32) - ((beak_imm_sign as i32) << 16);\n"
+            "        fuzzer_utils::emit_memory_access(\n",
+            1,
+        )
+        c = c.replace("            imm_i32,\n", "            beak_imm_i32,\n", 1)
+        c = c.replace(
+            "            e.as_canonical_u32(),\n"
+            "            orig_ptr,\n"
+            "            orig_ptr,\n"
+            "            ptr_val,\n",
+            "            e.as_canonical_u32(),\n"
+            "            beak_effective_ptr,\n"
+            "            beak_effective_ptr,\n"
+            "            ptr_val,\n",
+            1,
+        )
+    if (
+        "// BEAK-INSERT: guard.336f.loadstore.adapter.emit_memory_access" in c
+        and "let beak_imm_i32: i32 = (imm as i32) - ((beak_imm_sign as i32) << 16);" not in c
+    ):
+        c = c.replace(
+            "        fuzzer_utils::emit_memory_access(\n",
+            "        let beak_imm_i32: i32 = (imm as i32) - ((beak_imm_sign as i32) << 16);\n"
+            "        fuzzer_utils::emit_memory_access(\n",
+            1,
+        )
+        c = c.replace("            imm_i32,\n", "            beak_imm_i32,\n", 1)
+    if (
+        "// BEAK-INSERT: guard.336f.loadstore.adapter.emit_memory_access" in c
+        and "read_record.1.iter().map(|x| x.as_canonical_u32()).collect(),\n        );"
+        not in c
+    ):
+        c = c.replace(
+            "            prev_data.iter().map(|x| x.as_canonical_u32()).collect(),\n"
+            "        );\n",
+            "            prev_data.iter().map(|x| x.as_canonical_u32()).collect(),\n"
+            "            read_record.1.iter().map(|x| x.as_canonical_u32()).collect(),\n"
+            "        );\n",
+            1,
+        )
+    if (
+        "// BEAK-INSERT: guard.336f.loadstore.adapter.mem_as_o5" not in c
+        and "// BEAK-INSERT: guard.336f.loadstore.adapter.emit_memory_access" in c
+        and "                mem_as: e,\n" in c
+    ):
+        c = c.replace(
+            "        Ok((\n",
+            """        // BEAK-INSERT: guard.336f.loadstore.adapter.mem_as_o5
+        let mut beak_mem_as = e;
+        if fuzzer_utils::should_inject_witness("openvm.semantic.memory.address_space_consistency", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.memory.address_space_consistency step={} old_mem_as={}",
+                beak_witness_step,
+                e.as_canonical_u32()
+            );
+            // Force RAM address space as a forged witness value.
+            beak_mem_as = F::ZERO;
+        }
+        // BEAK-INSERT-END
+
+        Ok((
+""",
+            1,
+        )
+        c = c.replace("                mem_as: e,\n", "                mem_as: beak_mem_as,\n", 1)
+    if (
+        "// BEAK-INSERT: guard.336f.loadstore.adapter.ptr_limbs" not in c
+        and "        let mem_ptr_limbs = array::from_fn(|i| ((ptr_val >> (i * (RV32_CELL_BITS * 2))) & 0xffff));\n"
+        in c
+    ):
+        c = c.replace(
+            "        let mem_ptr_limbs = array::from_fn(|i| ((ptr_val >> (i * (RV32_CELL_BITS * 2))) & 0xffff));\n",
+            """        let mut mem_ptr_limbs = array::from_fn(|i| ((ptr_val >> (i * (RV32_CELL_BITS * 2))) & 0xffff));
+        // BEAK-INSERT: guard.336f.loadstore.adapter.ptr_limbs
+        if fuzzer_utils::should_inject_witness("openvm.semantic.memory.address_pointer_consistency", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.memory.address_pointer_consistency step={} ptr_val={}",
+                beak_witness_step,
+                ptr_val
+            );
+            mem_ptr_limbs[0] = mem_ptr_limbs[0].wrapping_add(1) & 0xffff;
+        }
+        // BEAK-INSERT-END
+""",
+            1,
+        )
     path.write_text(c)
 
 
@@ -1311,6 +2286,358 @@ def _patch_336f_divrem_core_witness_injection(openvm_install_path: Path) -> None
     path.write_text(c)
 
 
+def _patch_336f_shift_core_semantic_injection(openvm_install_path: Path) -> None:
+    path = (
+        openvm_install_path
+        / "extensions"
+        / "rv32im"
+        / "circuit"
+        / "src"
+        / "shift"
+        / "core.rs"
+    )
+    if not path.exists():
+        return
+    _ensure_use_fuzzer_utils(path)
+    c = path.read_text()
+    try:
+        c = _insert_before(
+            c,
+            anchor="        let output = AdapterRuntimeContext::without_pc([a.map(F::from_canonical_u32)]);",
+            guard="// BEAK-INSERT: guard.336f.shift.core.emit_chip_row",
+            insert=r"""
+        // BEAK-INSERT: guard.336f.shift.core.emit_chip_row
+        let rd_ptr = instruction.a.as_canonical_u32();
+        let rs1_ptr = instruction.b.as_canonical_u32();
+        let rs2_ptr = instruction.c.as_canonical_u32() as i32;
+        let a_u8: [u8; NUM_LIMBS] = a.map(|x| x as u8);
+        let b_u8: [u8; NUM_LIMBS] = b.map(|x| x as u8);
+        let c_u8: [u8; NUM_LIMBS] = c.map(|x| x as u8);
+        fuzzer_utils::emit_shift_chip_row(
+            shift_opcode as u32,
+            rd_ptr,
+            rs1_ptr,
+            rs2_ptr,
+            false,
+            a_u8,
+            b_u8,
+            c_u8,
+        );
+        // BEAK-INSERT-END
+""",
+        )
+        c = _insert_before(
+            c,
+            anchor="    }\n\n    fn air(&self) -> &Self::Air {",
+            guard="// BEAK-INSERT: guard.336f.shift.core.shift_mod32",
+            insert=r"""
+
+        // BEAK-INSERT: guard.336f.shift.core.shift_mod32
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.alu.shift_mod32", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.alu.shift_mod32 step={}",
+                beak_witness_step
+            );
+            row_slice.a[0] += F::ONE;
+        }
+        // BEAK-INSERT-END
+""",
+        )
+    except RuntimeError:
+        return
+    path.write_text(c)
+
+
+def _patch_336f_less_than_core_semantic_injection(openvm_install_path: Path) -> None:
+    path = (
+        openvm_install_path
+        / "extensions"
+        / "rv32im"
+        / "circuit"
+        / "src"
+        / "less_than"
+        / "core.rs"
+    )
+    if not path.exists():
+        return
+    _ensure_use_fuzzer_utils(path)
+    c = path.read_text()
+    try:
+        c = _insert_before(
+            c,
+            anchor="        let output = AdapterRuntimeContext::without_pc([writes.map(F::from_canonical_u32)]);",
+            guard="// BEAK-INSERT: guard.336f.less_than.core.emit_chip_row",
+            insert=r"""
+        // BEAK-INSERT: guard.336f.less_than.core.emit_chip_row
+        let rd_ptr = instruction.a.as_canonical_u32();
+        let rs1_ptr = instruction.b.as_canonical_u32();
+        let rs2_ptr = instruction.c.as_canonical_u32() as i32;
+        let a_u8: [u8; NUM_LIMBS] = writes.map(|x| x as u8);
+        let b_u8: [u8; NUM_LIMBS] = b.map(|x| x as u8);
+        let c_u8: [u8; NUM_LIMBS] = c.map(|x| x as u8);
+        fuzzer_utils::emit_less_than_chip_row(
+            less_than_opcode as u32,
+            rd_ptr,
+            rs1_ptr,
+            rs2_ptr,
+            false,
+            a_u8,
+            b_u8,
+            c_u8,
+        );
+        // BEAK-INSERT-END
+""",
+        )
+        c = _insert_before(
+            c,
+            anchor="    }\n\n    fn air(&self) -> &Self::Air {",
+            guard="// BEAK-INSERT: guard.336f.less_than.core.alu_semantics",
+            insert=r"""
+
+        // BEAK-INSERT: guard.336f.less_than.core.alu_semantics
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.alu.comparison_booleanity", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.alu.comparison_booleanity step={}",
+                beak_witness_step
+            );
+            row_slice.cmp_result = F::ONE - row_slice.cmp_result;
+        }
+        if fuzzer_utils::should_inject_witness("openvm.semantic.alu.comparison_auxiliary_chain", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.alu.comparison_auxiliary_chain step={}",
+                beak_witness_step
+            );
+            if record.diff_idx == NUM_LIMBS {
+                row_slice.diff_marker[0] = F::ONE;
+            } else {
+                row_slice.diff_val += F::ONE;
+            }
+        }
+        // BEAK-INSERT-END
+""",
+        )
+    except RuntimeError:
+        return
+    path.write_text(c)
+
+
+def _patch_336f_base_alu_core_semantic_injection(openvm_install_path: Path) -> None:
+    path = (
+        openvm_install_path
+        / "extensions"
+        / "rv32im"
+        / "circuit"
+        / "src"
+        / "base_alu"
+        / "core.rs"
+    )
+    if not path.exists():
+        return
+    _ensure_use_fuzzer_utils(path)
+    c = path.read_text()
+    try:
+        c = _insert_before(
+            c,
+            anchor="    }\n\n    fn air(&self) -> &Self::Air {",
+            guard="// BEAK-INSERT: guard.336f.base_alu.core.sub_borrow",
+            insert=r"""
+
+        // BEAK-INSERT: guard.336f.base_alu.core.sub_borrow
+        if record.opcode == BaseAluOpcode::SUB {
+            let beak_witness_step = fuzzer_utils::next_witness_step();
+            if fuzzer_utils::should_inject_witness("openvm.semantic.alu.subtraction_borrow_chain", beak_witness_step) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.alu.subtraction_borrow_chain step={}",
+                    beak_witness_step
+                );
+                row_slice.a[0] += F::ONE;
+            }
+        }
+        // BEAK-INSERT-END
+""",
+        )
+    except RuntimeError:
+        return
+    path.write_text(c)
+
+
+def _patch_336f_mul_core_semantic_injection(openvm_install_path: Path) -> None:
+    path = (
+        openvm_install_path
+        / "extensions"
+        / "rv32im"
+        / "circuit"
+        / "src"
+        / "mul"
+        / "core.rs"
+    )
+    if not path.exists():
+        return
+    _ensure_use_fuzzer_utils(path)
+    c = path.read_text()
+    try:
+        c = _insert_before(
+            c,
+            anchor="        let output = AdapterRuntimeContext::without_pc([a.map(F::from_canonical_u32)]);",
+            guard="// BEAK-INSERT: guard.336f.mul.core.emit_chip_row",
+            insert=r"""
+        // BEAK-INSERT: guard.336f.mul.core.emit_chip_row
+        let rd_ptr = instruction.a.as_canonical_u32();
+        let rs1_ptr = instruction.b.as_canonical_u32();
+        let rs2_ptr = instruction.c.as_canonical_u32();
+        let a_u8: [u8; NUM_LIMBS] = a.map(|x| x as u8);
+        let b_u8: [u8; NUM_LIMBS] = b.map(|x| x as u8);
+        let c_u8: [u8; NUM_LIMBS] = c.map(|x| x as u8);
+        fuzzer_utils::emit_mul_chip_row(
+            MulOpcode::MUL as u32,
+            rd_ptr,
+            rs1_ptr,
+            rs2_ptr,
+            a_u8,
+            b_u8,
+            c_u8,
+        );
+        // BEAK-INSERT-END
+""",
+        )
+        c = _insert_before(
+            c,
+            anchor="    }\n\n    fn air(&self) -> &Self::Air {",
+            guard="// BEAK-INSERT: guard.336f.mul.core.product_decomposition",
+            insert=r"""
+
+        // BEAK-INSERT: guard.336f.mul.core.product_decomposition
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.arithmetic.product_decomposition", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.arithmetic.product_decomposition step={} site=mul",
+                beak_witness_step
+            );
+            row_slice.a[0] += F::ONE;
+        }
+        // BEAK-INSERT-END
+""",
+        )
+    except RuntimeError:
+        return
+    path.write_text(c)
+
+
+def _patch_336f_mulh_core_semantic_injection(openvm_install_path: Path) -> None:
+    path = (
+        openvm_install_path
+        / "extensions"
+        / "rv32im"
+        / "circuit"
+        / "src"
+        / "mulh"
+        / "core.rs"
+    )
+    if not path.exists():
+        return
+    _ensure_use_fuzzer_utils(path)
+    c = path.read_text()
+    try:
+        c = _insert_before(
+            c,
+            anchor="        let output = AdapterRuntimeContext::without_pc([a.map(F::from_canonical_u32)]);",
+            guard="// BEAK-INSERT: guard.336f.mulh.core.emit_chip_row",
+            insert=r"""
+        // BEAK-INSERT: guard.336f.mulh.core.emit_chip_row
+        let rd_ptr = instruction.a.as_canonical_u32();
+        let rs1_ptr = instruction.b.as_canonical_u32();
+        let rs2_ptr = instruction.c.as_canonical_u32();
+        let a_u8: [u8; NUM_LIMBS] = a.map(|x| x as u8);
+        let b_u8: [u8; NUM_LIMBS] = b.map(|x| x as u8);
+        let c_u8: [u8; NUM_LIMBS] = c.map(|x| x as u8);
+        fuzzer_utils::emit_mulh_chip_row(
+            mulh_opcode as u32,
+            rd_ptr,
+            rs1_ptr,
+            rs2_ptr,
+            a_u8,
+            b_u8,
+            c_u8,
+        );
+        // BEAK-INSERT-END
+""",
+        )
+        c = _insert_before(
+            c,
+            anchor="    }\n\n    fn air(&self) -> &Self::Air {",
+            guard="// BEAK-INSERT: guard.336f.mulh.core.product_semantics",
+            insert=r"""
+
+        // BEAK-INSERT: guard.336f.mulh.core.product_semantics
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.arithmetic.product_decomposition", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.arithmetic.product_decomposition step={} site=mulh",
+                beak_witness_step
+            );
+            row_slice.a[0] += F::ONE;
+        }
+        if record.opcode == MulHOpcode::MULHSU
+            && fuzzer_utils::should_inject_witness(
+                "openvm.semantic.arithmetic.signed_unsigned_product_correction",
+                beak_witness_step,
+            )
+        {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.arithmetic.signed_unsigned_product_correction step={}",
+                beak_witness_step
+            );
+            row_slice.b_ext += F::ONE;
+        }
+        // BEAK-INSERT-END
+""",
+        )
+    except RuntimeError:
+        return
+    path.write_text(c)
+
+
+def _patch_336f_divrem_core_md3_injection(openvm_install_path: Path) -> None:
+    path = (
+        openvm_install_path
+        / "extensions"
+        / "rv32im"
+        / "circuit"
+        / "src"
+        / "divrem"
+        / "core.rs"
+    )
+    if not path.exists():
+        return
+    _ensure_use_fuzzer_utils(path)
+    c = path.read_text()
+    try:
+        c = _insert_after(
+            c,
+            anchor="        row_slice.lt_diff = record.lt_diff_val;",
+            guard="// BEAK-INSERT: guard.336f.divrem.core.md3",
+            insert=r"""
+        // BEAK-INSERT: guard.336f.divrem.core.md3
+        if record.zero_divisor.as_canonical_u32() == 0 {
+            let beak_witness_step = fuzzer_utils::next_witness_step();
+            if fuzzer_utils::should_inject_witness("openvm.semantic.arithmetic.division_remainder_bound", beak_witness_step) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.arithmetic.division_remainder_bound step={}",
+                    beak_witness_step
+                );
+                row_slice.q[0] += F::ONE;
+            }
+        }
+        // BEAK-INSERT-END
+""",
+        )
+    except RuntimeError:
+        return
+    path.write_text(c)
+
+
 def _patch_336f_bitwise_lookup_shadow_multiplicity_injection(openvm_install_path: Path) -> None:
     """
     Add a witness-only (prove-side) shadow multiplicity mutation for audit-o1.
@@ -1328,8 +2655,9 @@ def _patch_336f_bitwise_lookup_shadow_multiplicity_injection(openvm_install_path
     )
     if not path.exists():
         return
-    _ensure_use_fuzzer_utils(path)
     c = path.read_text()
+    c = c.replace("#[allow(unused_imports)]\nuse fuzzer_utils;\n\n", "")
+    c = c.replace("#[allow(unused_imports)]\nuse fuzzer_utils;\n", "")
     try:
         c = _insert_before(
             c,
@@ -1473,6 +2801,169 @@ def _patch_f038_volatile_witness_injection(openvm_install_path: Path) -> None:
     path.write_text(c)
 
 
+def _patch_f038_loadstore_immediate_sign_witness_injection(openvm_install_path: Path) -> None:
+    path = (
+        openvm_install_path
+        / "extensions"
+        / "rv32im"
+        / "circuit"
+        / "src"
+        / "adapters"
+        / "loadstore.rs"
+    )
+    if not path.exists():
+        return
+    _ensure_use_fuzzer_utils(path)
+    c = path.read_text()
+    old = r"""        let rs1_val = compose(rs1_record.1);
+        let imm = c.as_canonical_u32();
+        let imm_sign = g.as_canonical_u32();
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        let imm_extended = imm + imm_sign * 0xffff0000;
+
+        let ptr_val = rs1_val.wrapping_add(imm_extended);
+"""
+    new = r"""        let rs1_val = compose(rs1_record.1);
+        let imm = c.as_canonical_u32();
+        let imm_sign = g.as_canonical_u32();
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+
+        // BEAK-INSERT: guard.f038.loadstore.adapter.immediate_sign
+        let mut beak_imm_sign = imm_sign;
+        if fuzzer_utils::should_inject_witness(
+            "openvm.semantic.memory.immediate_sign_consistency",
+            beak_witness_step,
+        ) {
+            let candidate_sign = if imm_sign == 1 { 0 } else { 1 };
+            let candidate_ext = imm + candidate_sign * 0xffff0000;
+            let candidate_ptr = rs1_val.wrapping_add(candidate_ext);
+            if candidate_ptr < (1 << self.air.pointer_max_bits) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.memory.immediate_sign_consistency step={} imm={} orig_sign={} injected_sign={} orig_rs1={} injected_ptr={}",
+                    beak_witness_step,
+                    imm,
+                    imm_sign,
+                    candidate_sign,
+                    rs1_val,
+                    candidate_ptr
+                );
+                beak_imm_sign = candidate_sign;
+            } else {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.memory.immediate_sign_consistency step={} imm={} skip_out_of_range orig_sign={} candidate_sign={} orig_rs1={} candidate_ptr={}",
+                    beak_witness_step,
+                    imm,
+                    imm_sign,
+                    candidate_sign,
+                    rs1_val,
+                    candidate_ptr
+                );
+            }
+        }
+        // BEAK-INSERT-END
+        let imm_extended = imm + beak_imm_sign * 0xffff0000;
+
+        let ptr_val = rs1_val.wrapping_add(imm_extended);
+"""
+    if "// BEAK-INSERT: guard.f038.loadstore.adapter.immediate_sign" not in c and old in c:
+        c = c.replace(old, new, 1)
+    path.write_text(c)
+
+
+def _patch_f038_memory_finalization_instrumentation(openvm_install_path: Path) -> None:
+    path = openvm_install_path / "crates" / "vm" / "src" / "system" / "memory" / "controller" / "mod.rs"
+    if not path.exists():
+        return
+    _ensure_use_fuzzer_utils(path)
+    c = path.read_text()
+    old = r"""                let final_partition = offline_memory.finalize::<CHUNK>(&mut self.access_adapters);
+
+                boundary_chip.finalize(initial_memory, &final_partition, hasher);
+                let final_memory_values = final_partition
+"""
+    new = r"""                let mut final_partition = offline_memory.finalize::<CHUNK>(&mut self.access_adapters);
+
+                // BEAK-INSERT: guard.f038.memory.lifecycle.finalization
+                let beak_final_cells: Vec<_> = final_partition
+                    .iter()
+                    .map(|(&(address_space, chunk_label), values)| {
+                        let pointer = chunk_label * CHUNK as u32;
+                        let final_values = values
+                            .values
+                            .iter()
+                            .map(|value| value.as_canonical_u32())
+                            .collect::<Vec<_>>();
+                        let initial_values = (0..CHUNK as u32)
+                            .map(|offset| {
+                                initial_memory
+                                    .get(&(address_space, pointer + offset))
+                                    .copied()
+                                    .unwrap_or(F::ZERO)
+                                    .as_canonical_u32()
+                            })
+                            .collect::<Vec<_>>();
+                        let was_initial = initial_values.iter().any(|value| *value != 0);
+                        let changed_from_initial = final_values != initial_values;
+                        (
+                            (address_space, chunk_label),
+                            pointer,
+                            values.timestamp,
+                            final_values,
+                            was_initial,
+                            changed_from_initial,
+                        )
+                    })
+                    .collect();
+                for (
+                    beak_final_idx,
+                    (
+                        (address_space, chunk_label),
+                        pointer,
+                        timestamp,
+                        final_values,
+                        was_initial,
+                        changed_from_initial,
+                    ),
+                ) in beak_final_cells.into_iter().enumerate()
+                {
+                    let beak_final_idx = beak_final_idx as u64;
+                    fuzzer_utils::emit_memory_finalization(
+                        beak_final_idx,
+                        address_space,
+                        pointer,
+                        timestamp,
+                        final_values,
+                        was_initial,
+                        changed_from_initial,
+                    );
+                    if fuzzer_utils::should_inject_witness(
+                        "openvm.semantic.memory.finalization_consistency",
+                        beak_final_idx,
+                    ) {
+                        eprintln!(
+                            "[beak-witness-inject] kind=openvm.semantic.memory.finalization_consistency step={} address_space={} pointer={} timestamp={}",
+                            beak_final_idx,
+                            address_space,
+                            pointer,
+                            timestamp
+                        );
+                        if let Some(values) =
+                            final_partition.get_mut(&(address_space, chunk_label))
+                        {
+                            values.values[0] += F::from_canonical_u32(1);
+                        }
+                    }
+                }
+                // BEAK-INSERT-END
+
+                boundary_chip.finalize(initial_memory, &final_partition, hasher);
+                let final_memory_values = final_partition
+"""
+    if "// BEAK-INSERT: guard.f038.memory.lifecycle.finalization" not in c and old in c:
+        c = c.replace(old, new, 1)
+    path.write_text(c)
+
+
 def _patch_f038_connector_witness_injection(openvm_install_path: Path) -> None:
     path = (
         openvm_install_path
@@ -1519,6 +3010,209 @@ def _patch_f038_connector_witness_injection(openvm_install_path: Path) -> None:
     if "// openvm.semantic.time.boundary_origin_consistency" not in c and old in c:
         c = c.replace(old, new, 1)
     path.write_text(c)
+
+
+def _patch_336f_connector_witness_injection(openvm_install_path: Path) -> None:
+    path = (
+        openvm_install_path
+        / "crates"
+        / "vm"
+        / "src"
+        / "system"
+        / "connector"
+        / "mod.rs"
+    )
+    if not path.exists():
+        return
+    _ensure_use_fuzzer_utils(path)
+    c = path.read_text()
+    old = r"""    pub fn begin(&mut self, state: ExecutionState<u32>) {
+        self.boundary_states[0] = Some(ConnectorCols {
+            pc: state.pc,
+            timestamp: state.timestamp,
+            is_terminate: 0,
+            exit_code: 0,
+        });
+    }
+"""
+    new = r"""    pub fn begin(&mut self, state: ExecutionState<u32>) {
+        let beak_step = fuzzer_utils::next_witness_step();
+        let mut beak_pc = state.pc;
+        let mut beak_ts = state.timestamp;
+        if fuzzer_utils::should_inject_witness("openvm.semantic.time.boundary_origin_consistency", beak_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.time.boundary_origin_consistency step={} from_ts={}",
+                beak_step,
+                state.timestamp
+            );
+            // Shift initial timestamp away from zero (canonical BabyBear element).
+            beak_ts = 1 << 29;
+        }
+        if fuzzer_utils::should_inject_witness("openvm.semantic.control.entrypoint_binding", beak_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.control.entrypoint_binding step={} from_pc={}",
+                beak_step,
+                state.pc
+            );
+            beak_pc = state.pc.wrapping_add(1);
+        }
+        self.boundary_states[0] = Some(ConnectorCols {
+            pc: beak_pc,
+            timestamp: beak_ts,
+            is_terminate: 0,
+            exit_code: 0,
+        });
+    }
+"""
+    if "// openvm.semantic.control.entrypoint_binding" not in c and old in c:
+        c = c.replace(old, new, 1)
+    path.write_text(c)
+
+
+def _patch_336f_control_flow_witness_injection(openvm_install_path: Path) -> None:
+    branch_eq = (
+        openvm_install_path
+        / "extensions"
+        / "rv32im"
+        / "circuit"
+        / "src"
+        / "branch_eq"
+        / "core.rs"
+    )
+    if branch_eq.exists():
+        _ensure_use_fuzzer_utils(branch_eq)
+        c = branch_eq.read_text()
+        try:
+            c = _insert_before(
+                c,
+                anchor="    }\n\n    fn air(&self) -> &Self::Air {",
+                guard="// BEAK-INSERT: guard.336f.branch_eq.control_flow",
+                insert=r"""
+
+        // BEAK-INSERT: guard.336f.branch_eq.control_flow
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.exec.control_flow_binding", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.exec.control_flow_binding step={} site=branch_eq",
+                beak_witness_step
+            );
+            row_slice.cmp_result = F::ONE - row_slice.cmp_result;
+        }
+        // BEAK-INSERT-END
+""",
+            )
+            branch_eq.write_text(c)
+        except RuntimeError:
+            pass
+
+    branch_lt = (
+        openvm_install_path
+        / "extensions"
+        / "rv32im"
+        / "circuit"
+        / "src"
+        / "branch_lt"
+        / "core.rs"
+    )
+    if branch_lt.exists():
+        _ensure_use_fuzzer_utils(branch_lt)
+        c = branch_lt.read_text()
+        try:
+            c = _insert_before(
+                c,
+                anchor="    }\n\n    fn air(&self) -> &Self::Air {",
+                guard="// BEAK-INSERT: guard.336f.branch_lt.control_flow",
+                insert=r"""
+
+        // BEAK-INSERT: guard.336f.branch_lt.control_flow
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.exec.control_flow_binding", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.exec.control_flow_binding step={} site=branch_lt",
+                beak_witness_step
+            );
+            row_slice.cmp_result = F::ONE - row_slice.cmp_result;
+        }
+        // BEAK-INSERT-END
+""",
+            )
+            branch_lt.write_text(c)
+        except RuntimeError:
+            pass
+
+    jal_lui = (
+        openvm_install_path
+        / "extensions"
+        / "rv32im"
+        / "circuit"
+        / "src"
+        / "jal_lui"
+        / "core.rs"
+    )
+    if jal_lui.exists():
+        _ensure_use_fuzzer_utils(jal_lui)
+        c = jal_lui.read_text()
+        try:
+            c = _insert_after(
+                c,
+                anchor="        core_cols.is_lui = F::from_bool(record.is_lui);",
+                guard="// BEAK-INSERT: guard.336f.jal_lui.control_flow",
+                insert=r"""
+
+        // BEAK-INSERT: guard.336f.jal_lui.control_flow
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if record.is_jal
+            && fuzzer_utils::should_inject_witness("openvm.semantic.exec.control_flow_binding", beak_witness_step)
+        {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.exec.control_flow_binding step={} site=jal",
+                beak_witness_step
+            );
+            core_cols.rd_data[0] += F::ONE;
+        }
+        // BEAK-INSERT-END
+""",
+            )
+            jal_lui.write_text(c)
+        except RuntimeError:
+            pass
+
+    jalr = (
+        openvm_install_path
+        / "extensions"
+        / "rv32im"
+        / "circuit"
+        / "src"
+        / "jalr"
+        / "core.rs"
+    )
+    if jalr.exists():
+        _ensure_use_fuzzer_utils(jalr)
+        c = jalr.read_text()
+        try:
+            c = _insert_after(
+                c,
+                anchor="        core_cols.is_valid = F::ONE;",
+                guard="// BEAK-INSERT: guard.336f.jalr.control_flow",
+                insert=r"""
+
+        // BEAK-INSERT: guard.336f.jalr.control_flow
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.exec.control_flow_binding", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.exec.control_flow_binding step={} site=jalr",
+                beak_witness_step
+            );
+            core_cols.rd_data[0] += F::ONE;
+            core_cols.to_pc_least_sig_bit = F::ONE - core_cols.to_pc_least_sig_bit;
+            core_cols.imm_sign = F::ONE - core_cols.imm_sign;
+        }
+        // BEAK-INSERT-END
+""",
+            )
+            jalr.write_text(c)
+        except RuntimeError:
+            pass
 
 
 def _patch_f038_loadstore_mem_as_witness_injection(openvm_install_path: Path) -> None:
@@ -1793,6 +3487,273 @@ fn injection_variant(kind: &str) -> Option<&str> {
         )
 
     path.write_text(c)
+
+
+def _patch_regzero_semantic_witness_injection(openvm_install_path: Path) -> None:
+    """Add d7/regzero witness mutation hooks at concrete prover row construction sites."""
+
+    connector = openvm_install_path / "crates" / "vm" / "src" / "system" / "connector" / "mod.rs"
+    if connector.exists():
+        _ensure_use_fuzzer_utils(connector)
+        c = connector.read_text()
+        try:
+            c = _insert_after(
+                c,
+                anchor="let [initial_state, final_state] = self.boundary_states.map(|state| {\n            let mut state = state.unwrap();",
+                guard="// BEAK-INSERT: guard.regzero.connector.semantic_injection",
+                insert=r"""
+
+            // BEAK-INSERT: guard.regzero.connector.semantic_injection
+            let beak_witness_step = fuzzer_utils::next_witness_step();
+            if fuzzer_utils::should_inject_witness("openvm.semantic.time.boundary_origin_consistency", beak_witness_step) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.time.boundary_origin_consistency step={} from_ts={}",
+                    beak_witness_step,
+                    state.timestamp
+                );
+                state.timestamp = state.timestamp.wrapping_add(1 << 29);
+            }
+            if fuzzer_utils::should_inject_witness("openvm.semantic.control.entrypoint_binding", beak_witness_step) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.control.entrypoint_binding step={} from_pc={}",
+                    beak_witness_step,
+                    state.pc
+                );
+                state.pc = state.pc.wrapping_add(1);
+            }
+            // BEAK-INSERT-END
+""",
+            )
+        except RuntimeError:
+            pass
+        connector.write_text(c)
+
+    core_hooks = [
+        (
+            openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "base_alu" / "core.rs",
+            "        core_row.a = a.map(F::from_canonical_u8);\n",
+            "// BEAK-INSERT: guard.regzero.base_alu.semantic_injection",
+            r"""
+
+        // BEAK-INSERT: guard.regzero.base_alu.semantic_injection
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.alu.immediate_limb_consistency", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.alu.immediate_limb_consistency step={}",
+                beak_witness_step
+            );
+            core_row.c[0] += F::ONE;
+        }
+        if local_opcode == BaseAluOpcode::SUB
+            && fuzzer_utils::should_inject_witness("openvm.semantic.alu.subtraction_borrow_chain", beak_witness_step)
+        {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.alu.subtraction_borrow_chain step={}",
+                beak_witness_step
+            );
+            core_row.a[0] += F::ONE;
+        }
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "shift" / "core.rs",
+            "        core_row.a = a.map(F::from_canonical_u8);\n",
+            "// BEAK-INSERT: guard.regzero.shift.semantic_injection",
+            r"""
+
+        // BEAK-INSERT: guard.regzero.shift.semantic_injection
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.alu.shift_mod32", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.alu.shift_mod32 step={}",
+                beak_witness_step
+            );
+            core_row.a[0] += F::ONE;
+        }
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "less_than" / "core.rs",
+            "        let mut a = [0u8; NUM_LIMBS];\n        a[0] = cmp_result as u8;\n",
+            "// BEAK-INSERT: guard.regzero.less_than.semantic_injection",
+            r"""
+
+        // BEAK-INSERT: guard.regzero.less_than.semantic_injection
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.alu.comparison_booleanity", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.alu.comparison_booleanity step={}",
+                beak_witness_step
+            );
+            core_row.cmp_result = F::ONE - core_row.cmp_result;
+        }
+        if fuzzer_utils::should_inject_witness("openvm.semantic.alu.comparison_auxiliary_chain", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.alu.comparison_auxiliary_chain step={}",
+                beak_witness_step
+            );
+            core_row.diff_marker[0] = F::ONE;
+        }
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "divrem" / "core.rs",
+            "        core_row.b = record.b.map(F::from_canonical_u8);\n",
+            "// BEAK-INSERT: guard.regzero.divrem.semantic_injection",
+            r"""
+
+        // BEAK-INSERT: guard.regzero.divrem.semantic_injection
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.arithmetic.special_case_consistency", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.arithmetic.special_case_consistency step={}",
+                beak_witness_step
+            );
+            core_row.q[0] += F::ONE;
+        }
+        if beak_record_c.iter().any(|limb| *limb != 0)
+            && fuzzer_utils::should_inject_witness("openvm.semantic.arithmetic.division_remainder_bound", beak_witness_step)
+        {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.arithmetic.division_remainder_bound step={}",
+                beak_witness_step
+            );
+            core_row.q[0] += F::ONE;
+        }
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "mul" / "core.rs",
+            "        core_row.a = a.map(F::from_canonical_u8);\n",
+            "// BEAK-INSERT: guard.regzero.mul.semantic_injection",
+            r"""
+
+        // BEAK-INSERT: guard.regzero.mul.semantic_injection
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.arithmetic.product_decomposition", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.arithmetic.product_decomposition step={} site=mul",
+                beak_witness_step
+            );
+            core_row.a[0] += F::ONE;
+        }
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "mulh" / "core.rs",
+            "        core_row.a = a.map(F::from_canonical_u32);\n",
+            "// BEAK-INSERT: guard.regzero.mulh.semantic_injection",
+            r"""
+
+        // BEAK-INSERT: guard.regzero.mulh.semantic_injection
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.arithmetic.product_decomposition", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.arithmetic.product_decomposition step={} site=mulh",
+                beak_witness_step
+            );
+            core_row.a[0] += F::ONE;
+        }
+        if opcode == MulHOpcode::MULHSU
+            && fuzzer_utils::should_inject_witness("openvm.semantic.arithmetic.signed_unsigned_product_correction", beak_witness_step)
+        {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.arithmetic.signed_unsigned_product_correction step={}",
+                beak_witness_step
+            );
+            core_row.b_ext += F::ONE;
+        }
+        // BEAK-INSERT-END
+""",
+        ),
+        (
+            openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "auipc" / "core.rs",
+            "        core_row.rd_data = rd_data.map(F::from_canonical_u8);\n",
+            "// BEAK-INSERT: guard.regzero.auipc.semantic_injection",
+            r"""
+
+        // BEAK-INSERT: guard.regzero.auipc.semantic_injection
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.control.auipc_pc_limb_consistency", beak_witness_step) {
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.control.auipc_pc_limb_consistency step={}",
+                beak_witness_step
+            );
+            core_row.pc_limbs[0] += F::ONE;
+        }
+        // BEAK-INSERT-END
+""",
+        ),
+    ]
+    for path, anchor, guard, insert in core_hooks:
+        if not path.exists():
+            continue
+        _ensure_use_fuzzer_utils(path)
+        c = path.read_text()
+        try:
+            c = _insert_after(c, anchor=anchor, guard=guard, insert=insert)
+        except RuntimeError:
+            pass
+        path.write_text(c)
+
+    control_hooks = [
+        (
+            openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "branch_eq" / "core.rs",
+            "        core_row.a = record.a.map(F::from_canonical_u8);\n",
+            "// BEAK-INSERT: guard.regzero.branch_eq.semantic_injection",
+            "branch_eq",
+            "core_row.cmp_result = F::ONE - core_row.cmp_result;",
+        ),
+        (
+            openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "branch_lt" / "core.rs",
+            "        core_row.a = record.a.map(F::from_canonical_u8);\n",
+            "// BEAK-INSERT: guard.regzero.branch_lt.semantic_injection",
+            "branch_lt",
+            "core_row.cmp_result = F::ONE - core_row.cmp_result;",
+        ),
+        (
+            openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "jal_lui" / "core.rs",
+            "        core_row.imm = F::from_canonical_u32(record.imm);\n",
+            "// BEAK-INSERT: guard.regzero.jal_lui.semantic_injection",
+            "jal",
+            "if record.is_jal { core_row.rd_data[0] += F::ONE; }",
+        ),
+        (
+            openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "jalr" / "core.rs",
+            "        core_row.imm = F::from_canonical_u16(record.imm);\n",
+            "// BEAK-INSERT: guard.regzero.jalr.semantic_injection",
+            "jalr",
+            "core_row.rd_data[0] += F::ONE;\n            core_row.imm_sign = F::ONE - core_row.imm_sign;",
+        ),
+    ]
+    for path, anchor, guard, site, mutation in control_hooks:
+        if not path.exists():
+            continue
+        _ensure_use_fuzzer_utils(path)
+        c = path.read_text()
+        insert = f"""
+
+        {guard}
+        let beak_witness_step = fuzzer_utils::next_witness_step();
+        if fuzzer_utils::should_inject_witness("openvm.semantic.exec.control_flow_binding", beak_witness_step) {{
+            eprintln!(
+                "[beak-witness-inject] kind=openvm.semantic.exec.control_flow_binding step={{}} site={site}",
+                beak_witness_step
+            );
+            {mutation}
+        }}
+        // BEAK-INSERT-END
+"""
+        try:
+            c = _insert_after(c, anchor=anchor, guard=guard, insert=insert)
+        except RuntimeError:
+            pass
+        path.write_text(c)
 
 
 # def _patch_audit_integration_api_for_microops(openvm_install_path: Path) -> None:
@@ -2439,25 +4400,45 @@ def apply(*, openvm_install_path: Path, commit_or_branch: str) -> None:
         _patch_regzero_interpreter_preflight_emit_instruction(openvm_install_path)
         _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path)
         _patch_regzero_system_connector_emit_chip_row(openvm_install_path)
+        _patch_regzero_semantic_witness_injection(openvm_install_path)
+        _patch_witness_step_wildcard_support(openvm_install_path)
+        _patch_witness_variant_support(openvm_install_path)
     elif commit in {OPENVM_BENCHMARK_336F_COMMIT, OPENVM_BENCHMARK_F038_COMMIT}:
         # Keep audit snapshots on a lightweight, layout-compatible injection set.
         # Start with one concrete adapter-level injection used by loop2/audit-o5 workflow.
         # Also emit system connector chip-row as a first-class trace record, so connector-related
         # loop2 injections do not rely on coarse proxy buckets.
         _patch_regzero_system_connector_emit_chip_row(openvm_install_path)
+        _patch_336f_segment_emit_instruction(openvm_install_path)
         _patch_336f_base_alu_adapter_emit_chip_row(openvm_install_path)
         _patch_336f_auipc_core_emit_chip_row(openvm_install_path)
         _patch_336f_loadstore_core_emit_chip_row(openvm_install_path)
+        _patch_memory_access_emit_support(openvm_install_path)
         _patch_336f_divrem_core_emit_chip_row(openvm_install_path)
         _patch_336f_auipc_core_witness_injection(openvm_install_path)
         _patch_336f_loadstore_adapter_witness_injection(openvm_install_path)
+        _patch_336f_loadstore_core_witness_injection(openvm_install_path)
+        _patch_336f_memory_timestamp_aux_witness_injection(openvm_install_path)
+        _patch_336f_memory_lifecycle_instrumentation(openvm_install_path)
         _patch_336f_divrem_core_witness_injection(openvm_install_path)
+        _patch_336f_shift_core_semantic_injection(openvm_install_path)
+        _patch_336f_less_than_core_semantic_injection(openvm_install_path)
+        _patch_336f_base_alu_core_semantic_injection(openvm_install_path)
+        _patch_336f_mul_core_semantic_injection(openvm_install_path)
+        _patch_336f_mulh_core_semantic_injection(openvm_install_path)
+        _patch_336f_divrem_core_md3_injection(openvm_install_path)
         _patch_336f_bitwise_lookup_shadow_multiplicity_injection(openvm_install_path)
+        if commit == OPENVM_BENCHMARK_336F_COMMIT:
+            _patch_336f_program_trace_semantic_injection(openvm_install_path)
+            _patch_336f_connector_witness_injection(openvm_install_path)
+            _patch_336f_control_flow_witness_injection(openvm_install_path)
         _patch_witness_step_wildcard_support(openvm_install_path)
         _patch_witness_variant_support(openvm_install_path)
         if commit == OPENVM_BENCHMARK_F038_COMMIT:
+            _patch_f038_memory_finalization_instrumentation(openvm_install_path)
             _patch_f038_volatile_witness_injection(openvm_install_path)
             _patch_f038_connector_witness_injection(openvm_install_path)
             _patch_f038_loadstore_mem_as_witness_injection(openvm_install_path)
+            _patch_f038_loadstore_immediate_sign_witness_injection(openvm_install_path)
     else:
         raise ValueError(f"Unsupported commit or branch: {commit_or_branch}")

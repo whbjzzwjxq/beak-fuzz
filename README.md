@@ -2,7 +2,9 @@
 
 Minimal setup and run guide for the current OpenVM backend.
 
-For architecture details, see `docs/ARCHITECTURE.md`.
+For architecture details, see `docs/ARCHITECTURE.md`. For obligation coverage
+work, start with `docs/OBLIGATION_IMPLEMENTATION_CONTRACT.md` and track status
+in `docs/OBLIGATION_IMPLEMENTATION_MATRIX.md`.
 
 ## 1) Environment Setup
 

@@ -45,6 +45,18 @@ fn main() {
                 .default_value("0")
                 .help("Oracle zeroed data RAM bytes for split-code-data mode."),
         )
+        .arg(
+            Arg::new("inject_kind")
+                .long("inject-kind")
+                .num_args(1)
+                .help("Optional SP1 semantic inject kind to arm for this run."),
+        )
+        .arg(
+            Arg::new("inject_step")
+                .long("inject-step")
+                .default_value("0")
+                .help("Optional injection step, or u64::MAX to use the first observed site."),
+        )
         .after_help(
             "Example:\n  beak-trace --bin 12345017 --bin 00000533\n  beak-trace --bin \"12345017 00000533\"",
         )
@@ -80,6 +92,9 @@ fn main() {
         matches.get_one::<String>("oracle_data_size_bytes").unwrap(),
         "oracle-data-size-bytes",
     );
+    let inject_kind = matches.get_one::<String>("inject_kind").map(String::as_str);
+    let inject_step =
+        parse_u64_arg(matches.get_one::<String>("inject_step").unwrap(), "inject-step");
     let oracle_cfg = OracleConfig {
         memory_model: oracle_memory_model,
         code_base: oracle_code_base,
@@ -106,7 +121,7 @@ fn main() {
     }
 
     println!("\n=== SP1 backend (run_backend_once) ===");
-    let backend_resp = match run_backend_once(1, &words, 10_000, 0, None, 0) {
+    let backend_resp = match run_backend_once(1, &words, 10_000, inject_kind, inject_step) {
         Ok(resp) => resp,
         Err(e) => {
             eprintln!("  backend error: {e}");
@@ -114,6 +129,7 @@ fn main() {
         }
     };
     println!("  micro_op_count = {}", backend_resp.micro_op_count);
+    println!("  semantic_injection_applied = {}", backend_resp.injection_applied);
 
     if let Some(err) = &backend_resp.backend_error {
         println!("  backend_error = {err}");
@@ -166,5 +182,14 @@ fn parse_u32_arg(value: &str, name: &str) -> u32 {
         u32::from_str_radix(hex, 16).unwrap_or_else(|_| panic!("invalid {name}: {value}"))
     } else {
         s.parse::<u32>().unwrap_or_else(|_| panic!("invalid {name}: {value}"))
+    }
+}
+
+fn parse_u64_arg(value: &str, name: &str) -> u64 {
+    let s = value.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).unwrap_or_else(|_| panic!("invalid {name}: {value}"))
+    } else {
+        s.parse::<u64>().unwrap_or_else(|_| panic!("invalid {name}: {value}"))
     }
 }

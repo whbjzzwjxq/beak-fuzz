@@ -1,9 +1,8 @@
 use clap::{Arg, Command};
 
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel, RISCVOracle};
-use beak_core::trace::{sorted_signatures_from_hits, Trace};
+use beak_core::trace::sorted_signatures_from_hits;
 use beak_jolt_e9caa235::backend::run_backend_once;
-use beak_jolt_e9caa235::trace::JoltTrace;
 use beak_jolt_e9caa235::JOLT_ORACLE_CODE_BASE;
 
 fn main() {
@@ -97,8 +96,6 @@ fn main() {
         .iter()
         .map(|s| u32::from_str_radix(s, 16).unwrap_or_else(|_| panic!("invalid hex: {s}")))
         .collect();
-    let trace = JoltTrace::from_words(&words).expect("build jolt trace from input words");
-
     println!("=== Input: {} instruction word(s) ===", words.len());
     for (i, w) in words.iter().enumerate() {
         println!("  [{i}] 0x{w:08x}");
@@ -132,8 +129,8 @@ fn main() {
 
     if print_buckets {
         println!("\n=== Derived bucket hits ===");
-        println!("  {} hit(s)", trace.bucket_hits().len());
-        for sig in sorted_signatures_from_hits(trace.bucket_hits()) {
+        println!("  {} hit(s)", backend_resp.bucket_hits.len());
+        for sig in sorted_signatures_from_hits(&backend_resp.bucket_hits) {
             println!("  {sig}");
         }
     }

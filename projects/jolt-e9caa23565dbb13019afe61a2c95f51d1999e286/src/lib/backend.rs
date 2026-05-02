@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,13 +11,6 @@ use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
 use common::constants::RAM_START_ADDRESS;
 use common::rv_trace::{CircuitFlags, MemoryConfig, RVTraceRow};
-use jolt::jolt_core::jolt::instruction::beq::BEQInstruction;
-use jolt::jolt_core::jolt::instruction::bge::BGEInstruction;
-use jolt::jolt_core::jolt::instruction::bgeu::BGEUInstruction;
-use jolt::jolt_core::jolt::instruction::bne::BNEInstruction;
-use jolt::jolt_core::jolt::instruction::slt::SLTInstruction;
-use jolt::jolt_core::jolt::instruction::sltu::SLTUInstruction;
-use jolt::jolt_core::jolt::instruction::virtual_advice::ADVICEInstruction;
 use jolt::jolt_core::jolt::vm::rv32i_vm::{C, M};
 use jolt::jolt_core::jolt::vm::JoltTraceStep;
 use jolt::{host, Jolt, ProofTranscript, RV32IJoltVM, F, PCS, RV32I};
@@ -28,6 +21,9 @@ use crate::trace::JoltTrace;
 const UPPER_IMMEDIATE_INJECT_KIND: &str = "jolt.semantic.decode.upper_immediate_materialization";
 const ENTRYPOINT_INJECT_KIND: &str = "jolt.semantic.control.entrypoint_binding";
 const CONTROL_FLOW_INJECT_KIND: &str = "jolt.semantic.exec.control_flow_binding";
+const JOLT_INJECT_KIND_ENV: &str = "BEAK_JOLT_WITNESS_INJECT_KIND";
+const JOLT_INJECT_STEP_ENV: &str = "BEAK_JOLT_WITNESS_INJECT_STEP";
+const JOLT_INJECT_APPLIED_ENV: &str = "BEAK_JOLT_WITNESS_INJECTION_APPLIED";
 const LOOP_FOREVER_WORD: u32 = 0x0000_006f;
 const T0_REG: u32 = 5;
 const T1_REG: u32 = 6;
@@ -52,37 +48,12 @@ pub struct RunResponse {
 
 struct JoltExecution {
     final_regs: [u32; 32],
+    rows: Vec<RVTraceRow>,
     trace: Vec<JoltTraceStep<RV32I>>,
     io_device: common::rv_trace::JoltDevice,
     bytecode: Vec<common::rv_trace::ELFInstruction>,
     memory_init: Vec<(u64, u8)>,
-}
-
-fn base_inject_kind(kind: &str) -> &str {
-    kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
-}
-
-fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
-    if variant.is_empty() {
-        kind.to_string()
-    } else {
-        format!("{kind}::{variant}")
-    }
-}
-
-fn inject_variant_value<'a>(kind: &'a str, key: &str) -> Option<&'a str> {
-    let (_, variant) = kind.split_once("::")?;
-    for field in variant.split(',') {
-        let (field_key, field_value) = field.split_once('=')?;
-        if field_key == key {
-            return Some(field_value);
-        }
-    }
-    None
-}
-
-fn inject_variant_mode(kind: &str) -> Option<&str> {
-    inject_variant_value(kind, "mode")
+    injection_applied: bool,
 }
 
 fn record_site(sites: &mut BTreeMap<String, Vec<u64>>, kind: &str, step: u64) {
@@ -261,7 +232,19 @@ impl Drop for TempElfFile {
     }
 }
 
-fn execute_trace(words: &[u32]) -> Result<JoltExecution, String> {
+fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
+    if let Some(value) = value {
+        std::env::set_var(key, value);
+    } else {
+        std::env::remove_var(key);
+    }
+}
+
+fn execute_trace(
+    words: &[u32],
+    inject_kind: Option<&str>,
+    inject_step: u64,
+) -> Result<JoltExecution, String> {
     let memory_config = MemoryConfig::default();
     let elf = build_elf_bytes(words);
     let (rows, _device) = tracer::trace(elf.clone(), &[], &memory_config);
@@ -270,8 +253,31 @@ fn execute_trace(words: &[u32]) -> Result<JoltExecution, String> {
     let mut program = host::Program::new("beak-inline");
     program.elf = Some(temp_elf.path.clone());
     let (bytecode, memory_init) = program.decode();
+    let prev_kind = std::env::var_os(JOLT_INJECT_KIND_ENV);
+    let prev_step = std::env::var_os(JOLT_INJECT_STEP_ENV);
+    let prev_applied = std::env::var_os(JOLT_INJECT_APPLIED_ENV);
+    std::env::remove_var(JOLT_INJECT_APPLIED_ENV);
+    if let Some(kind) = inject_kind {
+        std::env::set_var(JOLT_INJECT_KIND_ENV, kind);
+        std::env::set_var(JOLT_INJECT_STEP_ENV, inject_step.to_string());
+    } else {
+        std::env::remove_var(JOLT_INJECT_KIND_ENV);
+        std::env::remove_var(JOLT_INJECT_STEP_ENV);
+    }
     let (io_device, trace) = program.trace(&[]);
-    Ok(JoltExecution { final_regs, trace, io_device, bytecode, memory_init })
+    let injection_applied = std::env::var(JOLT_INJECT_APPLIED_ENV).ok().as_deref() == Some("1");
+    restore_env_var(JOLT_INJECT_KIND_ENV, prev_kind);
+    restore_env_var(JOLT_INJECT_STEP_ENV, prev_step);
+    restore_env_var(JOLT_INJECT_APPLIED_ENV, prev_applied);
+    Ok(JoltExecution {
+        final_regs,
+        rows,
+        trace,
+        io_device,
+        bytecode,
+        memory_init,
+        injection_applied,
+    })
 }
 
 fn is_real_lui_step(step: &JoltTraceStep<RV32I>) -> bool {
@@ -282,47 +288,6 @@ fn is_real_lui_step(step: &JoltTraceStep<RV32I>) -> bool {
 fn is_branch_step(step: &JoltTraceStep<RV32I>) -> bool {
     step.circuit_flags[CircuitFlags::Branch as usize]
         && !step.circuit_flags[CircuitFlags::Virtual as usize]
-}
-
-fn branch_mode_matches(mode: Option<&str>, family: &str) -> bool {
-    match mode {
-        None | Some("paired_flip") => true,
-        Some("eq_flip") => family == "eq",
-        Some("signed_cmp_flip") => family == "signed",
-        Some("unsigned_cmp_flip") => family == "unsigned",
-        _ => false,
-    }
-}
-
-fn mutate_branch_lookup(step_row: &mut JoltTraceStep<RV32I>, mode: Option<&str>) -> bool {
-    let next_lookup = match step_row.instruction_lookup {
-        Some(RV32I::BEQ(insn)) if branch_mode_matches(mode, "eq") => {
-            Some(RV32I::BNE(BNEInstruction::<32>(insn.0, insn.1)))
-        }
-        Some(RV32I::BNE(insn)) if branch_mode_matches(mode, "eq") => {
-            Some(RV32I::BEQ(BEQInstruction::<32>(insn.0, insn.1)))
-        }
-        Some(RV32I::SLT(insn)) if branch_mode_matches(mode, "signed") => {
-            Some(RV32I::BGE(BGEInstruction::<32>(insn.0, insn.1)))
-        }
-        Some(RV32I::BGE(insn)) if branch_mode_matches(mode, "signed") => {
-            Some(RV32I::SLT(SLTInstruction::<32>(insn.0, insn.1)))
-        }
-        Some(RV32I::SLTU(insn)) if branch_mode_matches(mode, "unsigned") => {
-            Some(RV32I::BGEU(BGEUInstruction::<32>(insn.0, insn.1)))
-        }
-        Some(RV32I::BGEU(insn)) if branch_mode_matches(mode, "unsigned") => {
-            Some(RV32I::SLTU(SLTUInstruction::<32>(insn.0, insn.1)))
-        }
-        _ => None,
-    };
-
-    if let Some(next_lookup) = next_lookup {
-        step_row.instruction_lookup = Some(next_lookup);
-        true
-    } else {
-        false
-    }
 }
 
 fn collect_observed_injection_sites(trace: &[JoltTraceStep<RV32I>]) -> BTreeMap<String, Vec<u64>> {
@@ -339,109 +304,6 @@ fn collect_observed_injection_sites(trace: &[JoltTraceStep<RV32I>]) -> BTreeMap<
         }
     }
     sites
-}
-
-fn apply_injection_to_trace(
-    trace: &mut Vec<JoltTraceStep<RV32I>>,
-    inject_kind: Option<&str>,
-    inject_step: u64,
-    observed_injection_sites: &BTreeMap<String, Vec<u64>>,
-) -> bool {
-    let Some(kind) = inject_kind else {
-        return false;
-    };
-    let base_kind = base_inject_kind(kind);
-    if base_kind == ENTRYPOINT_INJECT_KIND {
-        if inject_step != u64::MAX
-            && !observed_injection_sites
-                .get(base_kind)
-                .map(|steps| steps.contains(&inject_step))
-                .unwrap_or(false)
-        {
-            return false;
-        }
-        if matches!(inject_variant_mode(kind), Some("noop_prefix")) {
-            return false;
-        }
-        let prefix_len = match inject_variant_mode(kind) {
-            Some("skip_one") => 1usize,
-            Some("skip_two") | Some("far_page") => 2usize,
-            _ => 2usize,
-        };
-        if trace.len() <= prefix_len {
-            return false;
-        }
-        trace.drain(0..prefix_len);
-        return true;
-    }
-    if base_kind == CONTROL_FLOW_INJECT_KIND {
-        if inject_step != u64::MAX
-            && !observed_injection_sites
-                .get(base_kind)
-                .map(|steps| steps.contains(&inject_step))
-                .unwrap_or(false)
-        {
-            return false;
-        }
-
-        let target_step = if inject_step == u64::MAX { None } else { Some(inject_step) };
-        for (idx, step_row) in trace.iter_mut().enumerate() {
-            if !is_branch_step(step_row) {
-                continue;
-            }
-            let step = idx as u64;
-            let step_match = target_step.map(|s| s == step).unwrap_or(true);
-            if !step_match {
-                continue;
-            }
-            if mutate_branch_lookup(step_row, inject_variant_mode(kind)) {
-                return true;
-            }
-        }
-        return false;
-    }
-    if base_kind != UPPER_IMMEDIATE_INJECT_KIND {
-        return false;
-    }
-
-    if inject_step != u64::MAX
-        && !observed_injection_sites
-            .get(base_kind)
-            .map(|steps| steps.contains(&inject_step))
-            .unwrap_or(false)
-    {
-        return false;
-    }
-
-    let target_step = if inject_step == u64::MAX { None } else { Some(inject_step) };
-
-    for (idx, step_row) in trace.iter_mut().enumerate() {
-        if !is_real_lui_step(step_row) {
-            continue;
-        }
-        let step = idx as u64;
-        let step_match = target_step.map(|s| s == step).unwrap_or(true);
-        if !step_match {
-            continue;
-        }
-
-        if matches!(inject_variant_mode(kind), Some("noop_prefix")) {
-            return false;
-        }
-        let current = match step_row.instruction_lookup.as_ref() {
-            Some(RV32I::VIRTUAL_ADVICE(advice)) => advice.0 as u32,
-            _ => continue,
-        };
-        let next = match inject_variant_mode(kind) {
-            Some("imm_add_page") => current.wrapping_add(0x1000),
-            Some("imm_flip_sign") => current ^ (1u32 << 31),
-            _ => current ^ 0x1000,
-        };
-        step_row.instruction_lookup = Some(ADVICEInstruction::<32>(next as u64).into());
-        return true;
-    }
-
-    false
 }
 
 fn proving_sizes(exec: &JoltExecution) -> (usize, usize, usize) {
@@ -499,17 +361,12 @@ pub fn run_backend_once(
     inject_kind: Option<&str>,
     inject_step: u64,
 ) -> Result<RunResponse, String> {
-    let derived = JoltTrace::from_words(words)?;
-    let mut exec = execute_trace(words)?;
+    let exec = execute_trace(words, inject_kind, inject_step)?;
+    let derived = JoltTrace::from_executed_rows(words, &exec.rows)?;
     let final_regs = exec.final_regs;
     let micro_op_count = exec.trace.len();
     let observed_injection_sites = collect_observed_injection_sites(&exec.trace);
-    let injection_applied = apply_injection_to_trace(
-        &mut exec.trace,
-        inject_kind,
-        inject_step,
-        &observed_injection_sites,
-    );
+    let injection_applied = exec.injection_applied;
     let backend_error = prove_and_verify(exec)?;
 
     Ok(RunResponse {
@@ -540,107 +397,47 @@ impl JoltBackend {
         }
     }
 
-    fn ordered_steps_around_anchor(steps: &[u64], anchor: u64) -> Vec<u64> {
-        let mut ordered = steps.to_vec();
-        ordered.sort_by_key(|step| {
-            let dist = if *step >= anchor {
-                step.saturating_sub(anchor)
-            } else {
-                anchor.saturating_sub(*step)
-            };
-            (dist, *step)
-        });
-        ordered.dedup();
-        ordered
-    }
-
-    fn step_from_hit(hit: &BucketHit) -> u64 {
-        hit.details.get("op_idx").and_then(|v| v.as_u64()).unwrap_or(0)
-    }
-
-    fn variant_specs() -> Vec<String> {
-        let mut specs = Vec::new();
-        for rank in 0..512u32 {
-            specs.push(format!("mode=noop_prefix,rank={rank}"));
+    fn candidate_schedule(&self, inject_kind: &str, anchor: u64) -> InjectionSchedule {
+        if let Some(steps) = self.last_observed_injection_sites.get(inject_kind) {
+            if !steps.is_empty() {
+                return InjectionSchedule::Explicit(steps.clone());
+            }
         }
-        specs.push("mode=imm_xor_mask".to_string());
-        specs.push("mode=imm_add_page".to_string());
-        specs.push("mode=imm_flip_sign".to_string());
-        specs
-    }
-
-    fn entrypoint_variant_specs() -> Vec<String> {
-        let mut specs = Vec::new();
-        for rank in 0..128u32 {
-            specs.push(format!("mode=noop_prefix,rank={rank}"));
-        }
-        specs.push("mode=skip_one".to_string());
-        specs.push("mode=skip_two".to_string());
-        specs.push("mode=far_page".to_string());
-        specs
-    }
-
-    fn control_flow_variant_specs() -> Vec<String> {
-        vec![
-            "mode=paired_flip".to_string(),
-            "mode=eq_flip".to_string(),
-            "mode=signed_cmp_flip".to_string(),
-            "mode=unsigned_cmp_flip".to_string(),
-        ]
-    }
-
-    fn inject_kinds_for_base(inject_kind: &str) -> Vec<String> {
-        match inject_kind {
-            ENTRYPOINT_INJECT_KIND => Self::entrypoint_variant_specs()
-                .into_iter()
-                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
-                .collect(),
-            CONTROL_FLOW_INJECT_KIND => Self::control_flow_variant_specs()
-                .into_iter()
-                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
-                .collect(),
-            UPPER_IMMEDIATE_INJECT_KIND => Self::variant_specs()
-                .into_iter()
-                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
-                .collect(),
-            _ => vec![inject_kind.to_string()],
+        if inject_kind == ENTRYPOINT_INJECT_KIND {
+            InjectionSchedule::Exact(0)
+        } else {
+            InjectionSchedule::AroundAnchor(anchor)
         }
     }
 
-    fn semantic_candidate_from_hit(&self, hit: &BucketHit) -> Vec<SemanticInjectionCandidate> {
-        let anchor = Self::step_from_hit(hit);
-        let (semantic_class, inject_kind) =
-            if hit.bucket_id == semantic::control::ENTRYPOINT_BINDING.id {
+    fn candidate_for_hit(&self, hit: &BucketHit) -> Option<SemanticInjectionCandidate> {
+        let obligation_id = hit.details.get("obligation_id")?.as_str()?;
+        let anchor = hit
+            .details
+            .get("step_idx")
+            .and_then(|v| v.as_u64())
+            .or_else(|| hit.details.get("op_idx").and_then(|v| v.as_u64()))?;
+        let (semantic_class, inject_kind) = match (hit.bucket_id.as_str(), obligation_id) {
+            (id, "id3") if id == semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.id => (
+                semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.semantic_class,
+                UPPER_IMMEDIATE_INJECT_KIND,
+            ),
+            (id, "cf4") if id == semantic::control::ENTRYPOINT_BINDING.id => {
                 (semantic::control::ENTRYPOINT_BINDING.semantic_class, ENTRYPOINT_INJECT_KIND)
-            } else if hit.bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id {
+            }
+            (id, "cf1") if id == semantic::exec::CONTROL_FLOW_BINDING.id => {
                 (semantic::exec::CONTROL_FLOW_BINDING.semantic_class, CONTROL_FLOW_INJECT_KIND)
-            } else if hit.bucket_id == semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.id {
-                (
-                    semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.semantic_class,
-                    UPPER_IMMEDIATE_INJECT_KIND,
-                )
-            } else {
-                return Vec::new();
-            };
+            }
+            _ => return None,
+        };
 
-        let schedule = self
-            .last_observed_injection_sites
-            .get(base_inject_kind(inject_kind))
-            .map(|steps| {
-                InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor))
-            })
-            .unwrap_or(InjectionSchedule::AroundAnchor(anchor));
-
-        Self::inject_kinds_for_base(inject_kind)
-            .into_iter()
-            .map(|kind| SemanticInjectionCandidate {
-                bucket_id: hit.bucket_id.clone(),
-                trigger_signal_id: None,
-                semantic_class: semantic_class.to_string(),
-                inject_kind: kind,
-                schedule: schedule.clone(),
-            })
-            .collect()
+        Some(SemanticInjectionCandidate {
+            bucket_id: hit.bucket_id.clone(),
+            trigger_signal_id: None,
+            semantic_class: semantic_class.to_string(),
+            inject_kind: inject_kind.to_string(),
+            schedule: self.candidate_schedule(inject_kind, anchor),
+        })
     }
 }
 
@@ -688,6 +485,12 @@ impl BenchmarkBackend for JoltBackend {
     }
 
     fn semantic_injection_candidates(&self, hits: &[BucketHit]) -> Vec<SemanticInjectionCandidate> {
-        hits.iter().flat_map(|hit| self.semantic_candidate_from_hit(hit)).collect()
+        let mut seen = BTreeSet::new();
+        hits.iter()
+            .filter_map(|hit| self.candidate_for_hit(hit))
+            .filter(|candidate| {
+                seen.insert((candidate.bucket_id.clone(), candidate.inject_kind.clone()))
+            })
+            .collect()
     }
 }

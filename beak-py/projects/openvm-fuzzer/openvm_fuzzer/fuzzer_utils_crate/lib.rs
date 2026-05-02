@@ -28,7 +28,7 @@ use openvm_rv32im_transpiler::{
 };
 
 use openvm_instructions::{
-    instruction::Instruction, LocalOpcode, PublishOpcode, SystemOpcode, VmOpcode,
+    LocalOpcode, PublishOpcode, SystemOpcode, VmOpcode, instruction::Instruction,
 };
 
 // -----------------------------------------------------------------------------
@@ -193,9 +193,16 @@ impl GlobalState {
             && (self.injection_step == step || self.injection_step == u64::MAX)
     }
 
-    pub fn matching_injection_kind(&self, kind: &str, step: u64) -> Option<String> {
+    pub fn witness_injection_enabled_for(&self, kind: &str) -> bool {
+        self.injection_enabled && base_injection_kind(self.injection_kind.as_str()) == kind
+    }
+
+    pub fn witness_injection_enabled_at(&self, kind: &str, step: u64) -> bool {
         self.should_inject_witness(kind, step)
-            .then(|| self.injection_kind.clone())
+    }
+
+    pub fn matching_injection_kind(&self, kind: &str, step: u64) -> Option<String> {
+        self.should_inject_witness(kind, step).then(|| self.injection_kind.clone())
     }
 
     pub fn active_witness_variant(&self, kind: &str) -> Option<String> {
@@ -252,6 +259,34 @@ impl GlobalState {
         // Start a new instruction step (advance + reset per-step counters).
         self.inc_step();
 
+        let micro_op = json!(
+        {"type": "instruction",
+        "data": {
+            "seq": self.seq,
+            "step_idx": self.step_idx,
+            "pc": pc,
+            "timestamp": timestamp,
+            "next_pc": next_pc,
+            "next_timestamp": next_timestamp,
+            "opcode": opcode,
+            "operands": operands,
+        }});
+        self.emit_micro_op(micro_op);
+    }
+
+    pub fn begin_instruction_step(&mut self) {
+        self.inc_step();
+    }
+
+    pub fn emit_instruction_current_step(
+        &mut self,
+        pc: u32,
+        timestamp: u32,
+        next_pc: u32,
+        next_timestamp: u32,
+        opcode: u32,
+        operands: [u32; 7],
+    ) {
         let micro_op = json!(
         {"type": "instruction",
         "data": {
@@ -337,10 +372,8 @@ impl GlobalState {
         }
 
         // Prefer explicit row_id; otherwise anchor to the most recent chip row.
-        let row_id = row_id
-            .map(|s| s.to_string())
-            .or_else(|| self.last_row_id.clone())
-            .unwrap_or_default();
+        let row_id =
+            row_id.map(|s| s.to_string()).or_else(|| self.last_row_id.clone()).unwrap_or_default();
 
         let base = json!({
             "seq": self.seq,
@@ -610,6 +643,7 @@ impl GlobalState {
         from_pc: u32,
         to_pc: u32,
         rs1_val: u32,
+        target_before_lsb_clear: u32,
         rd_data: [u8; N],
     ) {
         let payload_data = json!({
@@ -622,6 +656,7 @@ impl GlobalState {
             "from_pc": from_pc,
             "to_pc": to_pc,
             "rs1_val": rs1_val,
+            "target_before_lsb_clear": target_before_lsb_clear,
             "rd_data": rd_data.to_vec(),
         });
         self.emit_chip_row_envelope("jalr", "Rv32Jalr", None, "jalr", payload_data);
@@ -768,13 +803,7 @@ impl GlobalState {
             "is_terminate": is_terminate,
             "exit_code": exit_code,
         });
-        self.emit_chip_row_envelope(
-            "connector",
-            "VmConnectorAir",
-            None,
-            "connector",
-            payload_data,
-        );
+        self.emit_chip_row_envelope("connector", "VmConnectorAir", None, "connector", payload_data);
     }
 
     pub fn emit_padding_chip_row(&mut self, data: &str) {
@@ -854,6 +883,46 @@ impl GlobalState {
         );
     }
 
+    pub fn emit_memory_init(&mut self, op_idx: u64, address_space: u32, pointer: u32, value: u32) {
+        let micro_op = json!({
+            "type": "memory_init",
+            "data": {
+                "seq": self.seq,
+                "op_idx": op_idx,
+                "address_space": address_space,
+                "pointer": pointer,
+                "value": value,
+            }
+        });
+        self.emit_micro_op(micro_op);
+    }
+
+    pub fn emit_memory_finalization(
+        &mut self,
+        op_idx: u64,
+        address_space: u32,
+        pointer: u32,
+        timestamp: u32,
+        values: Vec<u32>,
+        was_initial: bool,
+        changed_from_initial: bool,
+    ) {
+        let micro_op = json!({
+            "type": "memory_finalization",
+            "data": {
+                "seq": self.seq,
+                "op_idx": op_idx,
+                "address_space": address_space,
+                "pointer": pointer,
+                "timestamp": timestamp,
+                "values": values,
+                "was_initial": was_initial,
+                "changed_from_initial": changed_from_initial,
+            }
+        });
+        self.emit_micro_op(micro_op);
+    }
+
     pub fn emit_range_check_interaction(
         &mut self,
         direction: &str,
@@ -929,6 +998,16 @@ pub fn should_inject_witness(kind: &str, step: u64) -> bool {
     should_inject
 }
 
+pub fn witness_injection_enabled_for(kind: &str) -> bool {
+    let state = GLOBAL_STATE.lock().unwrap();
+    state.witness_injection_enabled_for(kind)
+}
+
+pub fn witness_injection_enabled_at(kind: &str, step: u64) -> bool {
+    let state = GLOBAL_STATE.lock().unwrap();
+    state.witness_injection_enabled_at(kind, step)
+}
+
 pub fn matching_injection_kind(kind: &str, step: u64) -> Option<String> {
     let mut state = GLOBAL_STATE.lock().unwrap();
     state.note_witness_site(kind, step);
@@ -958,6 +1037,23 @@ pub fn take_observed_witness_sites() -> BTreeMap<String, Vec<u64>> {
 pub fn take_applied_witness_sites() -> BTreeMap<String, Vec<u64>> {
     let mut state = GLOBAL_STATE.lock().unwrap();
     state.take_applied_witness_sites()
+}
+
+pub fn begin_instruction_step() {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.begin_instruction_step();
+}
+
+pub fn emit_instruction_current_step(
+    pc: u32,
+    timestamp: u32,
+    next_pc: u32,
+    next_timestamp: u32,
+    opcode: u32,
+    operands: [u32; 7],
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_instruction_current_step(pc, timestamp, next_pc, next_timestamp, opcode, operands);
 }
 
 pub fn emit_base_alu_chip_row<const N: usize>(
@@ -1088,16 +1184,7 @@ pub fn emit_jal_lui_chip_row<const N: usize>(
     is_jal: bool,
 ) {
     let mut state = GLOBAL_STATE.lock().unwrap();
-    state.emit_jal_lui_chip_row(
-        opcode,
-        rd_ptr,
-        imm,
-        needs_write,
-        from_pc,
-        to_pc,
-        rd_data,
-        is_jal,
-    );
+    state.emit_jal_lui_chip_row(opcode, rd_ptr, imm, needs_write, from_pc, to_pc, rd_data, is_jal);
 }
 
 pub fn emit_jalr_chip_row<const N: usize>(
@@ -1110,6 +1197,7 @@ pub fn emit_jalr_chip_row<const N: usize>(
     from_pc: u32,
     to_pc: u32,
     rs1_val: u32,
+    target_before_lsb_clear: u32,
     rd_data: [u8; N],
 ) {
     let mut state = GLOBAL_STATE.lock().unwrap();
@@ -1123,6 +1211,7 @@ pub fn emit_jalr_chip_row<const N: usize>(
         from_pc,
         to_pc,
         rs1_val,
+        target_before_lsb_clear,
         rd_data,
     );
 }
@@ -1275,6 +1364,32 @@ pub fn emit_memory_interaction(
 ) {
     let mut state = GLOBAL_STATE.lock().unwrap();
     state.emit_memory_interaction(direction, row_id, address_space, pointer, data, timestamp);
+}
+
+pub fn emit_memory_init(op_idx: u64, address_space: u32, pointer: u32, value: u32) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_memory_init(op_idx, address_space, pointer, value);
+}
+
+pub fn emit_memory_finalization(
+    op_idx: u64,
+    address_space: u32,
+    pointer: u32,
+    timestamp: u32,
+    values: Vec<u32>,
+    was_initial: bool,
+    changed_from_initial: bool,
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_memory_finalization(
+        op_idx,
+        address_space,
+        pointer,
+        timestamp,
+        values,
+        was_initial,
+        changed_from_initial,
+    );
 }
 
 pub fn emit_range_check_interaction(

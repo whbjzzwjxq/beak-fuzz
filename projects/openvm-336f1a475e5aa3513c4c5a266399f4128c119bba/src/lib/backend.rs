@@ -16,7 +16,7 @@ use openvm_rv32im_transpiler::{Rv32ITranspilerExtension, Rv32MTranspilerExtensio
 use openvm_sdk::config::{AppConfig, SdkVmConfig};
 use openvm_sdk::prover::AppProver;
 use openvm_sdk::{Sdk, StdIn, F};
-use openvm_stark_backend::p3_field::PrimeField32;
+use openvm_stark_backend::p3_field::{FieldAlgebra, PrimeField32};
 use openvm_transpiler::transpiler::Transpiler;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -47,6 +47,35 @@ fn build_vm_config() -> SdkVmConfig {
     vm_config
 }
 
+fn parse_u32_literal(value: &str) -> Result<u32, String> {
+    if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).map_err(|e| format!("invalid hex u32 {value:?}: {e}"))
+    } else {
+        value.parse::<u32>().map_err(|e| format!("invalid u32 {value:?}: {e}"))
+    }
+}
+
+fn parse_init_memory_env() -> Result<BTreeMap<(u32, u32), F>, String> {
+    let Some(raw) = std::env::var("BEAK_OPENVM_INIT_MEMORY").ok().filter(|s| !s.trim().is_empty())
+    else {
+        return Ok(BTreeMap::new());
+    };
+    let mut init_memory = BTreeMap::new();
+    for (idx, entry) in raw.split(',').enumerate() {
+        let parts = entry.split(':').collect::<Vec<_>>();
+        if parts.len() != 3 {
+            return Err(format!(
+                "BEAK_OPENVM_INIT_MEMORY entry {idx} must be address_space:pointer:value"
+            ));
+        }
+        let address_space = parse_u32_literal(parts[0].trim())?;
+        let pointer = parse_u32_literal(parts[1].trim())?;
+        let value = parse_u32_literal(parts[2].trim())?;
+        init_memory.insert((address_space, pointer), F::from_canonical_u32(value));
+    }
+    Ok(init_memory)
+}
+
 fn build_exe(words: &[u32]) -> Result<std::sync::Arc<VmExe<F>>, String> {
     let transpiler = Transpiler::<F>::default()
         .with_extension(Rv32ITranspilerExtension)
@@ -60,7 +89,12 @@ fn build_exe(words: &[u32]) -> Result<std::sync::Arc<VmExe<F>>, String> {
     instructions.push(Instruction::from_usize(SystemOpcode::TERMINATE.global_opcode(), [0, 0, 0]));
 
     let program = Program::from_instructions(&instructions);
-    Ok(std::sync::Arc::new(VmExe::new(program)))
+    let mut exe = VmExe::new(program);
+    let init_memory = parse_init_memory_env()?;
+    if !init_memory.is_empty() {
+        exe = exe.with_init_memory(init_memory);
+    }
+    Ok(std::sync::Arc::new(exe))
 }
 
 fn is_openvm_supported_rv32_word(_word: u32) -> bool {
@@ -196,27 +230,6 @@ pub fn run_backend_once(
     eval.final_regs = Some(regs);
     let _ms_read_regs = t3.elapsed().as_millis();
 
-    let t4 = Instant::now();
-    let observed_injection_sites = fuzzer_utils::take_observed_witness_sites();
-    let mut applied_injection_sites = fuzzer_utils::take_applied_witness_sites();
-    let logs = fuzzer_utils::take_json_logs();
-    let _ms_take_logs = t4.elapsed().as_millis();
-    let _logs_len = logs.len();
-
-    let t5 = Instant::now();
-    match OpenVMTrace::from_logs(logs) {
-        Ok(trace) => {
-            eval.micro_op_count = trace.instruction_count();
-            eval.bucket_hits = trace.bucket_hits().to_vec();
-            eval.trace_signals = trace.trace_signals().to_vec();
-            let _ms_parse = t5.elapsed().as_millis();
-        }
-        Err(e) => {
-            let _ms_parse = t5.elapsed().as_millis();
-            eval.backend_error = Some(e.clone());
-        }
-    }
-
     let t6 = Instant::now();
     let app_vk = app_pk.get_app_vk();
     if continuation_enabled {
@@ -241,9 +254,26 @@ pub fn run_backend_once(
         }
     }
     let _ms_prove_verify = t6.elapsed().as_millis();
-    let prove_phase_applied = fuzzer_utils::take_applied_witness_sites();
-    for (kind, steps) in prove_phase_applied {
-        applied_injection_sites.entry(kind).or_default().extend(steps);
+
+    let t4 = Instant::now();
+    let observed_injection_sites = fuzzer_utils::take_observed_witness_sites();
+    let mut applied_injection_sites = fuzzer_utils::take_applied_witness_sites();
+    let logs = fuzzer_utils::take_json_logs();
+    let _ms_take_logs = t4.elapsed().as_millis();
+    let _logs_len = logs.len();
+
+    let t5 = Instant::now();
+    match OpenVMTrace::from_logs_with_words(logs, words) {
+        Ok(trace) => {
+            eval.micro_op_count = trace.instruction_count();
+            eval.bucket_hits = trace.bucket_hits().to_vec();
+            eval.trace_signals = trace.trace_signals().to_vec();
+            let _ms_parse = t5.elapsed().as_millis();
+        }
+        Err(e) => {
+            let _ms_parse = t5.elapsed().as_millis();
+            eval.backend_error = Some(e.clone());
+        }
     }
     for steps in applied_injection_sites.values_mut() {
         steps.sort_unstable();
@@ -416,14 +446,6 @@ impl OpenVmBackend {
         specs
     }
 
-    fn o2_variant_specs() -> Vec<String> {
-        const BABYBEAR_P: u32 = 2_013_265_921;
-        [17u32, 32, 64, 128, 256, 512, 1024]
-            .into_iter()
-            .map(|offset| format!("delta={}", BABYBEAR_P.saturating_sub(offset)))
-            .collect()
-    }
-
     fn o8_variant_specs_for_hit(hit: &beak_core::trace::BucketHit) -> Vec<String> {
         let is_store = Self::hit_detail_bool(hit, "is_store");
         let is_load = Self::hit_detail_bool(hit, "is_load");
@@ -496,10 +518,6 @@ impl OpenVmBackend {
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
-            "openvm.semantic.memory.timestamped_load_path" => Self::o2_variant_specs()
-                .into_iter()
-                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
-                .collect(),
             "openvm.semantic.alu.immediate_limb_consistency" => Self::o5_variant_specs()
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
@@ -520,8 +538,15 @@ impl OpenVmBackend {
         &self,
         hit: &beak_core::trace::BucketHit,
     ) -> Vec<SemanticInjectionCandidate> {
-        let anchor = Self::step_from_hit(hit);
         let bucket_id = hit.bucket_id.as_str();
+        let mut anchor = Self::step_from_hit(hit);
+        if bucket_id == semantic::memory::STORE_LOAD_PAYLOAD_FLOW.id {
+            if let Some(store_step_idx) =
+                hit.details.get("store_step_idx").and_then(|value| value.as_u64())
+            {
+                anchor = store_step_idx;
+            }
+        }
         let (semantic_class, inject_kind, fallback_schedule, wildcard_variant) =
             if bucket_id == semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id {
                 (
@@ -530,20 +555,32 @@ impl OpenVmBackend {
                     InjectionSchedule::AroundAnchor(anchor),
                     true,
                 )
+            } else if bucket_id == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id {
+                (
+                    semantic::decode::ZERO_REGISTER_IMMUTABILITY.semantic_class,
+                    "openvm.semantic.decode.zero_register_immutability",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::decode::OPERAND_INDEX_ROUTING.id {
+                (
+                    semantic::decode::OPERAND_INDEX_ROUTING.semantic_class,
+                    "openvm.semantic.decode.operand_index_routing",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::decode::FORMAT_IMMEDIATE_REASSEMBLY.id {
+                (
+                    semantic::decode::FORMAT_IMMEDIATE_REASSEMBLY.semantic_class,
+                    "openvm.semantic.decode.format_immediate_reassembly",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
             } else if bucket_id == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id {
                 (
                     semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.semantic_class,
                     "openvm.semantic.lookup.xor_multiplicity_consistency",
                     InjectionSchedule::Exact(0),
-                    false,
-                )
-            } else if bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id
-                || bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id
-            {
-                (
-                    semantic::memory::TIMESTAMPED_LOAD_PATH.semantic_class,
-                    "openvm.semantic.memory.timestamped_load_path",
-                    InjectionSchedule::Exact(u64::MAX),
                     false,
                 )
             } else if bucket_id == semantic::control::AUIPC_PC_LIMB_CONSISTENCY.id {
@@ -560,6 +597,53 @@ impl OpenVmBackend {
                     InjectionSchedule::AroundAnchor(anchor),
                     true,
                 )
+            } else if bucket_id == semantic::memory::ADDRESS_SPACE_CONSISTENCY.id {
+                (
+                    semantic::memory::ADDRESS_SPACE_CONSISTENCY.semantic_class,
+                    "openvm.semantic.memory.address_space_consistency",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id
+                || bucket_id == semantic::memory::ADDRESS_BOUNDARY_RANGE.id
+                || bucket_id == semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.id
+            {
+                (
+                    semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.semantic_class,
+                    "openvm.semantic.memory.address_pointer_consistency",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::memory::LOAD_VALUE_BINDING.id
+                || bucket_id == semantic::memory::WRITE_PAYLOAD_CONSISTENCY.id
+            {
+                (
+                    semantic::memory::LOAD_VALUE_BINDING.semantic_class,
+                    "openvm.semantic.memory.value_payload_consistency",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::memory::STORE_LOAD_PAYLOAD_FLOW.id {
+                (
+                    semantic::memory::STORE_LOAD_PAYLOAD_FLOW.semantic_class,
+                    "openvm.semantic.memory.store_load_payload_flow",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::memory::FINALIZATION_CONSISTENCY.id {
+                (
+                    semantic::memory::FINALIZATION_CONSISTENCY.semantic_class,
+                    "openvm.semantic.memory.finalization_consistency",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id {
+                (
+                    semantic::memory::KIND_SELECTOR_CONSISTENCY.semantic_class,
+                    "openvm.semantic.memory.kind_selector_consistency",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
             } else if bucket_id == semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.id {
                 (
                     semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.semantic_class,
@@ -567,12 +651,89 @@ impl OpenVmBackend {
                     InjectionSchedule::AroundAnchor(anchor),
                     true,
                 )
-            } else if bucket_id == semantic::row::PADDING_INTERACTION_SEND.id {
+            } else if bucket_id == semantic::alu::SHIFT_MOD32.id {
                 (
-                    semantic::row::PADDING_INTERACTION_SEND.semantic_class,
-                    "openvm.semantic.row.padding_interaction_send",
-                    InjectionSchedule::Exact(u64::MAX),
-                    false,
+                    semantic::alu::SHIFT_MOD32.semantic_class,
+                    "openvm.semantic.alu.shift_mod32",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::alu::COMPARISON_BOOLEANITY.id {
+                (
+                    semantic::alu::COMPARISON_BOOLEANITY.semantic_class,
+                    "openvm.semantic.alu.comparison_booleanity",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::alu::SUBTRACTION_BORROW_CHAIN.id {
+                (
+                    semantic::alu::SUBTRACTION_BORROW_CHAIN.semantic_class,
+                    "openvm.semantic.alu.subtraction_borrow_chain",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::alu::COMPARISON_AUXILIARY_CHAIN.id {
+                (
+                    semantic::alu::COMPARISON_AUXILIARY_CHAIN.semantic_class,
+                    "openvm.semantic.alu.comparison_auxiliary_chain",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::arithmetic::DIVISION_REMAINDER_BOUND.id {
+                (
+                    semantic::arithmetic::DIVISION_REMAINDER_BOUND.semantic_class,
+                    "openvm.semantic.arithmetic.division_remainder_bound",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::arithmetic::PRODUCT_DECOMPOSITION.id {
+                (
+                    semantic::arithmetic::PRODUCT_DECOMPOSITION.semantic_class,
+                    "openvm.semantic.arithmetic.product_decomposition",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION.id {
+                (
+                    semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION.semantic_class,
+                    "openvm.semantic.arithmetic.signed_unsigned_product_correction",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id {
+                (
+                    semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.semantic_class,
+                    "openvm.semantic.time.boundary_origin_consistency",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id {
+                (
+                    semantic::time::MONOTONIC_ACCESS_ORDERING.semantic_class,
+                    "openvm.semantic.time.monotonic_access_ordering",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::control::ENTRYPOINT_BINDING.id {
+                (
+                    semantic::control::ENTRYPOINT_BINDING.semantic_class,
+                    "openvm.semantic.control.entrypoint_binding",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id {
+                (
+                    semantic::exec::CONTROL_FLOW_BINDING.semantic_class,
+                    "openvm.semantic.exec.control_flow_binding",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
+                )
+            } else if bucket_id == semantic::control::ECALL_WORD_VALIDITY.id {
+                (
+                    semantic::control::ECALL_WORD_VALIDITY.semantic_class,
+                    "openvm.semantic.control.ecall_word_validity",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    true,
                 )
             } else {
                 return Vec::new();
@@ -655,22 +816,51 @@ impl OpenVmBackend {
         let bucket_id = candidate.bucket_id.as_str();
         if bucket_id == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id {
             0
-        } else if bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id
-            || bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id
+        } else if bucket_id == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id
+            || bucket_id == semantic::decode::OPERAND_INDEX_ROUTING.id
+            || bucket_id == semantic::decode::FORMAT_IMMEDIATE_REASSEMBLY.id
         {
             1
-        } else if bucket_id == semantic::memory::IMMEDIATE_SIGN_CONSISTENCY.id {
+        } else if bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id
+            || bucket_id == semantic::memory::ADDRESS_BOUNDARY_RANGE.id
+            || bucket_id == semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.id
+            || bucket_id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id
+            || bucket_id == semantic::memory::LOAD_VALUE_BINDING.id
+            || bucket_id == semantic::memory::WRITE_PAYLOAD_CONSISTENCY.id
+            || bucket_id == semantic::memory::ADDRESS_SPACE_CONSISTENCY.id
+            || bucket_id == semantic::memory::IMMEDIATE_SIGN_CONSISTENCY.id
+            || bucket_id == semantic::memory::STORE_LOAD_PAYLOAD_FLOW.id
+            || bucket_id == semantic::memory::FINALIZATION_CONSISTENCY.id
+        {
             2
-        } else if bucket_id == semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.id {
+        } else if bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id
+            || bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id
+            || bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id
+        {
             3
-        } else if bucket_id == semantic::row::PADDING_INTERACTION_SEND.id {
+        } else if bucket_id == semantic::alu::SHIFT_MOD32.id
+            || bucket_id == semantic::alu::COMPARISON_BOOLEANITY.id
+            || bucket_id == semantic::alu::SUBTRACTION_BORROW_CHAIN.id
+            || bucket_id == semantic::alu::COMPARISON_AUXILIARY_CHAIN.id
+            || bucket_id == semantic::arithmetic::DIVISION_REMAINDER_BOUND.id
+            || bucket_id == semantic::arithmetic::PRODUCT_DECOMPOSITION.id
+            || bucket_id == semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION.id
+        {
             4
-        } else if bucket_id == semantic::control::AUIPC_PC_LIMB_CONSISTENCY.id {
+        } else if bucket_id == semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.id {
             5
-        } else if bucket_id == semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id {
+        } else if bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id
+            || bucket_id == semantic::control::ECALL_WORD_VALIDITY.id
+        {
             6
-        } else {
+        } else if bucket_id == semantic::row::PADDING_INTERACTION_SEND.id {
             7
+        } else if bucket_id == semantic::control::AUIPC_PC_LIMB_CONSISTENCY.id {
+            8
+        } else if bucket_id == semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id {
+            9
+        } else {
+            10
         }
     }
 

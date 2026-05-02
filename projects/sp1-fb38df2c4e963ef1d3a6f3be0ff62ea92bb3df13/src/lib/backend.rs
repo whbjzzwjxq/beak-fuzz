@@ -13,8 +13,7 @@ use sp1_recursion_core::stark::RecursionAirWideDeg3;
 pub const LOAD_BINDING_INJECT_KIND: &str = "sp1.legacy_recursion.memory.load_binding";
 pub const JUMP_BINDING_INJECT_KIND: &str =
     "sp1.legacy_recursion.exec.jump_binding::mode=jal_a_plus_one";
-pub const BNEINC_UPPER_LIMBS_INJECT_KIND: &str =
-    "sp1.legacy_recursion.exec.bneinc_upper_limbs";
+pub const BNEINC_UPPER_LIMBS_INJECT_KIND: &str = "sp1.legacy_recursion.exec.bneinc_upper_limbs";
 
 type SC = BabyBearPoseidon2;
 type F = <SC as StarkGenericConfig>::Val;
@@ -157,7 +156,9 @@ fn imm_instruction(
     )
 }
 
-fn scenario_program(scenario: LegacyRecursionScenario) -> (RecursionProgram<F>, Vec<(u32, Block<F>)>) {
+fn scenario_program(
+    scenario: LegacyRecursionScenario,
+) -> (RecursionProgram<F>, Vec<(u32, Block<F>)>) {
     let zero = [0u32; 4];
     match scenario {
         LegacyRecursionScenario::Load => (
@@ -174,15 +175,7 @@ fn scenario_program(scenario: LegacyRecursionScenario) -> (RecursionProgram<F>, 
             RecursionProgram {
                 instructions: vec![
                     imm_instruction(Opcode::ADD, A0_SLOT, zero, zero, 0, 0, "prefix_add"),
-                    imm_instruction(
-                        Opcode::JAL,
-                        A0_SLOT,
-                        [1, 0, 0, 0],
-                        zero,
-                        0,
-                        0,
-                        "jal",
-                    ),
+                    imm_instruction(Opcode::JAL, A0_SLOT, [1, 0, 0, 0], zero, 0, 0, "jal"),
                     imm_instruction(Opcode::Commit, A0_SLOT, zero, zero, 0, 0, "commit"),
                 ],
                 traces: vec![None, None, None],
@@ -192,15 +185,7 @@ fn scenario_program(scenario: LegacyRecursionScenario) -> (RecursionProgram<F>, 
         LegacyRecursionScenario::Bneinc => (
             RecursionProgram {
                 instructions: vec![
-                    imm_instruction(
-                        Opcode::BNEINC,
-                        0,
-                        [1, 0, 0, 0],
-                        [3, 0, 0, 0],
-                        0,
-                        0,
-                        "bneinc",
-                    ),
+                    imm_instruction(Opcode::BNEINC, 0, [1, 0, 0, 0], [3, 0, 0, 0], 0, 0, "bneinc"),
                     imm_instruction(Opcode::Commit, 0, zero, zero, 0, 0, "commit"),
                 ],
                 traces: vec![None, None],
@@ -212,13 +197,7 @@ fn scenario_program(scenario: LegacyRecursionScenario) -> (RecursionProgram<F>, 
 
 fn init_memory<Diffusion>(runtime: &mut Runtime<F, EF, Diffusion>, entries: &[(u32, Block<F>)]) {
     for (addr, value) in entries {
-        runtime.memory.insert(
-            *addr as usize,
-            MemoryEntry {
-                value: *value,
-                timestamp: F::zero(),
-            },
-        );
+        runtime.memory.insert(*addr as usize, MemoryEntry { value: *value, timestamp: F::zero() });
         runtime.uninitialized_memory.insert(*addr as usize, *value);
     }
 }
@@ -250,12 +229,8 @@ pub fn run_scenario_once(
     runtime.timestamp = 1;
     init_memory(&mut runtime, &init_mem);
     runtime.run();
-    let observed_public_values = runtime
-        .record
-        .public_values
-        .iter()
-        .map(|v| v.as_canonical_u32())
-        .collect::<Vec<_>>();
+    let observed_public_values =
+        runtime.record.public_values.iter().map(|v| v.as_canonical_u32()).collect::<Vec<_>>();
     runtime.record.public_values = proof_public_values(0);
 
     let machine = RecursionAirWideDeg3::machine(config);
@@ -287,8 +262,11 @@ pub fn compare_scenario(
     inject_step: u64,
 ) -> Result<ScenarioComparison, String> {
     let baseline = run_scenario_once(scenario, None, 0)?;
-    let injected =
-        run_scenario_once(scenario, Some(inject_kind.unwrap_or(scenario.default_inject_kind())), inject_step)?;
+    let injected = run_scenario_once(
+        scenario,
+        Some(inject_kind.unwrap_or(scenario.default_inject_kind())),
+        inject_step,
+    )?;
     let diverged = baseline.public_values != injected.public_values
         || baseline.final_fp != injected.final_fp
         || baseline.final_pc != injected.final_pc;
@@ -310,29 +288,16 @@ pub fn run_cli() -> Result<(), String> {
                 .value_parser(["load", "jump", "bneinc"]),
         )
         .arg(Arg::new("inject_kind").long("inject-kind"))
-        .arg(
-            Arg::new("inject_step")
-                .long("inject-step"),
-        )
-        .arg(
-            Arg::new("json")
-                .long("json")
-                .action(clap::ArgAction::SetTrue),
-        )
+        .arg(Arg::new("inject_step").long("inject-step"))
+        .arg(Arg::new("json").long("json").action(clap::ArgAction::SetTrue))
         .get_matches();
 
     let scenario = LegacyRecursionScenario::parse(
-        matches
-            .get_one::<String>("scenario")
-            .ok_or_else(|| "missing scenario".to_string())?,
+        matches.get_one::<String>("scenario").ok_or_else(|| "missing scenario".to_string())?,
     )?;
     let inject_step = matches
         .get_one::<String>("inject_step")
-        .map(|value| {
-            value
-                .parse::<u64>()
-                .map_err(|e| format!("invalid inject-step: {e}"))
-        })
+        .map(|value| value.parse::<u64>().map_err(|e| format!("invalid inject-step: {e}")))
         .transpose()?
         .unwrap_or_else(|| scenario.default_inject_step());
     let inject_kind = matches.get_one::<String>("inject_kind").map(|s| s.as_str());
@@ -341,7 +306,8 @@ pub fn run_cli() -> Result<(), String> {
     if matches.get_flag("json") {
         println!(
             "{}",
-            serde_json::to_string_pretty(&comparison).map_err(|e| format!("json encode failed: {e}"))?
+            serde_json::to_string_pretty(&comparison)
+                .map_err(|e| format!("json encode failed: {e}"))?
         );
         return Ok(());
     }
@@ -359,9 +325,6 @@ pub fn run_cli() -> Result<(), String> {
         comparison.injected.final_pc, comparison.injected.final_fp
     );
     println!("diverged: {}", comparison.diverged);
-    println!(
-        "underconstrained_candidate: {}",
-        comparison.underconstrained_candidate
-    );
+    println!("underconstrained_candidate: {}", comparison.underconstrained_candidate);
     Ok(())
 }

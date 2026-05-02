@@ -15,6 +15,7 @@ pub struct GlobalState {
     pub injection_enabled: bool,
     pub injection_kind: String,
     pub injection_step: u64,
+    pub injection_applied: bool,
     pub witness_step_idx: u64,
     pub executor_step_idx: u64,
     pub injection_run_id: String,
@@ -39,6 +40,7 @@ impl GlobalState {
             injection_enabled: !injection_kind.is_empty(),
             injection_kind,
             injection_step,
+            injection_applied: false,
             witness_step_idx: 0,
             executor_step_idx: 0,
             injection_run_id: std::env::var("BEAK_SP1_WITNESS_RUN_ID").unwrap_or_default(),
@@ -61,6 +63,7 @@ impl GlobalState {
             self.injection_kind = env_kind;
             self.injection_step = env_step;
             self.injection_run_id = env_run_id;
+            self.injection_applied = false;
             self.witness_step_idx = 0;
             self.executor_step_idx = 0;
         }
@@ -124,7 +127,11 @@ pub fn next_executor_step() -> u64 {
 pub fn should_inject_witness(kind: &str, step: u64) -> bool {
     let mut g = GLOBAL_STATE.lock().unwrap();
     g.sync_injection_from_env();
-    g.injection_enabled && g.injection_kind == kind && g.injection_step == step
+    let should_inject = g.injection_enabled && g.injection_kind == kind && g.injection_step == step;
+    if should_inject {
+        g.injection_applied = true;
+    }
+    should_inject
 }
 
 fn base_injection_kind(kind: &str) -> &str {
@@ -138,10 +145,28 @@ pub fn matching_injection_kind(base_kind: &str, step: u64) -> Option<String> {
         return None;
     }
     if base_injection_kind(g.injection_kind.as_str()) == base_kind {
+        g.injection_applied = true;
         Some(g.injection_kind.clone())
     } else {
         None
     }
+}
+
+pub fn injection_variant_value<'a>(kind: &'a str, key: &str) -> Option<&'a str> {
+    let (_, variant) = kind.split_once("::")?;
+    for field in variant.split(',') {
+        let (field_key, field_value) = field.split_once('=')?;
+        if field_key == key {
+            return Some(field_value);
+        }
+    }
+    None
+}
+
+pub fn injection_was_applied() -> bool {
+    let mut g = GLOBAL_STATE.lock().unwrap();
+    g.sync_injection_from_env();
+    g.injection_applied
 }
 
 pub fn configure_witness_injection(kind: Option<&str>, step: u64) {
@@ -151,11 +176,13 @@ pub fn configure_witness_injection(kind: Option<&str>, step: u64) {
             g.injection_enabled = true;
             g.injection_kind = k.to_string();
             g.injection_step = step;
+            g.injection_applied = false;
         }
         _ => {
             g.injection_enabled = false;
             g.injection_kind.clear();
             g.injection_step = 0;
+            g.injection_applied = false;
         }
     }
     g.witness_step_idx = 0;

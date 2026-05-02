@@ -504,7 +504,9 @@ fn sweep_steps(start: u64, end: u64, stride: u64, max_trials: usize) -> Vec<u64>
 fn candidate_steps(cfg: &BenchmarkConfig, candidate: &SemanticInjectionCandidate) -> Vec<u64> {
     match candidate.schedule {
         InjectionSchedule::Exact(step) => vec![step],
-        InjectionSchedule::Explicit(ref steps) => steps.clone(),
+        InjectionSchedule::Explicit(ref steps) => {
+            steps.iter().copied().take(cfg.semantic_max_trials_per_bucket.max(1)).collect()
+        }
         InjectionSchedule::AroundAnchor(anchor) => centered_steps(
             anchor,
             cfg.semantic_window_before,

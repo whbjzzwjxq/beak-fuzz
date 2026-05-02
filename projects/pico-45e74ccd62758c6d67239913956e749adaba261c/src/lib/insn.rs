@@ -17,6 +17,11 @@ pub struct PicoInsn {
     pub rs1: Option<u32>,
     pub rs2: Option<u32>,
     pub imm: Option<i32>,
+    pub chunk: Option<u32>,
+    pub runtime_a: Option<u32>,
+    pub runtime_b: Option<u32>,
+    pub runtime_c: Option<u32>,
+    pub memory_value: Option<u32>,
     pub asm: String,
 }
 
@@ -41,6 +46,11 @@ impl PicoInsn {
             rs1: insn.rs1,
             rs2: insn.rs2,
             imm: insn.imm,
+            chunk: None,
+            runtime_a: None,
+            runtime_b: None,
+            runtime_c: None,
+            memory_value: None,
             asm: insn.asm,
         }
     }
