@@ -17,6 +17,9 @@ pub struct Sp1Insn {
     pub rs1: Option<u32>,
     pub rs2: Option<u32>,
     pub imm: Option<i32>,
+    pub rd_val: Option<u32>,
+    pub rs1_val: Option<u32>,
+    pub rs2_or_imm_val: Option<u32>,
     pub asm: String,
 }
 
@@ -41,6 +44,9 @@ impl Sp1Insn {
             rs1: insn.rs1,
             rs2: insn.rs2,
             imm: insn.imm,
+            rd_val: None,
+            rs1_val: None,
+            rs2_or_imm_val: None,
             asm: insn.asm,
         }
     }

@@ -11,28 +11,26 @@ use risc0_zkp::{
 };
 
 use super::{
+    hal::{cpu::CpuCircuitHal, MetaBuffer, StepMode},
+    witgen::{preflight::PreflightTrace, WitnessGenerator},
     Seal,
-    hal::{
-        MetaBuffer, StepMode,
-        cpu::CpuCircuitHal,
-    },
-    witgen::{WitnessGenerator, preflight::PreflightTrace},
 };
 use crate::{
-    RV32IM_SEAL_VERSION,
     execute::{
-        platform::{MACHINE_REGS_ADDR, ecall_minor, major},
+        platform::{ecall_minor, major, LOOKUP_TABLE_CYCLES, MACHINE_REGS_ADDR, RESERVED_CYCLES},
         segment::Segment,
     },
     zirgen::{
-        CircuitImpl,
         circuit::{
-            CircuitField, DecomposeLow2Layout, DoDivLayout, ExtVal, IsForwardLayout, MemoryArgLayout,
-            MemoryWriteLayout, NondetRegLayout, NondetU16RegLayout, ReadRegLayout, REGCOUNT_MIX,
-            REGISTER_GROUP_ACCUM, REGISTER_GROUP_CODE, REGISTER_GROUP_DATA, Val, LAYOUT_TOP,
+            CircuitField, DecomposeLow2Layout, DoDivLayout, ExtVal, IsForwardLayout,
+            MemoryArgLayout, MemoryWriteLayout, NondetRegLayout, NondetU16RegLayout, ReadRegLayout,
+            Val, LAYOUT_TOP, REGCOUNT_MIX, REGISTER_GROUP_ACCUM, REGISTER_GROUP_CODE,
+            REGISTER_GROUP_DATA,
         },
         taps::TAPSET,
+        CircuitImpl,
     },
+    RV32IM_SEAL_VERSION,
 };
 
 type CpuHal = risc0_zkp::hal::cpu::CpuHal<CircuitField>;
@@ -42,6 +40,84 @@ const KIND_OPERAND_ROUTE: &str = "risc0.semantic.decode.operand_index_routing";
 const KIND_RD_BITS: &str = "risc0.semantic.decode.rd_bit_decomposition";
 const KIND_DIV_REM_BOUND: &str = "risc0.semantic.arithmetic.division_remainder_bound";
 const KIND_ECALL_ARG_DECOMP: &str = "risc0.semantic.control.ecall_argument_decomposition";
+
+#[derive(Debug, Clone)]
+pub struct BeakPreflightMemoryTxn {
+    pub row_idx: u64,
+    pub row_step_idx: u64,
+    pub row_pc: u32,
+    pub major: u8,
+    pub minor: u8,
+    pub machine_mode: u8,
+    pub txn_idx: u64,
+    pub row_txn_start: u64,
+    pub row_txn_end: u64,
+    pub addr_word: u32,
+    pub txn_cycle: u32,
+    pub word: u32,
+    pub prev_cycle: u32,
+    pub prev_word: u32,
+    pub is_load: bool,
+    pub is_store: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct BeakPreflightTraceRecords {
+    pub table_split_cycle: u64,
+    pub padding_start_row: u64,
+    pub total_rows: u64,
+    pub lookup_table_rows: u64,
+    pub txns: Vec<BeakPreflightMemoryTxn>,
+}
+
+pub fn collect_preflight_trace_records(segment: &Segment) -> Result<BeakPreflightTraceRecords> {
+    let mut rng = rand::thread_rng();
+    let rand_z = ExtVal::random(&mut rng);
+    let trace = segment.preflight(rand_z)?;
+    let mut txns = Vec::new();
+
+    for (row_idx, cycle) in trace.cycles.iter().enumerate() {
+        let row_txn_start = cycle.txn_idx;
+        let row_txn_end = trace
+            .cycles
+            .get(row_idx + 1)
+            .map(|next| next.txn_idx)
+            .unwrap_or(trace.txns.len() as u32);
+        if row_txn_start > row_txn_end || row_txn_end as usize > trace.txns.len() {
+            continue;
+        }
+        for txn_idx in row_txn_start..row_txn_end {
+            let txn = &trace.txns[txn_idx as usize];
+            let is_load = txn.cycle % 2 == 0;
+            txns.push(BeakPreflightMemoryTxn {
+                row_idx: row_idx as u64,
+                row_step_idx: cycle.user_cycle as u64,
+                row_pc: cycle.pc,
+                major: cycle.major,
+                minor: cycle.minor,
+                machine_mode: cycle.machine_mode,
+                txn_idx: txn_idx as u64,
+                row_txn_start: row_txn_start as u64,
+                row_txn_end: row_txn_end as u64,
+                addr_word: txn.addr,
+                txn_cycle: txn.cycle,
+                word: txn.word,
+                prev_cycle: txn.prev_cycle,
+                prev_word: txn.prev_word,
+                is_load,
+                is_store: !is_load,
+            });
+        }
+    }
+
+    Ok(BeakPreflightTraceRecords {
+        table_split_cycle: trace.table_split_cycle as u64,
+        padding_start_row: trace.table_split_cycle as u64 + RESERVED_CYCLES as u64,
+        total_rows: trace.cycles.len() as u64,
+        lookup_table_rows: LOOKUP_TABLE_CYCLES as u64,
+        txns,
+    })
+}
 
 #[derive(Clone, Debug)]
 pub struct BeakInjectionPlan {
@@ -178,7 +254,9 @@ fn debug_row(label: &str, data: &[Val], rows: usize, row: usize, cycle: &RawPref
     let active_minor = minor
         .iter()
         .enumerate()
-        .filter_map(|(idx, layout)| (read_u32(data, rows, row, layout._super.offset) == 1).then_some(idx))
+        .filter_map(|(idx, layout)| {
+            (read_u32(data, rows, row, layout._super.offset) == 1).then_some(idx)
+        })
         .collect::<Vec<_>>();
     let decoder = LAYOUT_TOP.inst_result.arm4.input.decoded._super;
     let write_rd = LAYOUT_TOP.inst_result.arm4._1;
@@ -282,8 +360,8 @@ fn apply_div_rem_bound_injection(
     let Some(layout) = active_div_do_div(cycle) else {
         return false;
     };
-    let quot =
-        get_reg(data, rows, row, layout.quot_low) | (get_reg(data, rows, row, layout.quot_high) << 16);
+    let quot = get_reg(data, rows, row, layout.quot_low)
+        | (get_reg(data, rows, row, layout.quot_high) << 16);
     let rem = get_u16_reg(data, rows, row, layout.rem_low)
         | (get_u16_reg(data, rows, row, layout.rem_high) << 16);
     let denom = read_reg_u32(data, rows, row, LAYOUT_TOP.inst_result.arm4.input.rs2);
@@ -335,11 +413,7 @@ fn apply_injection(
     let Some(injection) = injection else {
         return false;
     };
-    let target_step = if injection.step == u64::MAX {
-        None
-    } else {
-        Some(injection.step as u32)
-    };
+    let target_step = if injection.step == u64::MAX { None } else { Some(injection.step as u32) };
     let mut slice = data.buf.as_slice_mut();
     let rows = data.rows;
     let mut applied = false;
@@ -427,12 +501,8 @@ pub fn prove_segment_with_injection(
     let mut prover = Prover::new(hal.as_ref(), TAPSET);
     let hashfn = &hal.get_hash_suite().hashfn;
     prover.iop().write_u32_slice(&[RV32IM_SEAL_VERSION]);
-    prover
-        .iop()
-        .commit(&hashfn.hash_elem_slice(&PROOF_SYSTEM_INFO.encode()));
-    prover
-        .iop()
-        .commit(&hashfn.hash_elem_slice(&CircuitImpl::CIRCUIT_INFO.encode()));
+    prover.iop().commit(&hashfn.hash_elem_slice(&PROOF_SYSTEM_INFO.encode()));
+    prover.iop().commit(&hashfn.hash_elem_slice(&CircuitImpl::CIRCUIT_INFO.encode()));
 
     let global_len = global.size();
     let mut header = vec![Val::ZERO; global_len + 1];

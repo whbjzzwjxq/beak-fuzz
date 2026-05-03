@@ -33,53 +33,53 @@ but use the same bucket id and explain the limitation in `notes`.
 
 | obligation_id | cell_id | semantic_bucket | required_trace_fields | openvm-336f1a47 | openvm-d7eab708 | openvm-f038f61d | pico-45e74ccd | sp1-39ab52fc | sp1-7f643da1 | sp1-811a3f2c | sp1-3561f006 | sp1-fb38df2c | jolt-e9caa235 | nexus-636ccb36 | risc0-98387806 | risc0-c0db0713 | injection_kind | smoke | notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| rf1 | rf1.alu_r | sem.decode.zero_register_immutability | op_idx, pc, opcode, mnemonic, rd, write_source | verified | bucket_emitted | bucket_emitted | verified | not_started | verified | verified | verified | unsupported | bucket_emitted | bucket_emitted | verified | install_patch_available | `openvm.semantic.decode.zero_register_immutability` | Baseline: `cargo run -q --bin beak-trace -- --bin "00100013" --print-buckets`; injected: same seed with `--inject-kind openvm.semantic.decode.zero_register_immutability --inject-step 0`; injected replay reported `semantic_injection_applied = true` and `verify_app_proof failed: ChallengePhaseError`. | OpenVM-336 emits decoded RF1 write-source cells when observed; 336 install pass mutates the program table operand `a` for targeted decoded instruction rows. OpenVM-f038 emits this bucket from executed instruction trace only; no f038 program-table mutation hook is mapped. SP1-7 verified via CPU-row witness hook in `crates/core/machine/src/cpu/trace.rs::CpuChip::event_to_row`; baseline `00012003 --print-buckets` emitted the bucket and injected `sp1.semantic.decode.zero_register_immutability::site=op_a_access` reported `semantic_injection_applied = true` with proof rejection recorded in `agent_runs/vm-distributed/lead-sp1-7f643da1.md`. SP1-356 verified via 356-only CPU-row hook in `core/src/cpu/trace.rs::CpuChip::event_to_row`; baseline and injected smoke results are recorded in `agent_runs/vm-distributed/lead-sp1-3561f006.md`. |
-| rf2 | rf2.rs1_eq_rs2 | sem.decode.operand_index_routing | op_idx, pc, opcode, mnemonic, rs1, rs2, rd | verified | bucket_emitted | bucket_emitted | verified | not_started | verified | verified | verified | unsupported | bucket_emitted | bucket_emitted | verified | verified | `openvm.semantic.decode.operand_index_routing` | Baseline: `cargo run -q --bin beak-trace -- --bin "00100013" --print-buckets`; injected: same seed with `--inject-kind openvm.semantic.decode.operand_index_routing --inject-step 0`; injected replay printed the program-table mutation and reported `semantic_injection_applied = true` / `verify_app_proof failed: ChallengePhaseError`. | OpenVM-336 emits alias cells from decoded RV32IM operands; 336 install pass mutates the program table operand `b` for targeted decoded instruction rows. OpenVM-f038 emits this bucket from executed instruction trace only; no f038 program-table mutation hook is mapped. SP1-7 verified via CPU-row witness hook in `crates/core/machine/src/cpu/trace.rs::CpuChip::event_to_row`; baseline `00012183 --print-buckets` emitted the bucket and injected `sp1.semantic.decode.operand_index_routing::site=op_b_access` reported `semantic_injection_applied = true` in `agent_runs/vm-distributed/lead-sp1-7f643da1.md`. SP1-356 verified via 356-only CPU-row hook in `core/src/cpu/trace.rs::CpuChip::event_to_row`; baseline and injected smoke results are recorded in `agent_runs/vm-distributed/lead-sp1-3561f006.md`. |
-| rf3 | rf3.alu/rf3.load/rf3.link/rf3.upper/rf3.muldiv | sem.exec.dest_binding | op_idx, pc, opcode, mnemonic, rd, write_source | bucket_emitted | bucket_emitted | bucket_emitted | verified | not_started | verified | verified | verified | unsupported | bucket_emitted | bucket_emitted | install_patch_available | bucket_emitted |  | d7 baseline examples: `cargo run -q --bin beak-trace -- --bin "10000093" --print-buckets`; load/muldiv/link/upper cells need matching executed instructions. | d7 emits decoded writeback-source cells from executed instruction trace; no d7 mutation hook/applied-site replay plumbing is mapped. SP1-7 verified via CPU-row witness hook in `crates/core/machine/src/cpu/trace.rs::CpuChip::event_to_row`; baseline `00012183 --print-buckets` emitted the bucket and injected `sp1.semantic.exec.dest_binding::site=op_a_access` reported `semantic_injection_applied = true` with proof rejection recorded in `agent_runs/vm-distributed/lead-sp1-7f643da1.md`. SP1-356 verified via 356-only CPU-row hook in `core/src/cpu/trace.rs::CpuChip::event_to_row`; baseline and injected smoke results are recorded in `agent_runs/vm-distributed/lead-sp1-3561f006.md`. |
-| id1 | id1.reg_zero/id1.reg_max/id1.reg_mid/id1.funct_max | sem.decode.field_range | op_idx, pc, opcode, mnemonic, rd, rs1, rs2, funct3, funct7 | bucket_emitted | bucket_emitted | bucket_emitted | verified | not_started | verified | verified | verified | unsupported | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted |  | d7 baseline examples: `cargo run -q --bin beak-trace -- --bin "00100013" --print-buckets`. | d7 emits field-range cells from executed decoded RV32IM words; no d7 decode/program-table hook is mapped. SP1-7 verified via CPU-row witness hook in `crates/core/machine/src/cpu/trace.rs::CpuChip::event_to_row`; baseline `00012183 --print-buckets` emitted the bucket and injected `sp1.semantic.decode.field_range::site=instruction_op_a` reported `semantic_injection_applied = true` in `agent_runs/vm-distributed/lead-sp1-7f643da1.md`. SP1-356 verified via 356-only CPU-row hook in `core/src/cpu/trace.rs::CpuChip::event_to_row`; baseline and injected smoke results are recorded in `agent_runs/vm-distributed/lead-sp1-3561f006.md`. |
-| id2 | id2.i_pos/id2.i_neg/id2.s_pos/id2.s_neg/id2.b_pos/id2.b_neg/id2.j_pos/id2.j_neg | sem.decode.immediate_sign_extension | op_idx, pc, opcode, mnemonic, imm | bucket_emitted | bucket_emitted | bucket_emitted | verified | not_started | verified | verified | verified | unsupported | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted |  | d7 baseline examples: `cargo run -q --bin beak-trace -- --bin "008000ef 00100113 00200193" --print-buckets`. | d7 emits sign-extension cells from executed decoded immediates; no d7 immediate mutation hook is mapped. SP1-7 verified via CPU-row witness hook in `crates/core/machine/src/cpu/trace.rs::CpuChip::event_to_row`; baseline `00012183 --print-buckets` emitted the bucket and injected `sp1.semantic.decode.immediate_sign_extension::site=instruction_op_c` reported `semantic_injection_applied = true` in `agent_runs/vm-distributed/lead-sp1-7f643da1.md`. SP1-356 verified via 356-only CPU-row hook in `core/src/cpu/trace.rs::CpuChip::event_to_row`; baseline and injected smoke results are recorded in `agent_runs/vm-distributed/lead-sp1-3561f006.md`. |
-| id3 | id3.lui_zero/id3.lui_max/id3.lui_mid/id3.auipc_no_wrap/id3.auipc_wrap | sem.decode.upper_immediate_materialization; sem.control.auipc_pc_limb_consistency | op_idx, pc, opcode, mnemonic, imm, rd | semantic_injection_mapped | semantic_injection_mapped | bucket_emitted | verified | not_started | bucket_emitted | bucket_emitted | bucket_emitted | unsupported | semantic_injection_mapped | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.control.auipc_pc_limb_consistency` for OpenVM d7/336; `jolt.semantic.decode.upper_immediate_materialization` for Jolt | d7 baseline/injected: `./target/debug/beak-trace --bin "00200313 0ff00793 00002297 e6c28293 0002c703 0ff00393 00774533" --inject-kind openvm.semantic.control.auipc_pc_limb_consistency --inject-step 18446744073709551615 --print-buckets` emitted `sem.control.auipc_pc_limb_consistency` and reported `semantic_injection_applied = true`. Jolt baseline: `cargo run -q --bin beak-trace -- --bin 123450b7 --print-buckets` emitted `sem.decode.upper_immediate_materialization`; injected Jolt smoke with `--inject-kind jolt.semantic.decode.upper_immediate_materialization --inject-step 18446744073709551615` reported `injection_applied = true` but still hit the known Jolt memory panic, so not verified. | d7 emits LUI/AUIPC upper-immediate buckets from executed trace; only the AUIPC PC-limb sub-bucket is mapped, via `extensions/rv32im/circuit/src/auipc/core.rs::fill_trace_row` mutating `pc_limbs`. Program-table LUI/operand mutation remains unavailable. Jolt emits LUI/AUIPC cells only from executed `RVTraceRow`s whose PC maps back to the input program; Jolt install pass mutates the processed `JoltTraceStep.instruction_lookup` virtual advice value in `jolt-core/src/host/mod.rs::Program::trace` and backend maps observed `id3` hits. |
-| id4 | id4.alu_r/id4.alu_i/id4.load/id4.store/id4.branch/id4.jal/id4.jalr/id4.lui/id4.auipc/id4.ecall/id4.mul/id4.div | sem.exec.op_selector_binding | op_idx, pc, opcode, mnemonic | bucket_emitted | bucket_emitted | bucket_emitted | verified | not_started | verified | verified | verified | unsupported | bucket_emitted | bucket_emitted | verified | bucket_emitted |  | d7 baseline examples: `cargo run -q --bin beak-trace -- --bin "00100013" --print-buckets`. | d7 emits opcode-class selector cells from executed instruction trace. Raw RV ECALL is not observable for d7 because it transpiles to `unimp`; that cell remains covered by the cf5/cf7 trace-missing notes. SP1-7 verified via CPU-row witness hook in `crates/core/machine/src/cpu/trace.rs::CpuChip::event_to_row`; baseline `00012183 --print-buckets` emitted the bucket and injected `sp1.semantic.exec.op_selector_binding::site=opcode` reported `semantic_injection_applied = true` in `agent_runs/vm-distributed/lead-sp1-7f643da1.md`. SP1-356 verified via 356-only CPU-row hook in `core/src/cpu/trace.rs::CpuChip::event_to_row`; baseline and injected smoke results are recorded in `agent_runs/vm-distributed/lead-sp1-3561f006.md`. |
-| id5 | id5.s_type/id5.b_type/id5.j_type/id5.cross_field | sem.decode.format_immediate_reassembly | op_idx, pc, opcode, mnemonic, imm | verified | bucket_emitted | bucket_emitted | verified | not_started | verified | verified | verified | unsupported | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.decode.format_immediate_reassembly` | Baseline: `cargo run -q --bin beak-trace -- --bin "00100113 00200193 00208463 00300193" --print-buckets`; injected: same seed with `--inject-kind openvm.semantic.decode.format_immediate_reassembly --inject-step 2`; injected replay printed `pc=8`, reported `semantic_injection_applied = true`, and failed proof with `ChallengePhaseError`. | OpenVM-336 emits decoded S/B/J scattered immediate cells; 336 install pass mutates the program table operand `c` for targeted decoded instruction rows. OpenVM-f038 emits this bucket from executed instruction trace only; no f038 program-table mutation hook is mapped. I-immediate limb coverage is tracked as AL1. SP1-7 verified via CPU-row witness hook in `crates/core/machine/src/cpu/trace.rs::CpuChip::event_to_row`; baseline `00100093 00108463 00200113 --print-buckets` emitted the bucket and injected `sp1.semantic.decode.format_immediate_reassembly::site=instruction_op_c` reported `semantic_injection_applied = true` in `agent_runs/vm-distributed/lead-sp1-7f643da1.md`. SP1-356 verified via 356-only CPU-row hook in `core/src/cpu/trace.rs::CpuChip::event_to_row`; baseline and injected smoke results are recorded in `agent_runs/vm-distributed/lead-sp1-3561f006.md`. |
-| al1 | al1.single_limb/al1.cross_01/al1.negative/al1.boundary | sem.alu.immediate_limb_consistency | op_idx, pc, opcode, mnemonic, imm | verified | semantic_injection_mapped | verified | verified | not_started | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.alu.immediate_limb_consistency`; `sp1.semantic.alu.immediate_limb_consistency` | d7 baseline/injected: `./target/debug/beak-trace --bin "10000093" --inject-kind openvm.semantic.alu.immediate_limb_consistency --inject-step 18446744073709551615 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.c[0]` in `extensions/rv32im/circuit/src/base_alu/core.rs::fill_trace_row`; OpenVM-336 emits decoded I-ALU immediate limb cells and mutates adapter immediate limbs in `adapters/alu.rs`. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
-| al2 | al2.sll_lt32/al2.sll_ge32/al2.srl_lt32/al2.srl_ge32/al2.sra_*/al2.shamt_zero | sem.alu.shift_mod32 | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val, effective_shamt | verified | semantic_injection_mapped | verified | verified | not_started | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.alu.shift_mod32`; `sp1.semantic.alu.shift_mod32` | d7 baseline `./target/debug/beak-trace --bin "000010b7 00002137 002091b3" --print-buckets` emitted `sem.alu.shift_mod32`; injected same seed with `--inject-kind openvm.semantic.alu.shift_mod32 --inject-step 18446744073709551615` reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.a[0]` in `extensions/rv32im/circuit/src/shift/core.rs::fill_trace_row`; OpenVM-336 emits Shift chip rows and mutates the shift output limb in `shift/core.rs`. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
-| al3 | al3.slt_true/al3.slt_false/al3.sltu_true/al3.sltu_false/al3.equal/al3.sign_disagree | sem.alu.comparison_booleanity | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rd_val, rs1_val, rs2_or_imm_val | verified | semantic_injection_mapped | verified | verified | not_started | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.alu.comparison_booleanity`; `sp1.semantic.alu.comparison_booleanity` | d7 baseline `./target/debug/beak-trace --bin "800000b7 00001137 0020a1b3" --print-buckets` emitted `sem.alu.comparison_booleanity`; injected same seed with `--inject-kind openvm.semantic.alu.comparison_booleanity --inject-step 18446744073709551615` reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 flips `core_row.cmp_result` in `extensions/rv32im/circuit/src/less_than/core.rs::fill_trace_row`; OpenVM-336 emits LessThan chip rows and flips the comparison result column in `less_than/core.rs`. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
-| al4 | al4.no_borrow/al4.borrow/al4.equal/al4.cross_limb | sem.alu.subtraction_borrow_chain | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val | verified | semantic_injection_mapped | verified | verified | not_started | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.alu.subtraction_borrow_chain`; `sp1.semantic.alu.subtraction_borrow_chain` | d7 injected smoke `./target/debug/beak-trace --bin "000010b7 00002137 402081b3" --inject-kind openvm.semantic.alu.subtraction_borrow_chain --inject-step 18446744073709551615 --print-buckets` emitted `sem.alu.subtraction_borrow_chain` and reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.a[0]` for SUB in `extensions/rv32im/circuit/src/base_alu/core.rs::fill_trace_row`; OpenVM-336 emits BaseAlu SUB rows and mutates the SUB result limb in `base_alu/core.rs`. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
-| al5 | al5.first_limb_diff/al5.last_limb_diff/al5.all_equal/al5.alternating_borrow | sem.alu.comparison_auxiliary_chain | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val | verified | semantic_injection_mapped | verified | verified | not_started | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.alu.comparison_auxiliary_chain`; `sp1.semantic.alu.comparison_auxiliary_chain` | d7 injected smoke `./target/debug/beak-trace --bin "800000b7 00001137 0020a1b3" --inject-kind openvm.semantic.alu.comparison_auxiliary_chain --inject-step 18446744073709551615 --print-buckets` emitted `sem.alu.comparison_auxiliary_chain` and reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.diff_marker[0]` in `extensions/rv32im/circuit/src/less_than/core.rs::fill_trace_row`; OpenVM-336 emits LessThan comparison aux rows and mutates `diff_val`/`diff_marker` in `less_than/core.rs`. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
-| md1 | md1.div_zero/md1.divu_zero/md1.rem_zero/md1.remu_zero/md1.dividend_* | sem.arithmetic.special_case_consistency | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val, rd_val | verified | semantic_injection_mapped | verified | verified | not_started | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.arithmetic.special_case_consistency`; `sp1.semantic.arithmetic.special_case_consistency` | d7 injected smoke `./target/debug/beak-trace --bin "000010b7 0200c1b3" --inject-kind openvm.semantic.arithmetic.special_case_consistency --inject-step 18446744073709551615 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.q[0]` in `extensions/rv32im/circuit/src/divrem/core.rs::fill_trace_row`; OpenVM-336 emits div-by-zero cells from executed DivRem chip rows; reuses existing special-case injection hook. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
-| md2 | md2.div_overflow/md2.rem_overflow | sem.arithmetic.special_case_consistency | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val, rd_val | verified | semantic_injection_mapped | verified | verified | not_started | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.arithmetic.special_case_consistency`; `sp1.semantic.arithmetic.special_case_consistency` | d7 uses the same DivRem special-case hook as md1; targeted div-by-zero smoke reported `semantic_injection_applied = true`, and overflow cells use the same concrete `divrem/core.rs::fill_trace_row` mutation point. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | OpenVM-336 emits signed DIV/REM overflow cells from executed DivRem chip rows; reuses existing special-case injection hook. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
-| md3 | md3.pp/md3.pn/md3.np/md3.nn/md3.exact/md3.large_q/md3.one/md3.unsigned | sem.arithmetic.division_remainder_bound | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val, rd_val | verified | semantic_injection_mapped | verified | verified | not_started | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | bucket_emitted | bucket_emitted | verified | verified | `openvm.semantic.arithmetic.division_remainder_bound`; `sp1.semantic.arithmetic.division_remainder_bound` | d7 baseline/injected `./target/debug/beak-trace --bin "000100b7 00001137 0220c1b3" --inject-kind openvm.semantic.arithmetic.division_remainder_bound --inject-step 18446744073709551615 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.q[0]` for nonzero-divisor rows using preserved `beak_record_c` in `extensions/rv32im/circuit/src/divrem/core.rs::fill_trace_row`; OpenVM-336 emits nonzero-divisor division/remainder cells from executed DivRem chip rows. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
-| md4 | md4.mul_small/md4.mul_overflow/md4.mulh_pp/md4.mulh_pn/md4.mulh_nn/md4.mulhu/md4.zero_op/md4.max_product | sem.arithmetic.product_decomposition | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val, rd_val, product_hi, product_lo | verified | semantic_injection_mapped | verified | verified | not_started | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.arithmetic.product_decomposition`; `sp1.semantic.arithmetic.product_decomposition` | d7 injected smoke `./target/debug/beak-trace --bin "000010b7 00002137 022081b3" --inject-kind openvm.semantic.arithmetic.product_decomposition --inject-step 18446744073709551615 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.a[0]` in `extensions/rv32im/circuit/src/mul/core.rs::fill_trace_row` and `mulh/core.rs::fill_trace_row`; OpenVM-336 emits product decomposition cells from executed Mul/MulH chip rows. MULHSU-specific correction remains tracked by MD5. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
-| md5 | md5.pos_any/md5.neg_small/md5.neg_large/md5.neg_max/md5.neg_one | sem.arithmetic.signed_unsigned_product_correction | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val, rd_val, product_hi, product_lo | verified | semantic_injection_mapped | verified | verified | not_started | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.arithmetic.signed_unsigned_product_correction`; `sp1.semantic.arithmetic.signed_unsigned_product_correction` | d7 injected smoke `./target/debug/beak-trace --bin "800000b7 00001137 0220a1b3" --inject-kind openvm.semantic.arithmetic.signed_unsigned_product_correction --inject-step 18446744073709551615 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.b_ext` for MULHSU in `extensions/rv32im/circuit/src/mulh/core.rs::fill_trace_row`; OpenVM-336 emits MULHSU correction cells from executed MulH chip rows. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
-| me1 | me1.sw_lw/me1.sb_lb/me1.sh_lh/me1.sb_lw/me1.sw_lb/me1.sw_lhu/me1.overwrite | sem.memory.store_load_payload_flow | op_idx, pc, opcode, mnemonic, effective_ptr, width, timestamp, read_data, write_data, store_step_idx | verified | trace_missing | verified | verified | not_started | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | verified | trace_missing | trace_missing | `openvm.semantic.memory.store_load_payload_flow` | See OpenVM-336 Memory/Time verifier smoke below: pass | OpenVM-336 tracks adapter memory_access store bytes and later loads to the same true address; backend anchors injection to `store_step_idx` and the 336 install pass mutates loadstore core `write_data` at the store payload row. Nexus emits this bucket from executed `UniformTrace` store records only when a later executed load record reaches the same address (width-specific cells when applicable); Nexus pass3 patches `prover/src/chips/instructions/load_store.rs::LoadStoreChip::fill_main_trace` and mutates `Ram1ValCur` at the store row for `nexus.semantic.memory.store_load_payload_flow`. |
-| me2 | me2.half_off1/me2.word_off*/me2.byte_any | sem.memory.address_alignment_consistency | op_idx, pc, opcode, mnemonic, effective_ptr, aligned_ptr, byte_offset, width | verified | trace_missing | verified | verified | not_started | bucket_emitted | bucket_emitted | bucket_emitted | unsupported | bucket_emitted | bucket_emitted | trace_missing | trace_missing | `openvm.semantic.memory.address_pointer_consistency` | See OpenVM-336 Memory/Time verifier smoke below: pass | OpenVM-336 emits true adapter memory_access records; 336 install pass mutates loadstore adapter `mem_ptr_limbs`. |
-| me3 | me3.lb_*/me3.lh_*/me3.lbu/me3.lhu | sem.memory.load_value_binding | op_idx, pc, opcode, mnemonic, effective_ptr, byte_offset, width, read_data | verified | trace_missing | verified | verified | not_started | bucket_emitted | bucket_emitted | bucket_emitted | unsupported | bucket_emitted | bucket_emitted | trace_missing | trace_missing | `openvm.semantic.memory.value_payload_consistency` | See OpenVM-336 Memory/Time verifier smoke below: pass | OpenVM-336 derives sign/zero-extension cells from adapter memory_access read_data; 336 install pass mutates loadstore core `write_data`. |
-| me4 | me4.sb_off*/me4.sh_off* | sem.memory.write_payload_consistency | op_idx, pc, opcode, mnemonic, effective_ptr, byte_offset, width, read_data, prev_data | verified | trace_missing | verified | verified | not_started | bucket_emitted | bucket_emitted | bucket_emitted | unsupported | bucket_emitted | verified | trace_missing | trace_missing | `openvm.semantic.memory.value_payload_consistency` | See OpenVM-336 Memory/Time verifier smoke below: pass | OpenVM-336 emits subword store mask cells from adapter memory_access records; 336 install pass mutates loadstore core `write_data`. Nexus emits subword SB/SH offset cells from executed `UniformTrace` store records; Nexus pass3 patches `LoadStoreChip::fill_main_trace` and mutates `Ram1ValPrev` at the store row for `nexus.semantic.memory.write_payload_consistency`. |
-| me5 | me5.reg_read/me5.reg_write/me5.mem_read/me5.mem_write | sem.memory.address_space_consistency | op_idx, pc, opcode, mnemonic, address_space, is_load, is_store | verified | trace_missing | verified | bucket_emitted | not_started | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | bucket_emitted | trace_missing | trace_missing | `openvm.semantic.memory.address_space_consistency` | See OpenVM-336 Memory/Time verifier smoke below: pass | OpenVM-336 emits load/store address-space direction cells from adapter memory_access records; 336 install pass now mutates loadstore adapter `ReadRecord.mem_as`. |
-| me6 | me6.near_max_lw/me6.near_max_sw/me6.near_max_lh/me6.near_max_sb/me6.heap_boundary | sem.memory.address_boundary_range | op_idx, pc, opcode, mnemonic, effective_ptr, width, address_space | verified | trace_missing | verified | semantic_injection_mapped | not_started | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | bucket_emitted | trace_missing | trace_missing | `openvm.semantic.memory.address_pointer_consistency` | See OpenVM-336 Memory/Time verifier smoke below: pass | OpenVM-336 emits address-boundary cells only when adapter memory_access records actually reach boundary addresses; 336 install pass mutates loadstore adapter `mem_ptr_limbs`. |
-| me7 | me7.bss_zero/me7.data_loaded | sem.memory.initial_value_binding | op_idx, pc, opcode, mnemonic, effective_ptr, width, read_data, no_prior_write; memory_init seq/address/value for explicit nonzero init cells | bucket_emitted | trace_missing | bucket_emitted | trace_missing | not_started | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | bucket_emitted | trace_missing | trace_missing |  | `BEAK_OPENVM_INIT_MEMORY='2:64:127' cargo run -q --bin beak-trace -- --bin '00100013' --print-buckets`: pass; injected initial-value smoke was underconstrained and is not mapped | First observed load with no prior same-address store is classified as zero vs nonzero initial value; OpenVM-336 now also emits explicit nonzero `memory_init` cells. No semantic injection mapping: attempted initial-memory mutation hooks were underconstrained in prover smoke. |
-| me7 | me7.rodata/me7.stack_uninit | sem.memory.initial_value_binding | ELF/load-region metadata, stack-region metadata | trace_missing | trace_missing | trace_missing | trace_missing | not_started | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | trace_missing | trace_missing | trace_missing |  |  | Adapter memory_access exposes values and addresses but not ELF/stack region provenance. |
-| me8 | me8.no_conflict | sem.memory.initial_value_binding | memory_init seq/address/value for explicit nonzero init cells | bucket_emitted | trace_missing | trace_missing | trace_missing | not_started | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | trace_missing | trace_missing | trace_missing |  | `BEAK_OPENVM_INIT_MEMORY='2:64:127' cargo run -q --bin beak-trace -- --bin '00100013' --print-buckets`: pass | OpenVM-336 emits non-conflicting explicit nonzero initialization cells from `MemoryController::set_initial_memory`; no injection mapping because initial-memory mutation smoke was underconstrained. |
-| me8 | me8.double_init | sem.memory.initial_value_binding | duplicate initialization writes before MemoryImage coalescing | trace_missing | trace_missing | trace_missing | trace_missing | not_started | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | trace_missing | trace_missing | trace_missing |  |  | OpenVM-336 receives a coalesced `MemoryImage`, so duplicate initialization writes are lost before `set_initial_memory`; this needs earlier ELF/loader instrumentation. |
-| me9 | me9.off*/me9.adjacent_* | sem.memory.address_progression_consistency | op_idx, pc, opcode, mnemonic, effective_ptr, aligned_ptr, byte_offset, width | verified | trace_missing | verified | verified | not_started | bucket_emitted | bucket_emitted | bucket_emitted | unsupported | bucket_emitted | bucket_emitted | trace_missing | trace_missing | `openvm.semantic.memory.address_pointer_consistency` | See OpenVM-336 Memory/Time verifier smoke below: pass | OpenVM-336 emits byte-offset cells from adapter memory_access records; 336 install pass mutates loadstore adapter `mem_ptr_limbs`. |
-| me10 | me10.load/me10.store | sem.memory.kind_selector_consistency | op_idx, pc, opcode, mnemonic, is_load, is_store, width | verified | trace_missing | verified | verified | not_started | verified | verified | bucket_emitted | unsupported | bucket_emitted | verified | bucket_emitted | bucket_emitted | `openvm.semantic.memory.kind_selector_consistency` | See OpenVM-336 Memory/Time verifier smoke below: pass | OpenVM-336 emits load/store direction cells from adapter memory_access records; 336 install pass mutates loadstore core `is_load`. Nexus emits load/store direction cells from executed `UniformTrace` memory records; Nexus pass3 patches `LoadStoreChip::fill_main_trace` and flips `IsSw`/`IsLw` selector columns for `nexus.semantic.memory.kind_selector_consistency`. |
-| me11 | me11.written_cells/me11.read_only_cells | sem.memory.finalization_consistency | memory_finalization seq, op_idx, address_space, pointer, timestamp, values, was_initial, changed_from_initial | verified | trace_missing | verified | trace_missing | not_started | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | trace_missing | trace_missing | trace_missing | `openvm.semantic.memory.finalization_consistency` | `BEAK_OPENVM_INIT_MEMORY='2:64:1' cargo run -q --bin beak-trace -- --bin '04000093 07f00113 0020a023' --print-buckets`: pass; injected same seed with `--inject-kind openvm.semantic.memory.finalization_consistency --inject-step 0`: `verify_app_proof failed: ChallengePhaseError` | OpenVM-336 now emits persistent memory finalization rows from `MemoryController::finalize`; the 336 install pass mutates `final_partition` values before boundary/merkle finalization, and baseline+injected prover smoke passed. |
-| me11 | me11.untouched_cells | sem.memory.finalization_consistency | complete final memory universe / untouched finalization rows | trace_missing | trace_missing | trace_missing | trace_missing | not_started | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | trace_missing | trace_missing | trace_missing |  |  | The exposed `final_partition` covers accessed/finalized blocks; it does not enumerate untouched memory cells. |
-| ts1 | ts1.standard | sem.time.boundary_origin_consistency | op_idx, pc, timestamp, next_timestamp | verified | semantic_injection_mapped | verified | verified | not_started | bucket_emitted | bucket_emitted | bucket_emitted | trace_missing | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.time.boundary_origin_consistency` | d7 injected smoke `./target/debug/beak-trace --bin "00100013" --inject-kind openvm.semantic.time.boundary_origin_consistency --inject-step 0 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. | d7 mutates connector boundary `state.timestamp` in `crates/vm/src/system/connector/mod.rs::generate_proving_ctx`; OpenVM-336 derives standard initial timestamp cell from the first executed instruction and mutates connector boundary timestamp. |
-| ts2 | ts2.small_gap/ts2.large_gap/ts2.consecutive | sem.time.monotonic_access_ordering | op_idx, pc, effective_ptr, address_space, timestamp, previous_timestamp, ts_diff | verified | trace_missing | verified | verified | not_started | verified | bucket_emitted | trace_missing | trace_missing | trace_missing | bucket_emitted | trace_missing | trace_missing | `openvm.semantic.time.monotonic_access_ordering` | See OpenVM-336 Memory/Time verifier smoke below: pass | OpenVM-f038 derives same-address timestamp gaps from adapter memory_access records; shared timestamp-aux hook failed injected smoke with `OodEvaluationMismatch`. Pico emits same-address timestamp buckets and verifies the paired `sem.memory.timestamped_load_path` hook with base inject kind `pico.semantic.memory.timestamped_load_path`; `ts2.cross_segment` remains trace_missing until segment-boundary memory continuity is exposed. |
-| ts2 | ts2.cross_segment | sem.time.monotonic_access_ordering | segment_idx/shard boundary plus memory access continuity | trace_missing | trace_missing | trace_missing | trace_missing | not_started | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing |  |  | Current trace does not expose cross-segment memory ordering boundaries. |
-| ts3 | ts3.standard | sem.time.boundary_origin_consistency | op_idx, pc, timestamp | verified | semantic_injection_mapped | verified | verified | not_started | bucket_emitted | bucket_emitted | bucket_emitted | trace_missing | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.time.boundary_origin_consistency` | d7 injected smoke `./target/debug/beak-trace --bin "00100013" --inject-kind openvm.semantic.time.boundary_origin_consistency --inject-step 0 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. | d7 mutates connector boundary `state.timestamp` in `crates/vm/src/system/connector/mod.rs::generate_proving_ctx`; OpenVM-336 derives standard clk/pc initialization cell from the first executed instruction and mutates connector boundary timestamp. |
-| cf1 | cf1.blt*/cf1.bge*/cf1.bltu*/cf1.bgeu*/cf1.beq_equal/cf1.bne_not_equal/cf1.sign_flip | sem.exec.control_flow_binding | op_idx, pc, opcode, mnemonic, next_pc, target_pc, taken, chip-row operands for sign_flip | verified | semantic_injection_mapped | bucket_emitted | verified | not_started | verified | verified | bucket_emitted | unsupported | semantic_injection_mapped | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.exec.control_flow_binding`; `jolt.semantic.exec.control_flow_binding` | d7 injected branch smoke `./target/debug/beak-trace --bin "00100113 00200193 00208463 00300193" --inject-kind openvm.semantic.exec.control_flow_binding --inject-step 18446744073709551615 --print-buckets` emitted `sem.exec.control_flow_binding` and reported `semantic_injection_applied = true`. Jolt baseline: `cargo run -q --bin beak-trace -- --bin "00100093 00200113 0020c463 00300193" --print-buckets` emitted `sem.exec.control_flow_binding`; injected Jolt smoke with `--inject-kind jolt.semantic.exec.control_flow_binding --inject-step 18446744073709551615` reported `injection_applied = true` but still hit the known Jolt memory panic, so not verified. | d7 mutates branch compare result in `extensions/rv32im/circuit/src/branch_eq/core.rs` and `branch_lt/core.rs`; branch taken/not-taken cells come from executed instruction next_pc. OpenVM-f038 emits branch buckets from executed instruction trace only; no f038 branch mutation hook is mapped. Jolt emits branch cells from executed `RVTraceRow` register operands and input-PC mapping; Jolt install pass mutates branch `JoltTraceStep.instruction_lookup` variants. |
-| cf2 | cf2.jal_rd/cf2.jal_x0/cf2.jalr_rd/cf2.jalr_x0 | sem.exec.control_flow_binding | op_idx, pc, opcode, mnemonic, rd, next_pc, link_pc | verified | semantic_injection_mapped | bucket_emitted | verified | not_started | verified | semantic_injection_mapped | bucket_emitted | unsupported | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.exec.control_flow_binding` | d7 branch/JAL/JALR control-flow hooks are mapped; branch smoke above reported `semantic_injection_applied = true`, and JAL/JALR use the same base inject kind at `jal_lui/core.rs` and `jalr/core.rs`. | Link-register cells are emitted from executed JAL/JALR instruction trace; d7 mutates JAL/JALR link/target witness columns. OpenVM-f038 emits this bucket from executed instruction trace only; no f038 JAL/JALR mutation hook is mapped. |
-| cf3 | cf3.imm_zero/cf3.imm_pos/cf3.imm_neg | sem.exec.control_flow_binding | op_idx, pc, opcode, mnemonic, imm, next_pc | verified | semantic_injection_mapped | bucket_emitted | verified | not_started | verified | semantic_injection_mapped | bucket_emitted | unsupported | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.exec.control_flow_binding` | d7 JALR hook is mapped in `extensions/rv32im/circuit/src/jalr/core.rs::fill_trace_row`; control-flow injected smoke reported applied-site evidence for the shared base kind. | JALR immediate-sign cells are observable from executed decode; d7/336 JALR hooks mutate target/link witness columns. OpenVM-f038 emits JALR immediate buckets from executed instruction trace only; no f038 JALR mutation hook is mapped. |
-| cf3 | cf3.clear_lsb/cf3.even/cf3.wrap | sem.exec.control_flow_binding | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, rs1_val, imm, target_before_lsb_clear, target_after_lsb_clear, next_pc | verified | semantic_injection_mapped | trace_missing | trace_missing | not_started | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | bucket_emitted | install_patch_available | trace_missing | `openvm.semantic.exec.control_flow_binding` | d7 JALR chip-row emission includes `target_before_lsb_clear`; mapped JALR hook mutates `rd_data[0]` and `imm_sign` in `jalr/core.rs::fill_trace_row`. | OpenVM-f038 baseline JALR emits executed control-flow buckets, but the installed f038 source does not expose `target_before_lsb_clear` chip-row evidence; clear/even/wrap remain trace_missing. Risc0-98387806 emits JALR target cells from executed register state with `target_before_lsb_clear` / `target_after_lsb_clear`; the Risc0 control-flow prover hook remains unmapped because injected smoke did not provide contract-complete applied evidence. Pico currently emits JALR immediate cells only; `target_before_lsb_clear` / `target_after_lsb_clear` are not emitted in `projects/pico-45e74ccd62758c6d67239913956e749adaba261c/src/lib/trace.rs::cf3_cell`. |
-| cf4 | cf4.default_entry/cf4.custom_entry | sem.control.entrypoint_binding | first op_idx, first pc | verified | semantic_injection_mapped | bucket_emitted | verified | not_started | bucket_emitted | bucket_emitted | bucket_emitted | unsupported | semantic_injection_mapped | bucket_emitted | bucket_emitted | bucket_emitted | `openvm.semantic.control.entrypoint_binding`; `jolt.semantic.control.entrypoint_binding` | d7 injected smoke `./target/debug/beak-trace --bin "00100013" --inject-kind openvm.semantic.control.entrypoint_binding --inject-step 0 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. Jolt baseline: `cargo run -q --bin beak-trace -- --bin 123450b7 --print-buckets` emitted `sem.control.entrypoint_binding`; injected Jolt smoke with `--inject-kind jolt.semantic.control.entrypoint_binding --inject-step 0` reported `injection_applied = true` but still hit the known Jolt memory panic, so not verified. | d7 mutates connector boundary `state.pc` in `crates/vm/src/system/connector/mod.rs::generate_proving_ctx`; first executed instruction PC is emitted as OpenVM instruction-index PC. OpenVM-f038 emits entrypoint buckets from executed instruction trace only; no f038 boundary-PC mutation hook is mapped. |
-| cf5 | cf5.halt/cf5.io_read/cf5.io_write/cf5.precompile/cf5.arg_zero/cf5.arg_max | sem.control.ecall_argument_decomposition | op_idx, pc, syscall_nr, a0-a7 register values | trace_missing | trace_missing | trace_missing | trace_missing | not_started | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | trace_missing | verified | verified | `<vm>.semantic.control.ecall_argument_decomposition` |  | OpenVM-f038 does not expose Linux-style ECALL syscall dispatch or a0-a7 argument reads; RV32 system encodings are transpiled before a raw ECALL obligation bucket is observable. |
-| cf6 | cf6.normal/cf6.after_branch_not_taken | sem.exec.control_flow_binding | op_idx, pc, opcode, mnemonic, next_pc, previous branch next_pc | verified | semantic_injection_mapped | bucket_emitted | verified | not_started | verified | verified | bucket_emitted | unsupported | bucket_emitted | bucket_emitted | install_patch_available | bucket_emitted | `openvm.semantic.exec.control_flow_binding` | d7 injected smoke `./target/debug/beak-trace --bin "00100113 00200193 00208463 00300193" --inject-kind openvm.semantic.exec.control_flow_binding --inject-step 18446744073709551615 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. | Sequential and after-branch-not-taken cells use executed instruction trace; d7 branch/JAL/JALR hooks cover concrete control-flow witness mutation. OpenVM-f038 emits sequential buckets from executed instruction trace only; no f038 control-flow mutation hook is mapped. `near_segment_end` still needs segment metadata. |
-| cf6 | cf6.near_segment_end | sem.exec.control_flow_binding | segment boundary metadata | trace_missing | trace_missing | trace_missing | trace_missing | not_started | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | trace_missing | trace_missing | trace_missing |  |  | Current trace lacks segment-boundary position metadata; d7eab708 and Pico likewise have no segment-boundary position metadata in the emitted instruction/chip-row trace. |
-| cf7 | cf7.standard | sem.control.ecall_word_validity | op_idx, pc, opcode, mnemonic, raw instruction word | install_patch_available | trace_missing | trace_missing | bucket_emitted | not_started | bucket_emitted | semantic_injection_mapped | bucket_emitted | unsupported | trace_missing | trace_missing | bucket_emitted | bucket_emitted | `openvm.semantic.control.ecall_word_validity` | Hook smoke: `cargo run -q --bin beak-trace -- --bin "00000073" --inject-kind openvm.semantic.control.ecall_word_validity --inject-step 0` printed the program-table mutation and reported `semantic_injection_applied = true` / `verify_app_proof failed: ChallengePhaseError`; baseline `00000073 --print-buckets` emitted 0 buckets because the RV system word transpiled to `unimp`. | OpenVM-f038 has no mapped program-table ECALL hook and no baseline raw-RV ECALL bucket; status remains trace_missing. Pico emits the executed ECALL word bucket when observable, but no real Pico install mutation hook exists for `pico.semantic.control.ecall_word_validity`, so it is bucket-only. |
-| bu1 | bu1.real_row | sem.lookup.boolean_multiplicity | step_idx, table_name, multiplicity, is_real | not_started | trace_missing | trace_missing | verified | trace_missing | install_patch_available | trace_missing | install_patch_available | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | `<vm>.semantic.lookup.boolean_multiplicity` | Pico base-kind injected smoke `pico.semantic.lookup.boolean_multiplicity` at step 0 reported `injection_applied=true` and failed with `Constraint verification failed` after the hook was corrected to mutate `is_real_shadow`. | Requires prover/table instrumentation; f038 does not expose boolean lookup multiplicity rows in the current trace. |
-| pd1 | pd1.short_trace | sem.row.padding_interaction_send | step_idx, table_name, is_padding, interaction_kind | not_started | bucket_emitted | bucket_emitted | trace_missing | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | `<vm>.semantic.row.padding_interaction_send` |  | f038 baseline smokes emit padding interaction-send buckets; no mutation hook is mapped. |
+| rf1 | rf1.alu_r | sem.decode.zero_register_immutability | op_idx, pc, opcode, mnemonic, rd, write_source | verified | bucket_emitted | bucket_emitted | verified | semantic_injection_mapped | verified | verified | verified | unsupported | verified | semantic_injection_mapped | verified | install_patch_available | `openvm.semantic.decode.zero_register_immutability` | Baseline: `cargo run -q --bin beak-trace -- --bin "00100013" --print-buckets`; injected: same seed with `--inject-kind openvm.semantic.decode.zero_register_immutability --inject-step 0`; injected replay reported `semantic_injection_applied = true` and `verify_app_proof failed: ChallengePhaseError`. | OpenVM-336 emits decoded RF1 write-source cells when observed; 336 install pass mutates the program table operand `a` for targeted decoded instruction rows. OpenVM-f038 emits this bucket from executed instruction trace only; no f038 program-table mutation hook is mapped. SP1-7 verified via CPU-row witness hook in `crates/core/machine/src/cpu/trace.rs::CpuChip::event_to_row`; baseline `00012003 --print-buckets` emitted the bucket and injected `sp1.semantic.decode.zero_register_immutability::site=op_a_access` reported `semantic_injection_applied = true` with proof rejection recorded in `agent_runs/vm-distributed/lead-sp1-7f643da1.md`. SP1-356 verified via 356-only CPU-row hook in `core/src/cpu/trace.rs::CpuChip::event_to_row`; baseline and injected smoke results are recorded in `agent_runs/vm-distributed/lead-sp1-3561f006.md`. |
+| rf2 | rf2.rs1_eq_rs2 | sem.decode.operand_index_routing | op_idx, pc, opcode, mnemonic, rs1, rs2, rd | verified | bucket_emitted | bucket_emitted | verified | semantic_injection_mapped | verified | verified | verified | unsupported | verified | semantic_injection_mapped | verified | verified | `openvm.semantic.decode.operand_index_routing` | Baseline: `cargo run -q --bin beak-trace -- --bin "00100013" --print-buckets`; injected: same seed with `--inject-kind openvm.semantic.decode.operand_index_routing --inject-step 0`; injected replay printed the program-table mutation and reported `semantic_injection_applied = true` / `verify_app_proof failed: ChallengePhaseError`. | OpenVM-336 emits alias cells from decoded RV32IM operands; 336 install pass mutates the program table operand `b` for targeted decoded instruction rows. OpenVM-f038 emits this bucket from executed instruction trace only; no f038 program-table mutation hook is mapped. SP1-7 verified via CPU-row witness hook in `crates/core/machine/src/cpu/trace.rs::CpuChip::event_to_row`; baseline `00012183 --print-buckets` emitted the bucket and injected `sp1.semantic.decode.operand_index_routing::site=op_b_access` reported `semantic_injection_applied = true` in `agent_runs/vm-distributed/lead-sp1-7f643da1.md`. SP1-356 verified via 356-only CPU-row hook in `core/src/cpu/trace.rs::CpuChip::event_to_row`; baseline and injected smoke results are recorded in `agent_runs/vm-distributed/lead-sp1-3561f006.md`. |
+| rf3 | rf3.alu/rf3.load/rf3.link/rf3.upper/rf3.muldiv | sem.exec.dest_binding | op_idx, pc, opcode, mnemonic, rd, write_source | bucket_emitted | bucket_emitted | bucket_emitted | verified | semantic_injection_mapped | verified | verified | verified | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted |  | d7 baseline examples: `cargo run -q --bin beak-trace -- --bin "10000093" --print-buckets`; load/muldiv/link/upper cells need matching executed instructions. | d7 emits decoded writeback-source cells from executed instruction trace; no d7 mutation hook/applied-site replay plumbing is mapped. SP1-7 verified via CPU-row witness hook in `crates/core/machine/src/cpu/trace.rs::CpuChip::event_to_row`; baseline `00012183 --print-buckets` emitted the bucket and injected `sp1.semantic.exec.dest_binding::site=op_a_access` reported `semantic_injection_applied = true` with proof rejection recorded in `agent_runs/vm-distributed/lead-sp1-7f643da1.md`. SP1-356 verified via 356-only CPU-row hook in `core/src/cpu/trace.rs::CpuChip::event_to_row`; baseline and injected smoke results are recorded in `agent_runs/vm-distributed/lead-sp1-3561f006.md`. |
+| id1 | id1.reg_zero/id1.reg_max/id1.reg_mid/id1.funct_max | sem.decode.field_range | op_idx, pc, opcode, mnemonic, rd, rs1, rs2, funct3, funct7 | bucket_emitted | bucket_emitted | bucket_emitted | verified | semantic_injection_mapped | verified | verified | verified | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted |  | d7 baseline examples: `cargo run -q --bin beak-trace -- --bin "00100013" --print-buckets`. | d7 emits field-range cells from executed decoded RV32IM words; no d7 decode/program-table hook is mapped. SP1-7 verified via CPU-row witness hook in `crates/core/machine/src/cpu/trace.rs::CpuChip::event_to_row`; baseline `00012183 --print-buckets` emitted the bucket and injected `sp1.semantic.decode.field_range::site=instruction_op_a` reported `semantic_injection_applied = true` in `agent_runs/vm-distributed/lead-sp1-7f643da1.md`. SP1-356 verified via 356-only CPU-row hook in `core/src/cpu/trace.rs::CpuChip::event_to_row`; baseline and injected smoke results are recorded in `agent_runs/vm-distributed/lead-sp1-3561f006.md`. |
+| id2 | id2.i_pos/id2.i_neg/id2.s_pos/id2.s_neg/id2.b_pos/id2.b_neg/id2.j_pos/id2.j_neg | sem.decode.immediate_sign_extension | op_idx, pc, opcode, mnemonic, imm | bucket_emitted | bucket_emitted | bucket_emitted | verified | semantic_injection_mapped | verified | verified | verified | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted |  | d7 baseline examples: `cargo run -q --bin beak-trace -- --bin "008000ef 00100113 00200193" --print-buckets`. | d7 emits sign-extension cells from executed decoded immediates; no d7 immediate mutation hook is mapped. SP1-7 verified via CPU-row witness hook in `crates/core/machine/src/cpu/trace.rs::CpuChip::event_to_row`; baseline `00012183 --print-buckets` emitted the bucket and injected `sp1.semantic.decode.immediate_sign_extension::site=instruction_op_c` reported `semantic_injection_applied = true` in `agent_runs/vm-distributed/lead-sp1-7f643da1.md`. SP1-356 verified via 356-only CPU-row hook in `core/src/cpu/trace.rs::CpuChip::event_to_row`; baseline and injected smoke results are recorded in `agent_runs/vm-distributed/lead-sp1-3561f006.md`. |
+| id3 | id3.lui_zero/id3.lui_max/id3.lui_mid/id3.auipc_no_wrap/id3.auipc_wrap | sem.decode.upper_immediate_materialization; sem.control.auipc_pc_limb_consistency | op_idx, pc, opcode, mnemonic, imm, rd | semantic_injection_mapped | semantic_injection_mapped | bucket_emitted | verified | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.control.auipc_pc_limb_consistency` for OpenVM d7/336; `jolt.semantic.decode.upper_immediate_materialization` for Jolt | d7 baseline/injected: `./target/debug/beak-trace --bin "00200313 0ff00793 00002297 e6c28293 0002c703 0ff00393 00774533" --inject-kind openvm.semantic.control.auipc_pc_limb_consistency --inject-step 18446744073709551615 --print-buckets` emitted `sem.control.auipc_pc_limb_consistency` and reported `semantic_injection_applied = true`. Jolt baseline: `cargo run -q --bin beak-trace -- --bin 123450b7 --print-buckets` emitted `sem.decode.upper_immediate_materialization`; injected Jolt smoke with `--inject-kind jolt.semantic.decode.upper_immediate_materialization --inject-step 18446744073709551615` reported `injection_applied = true` but still hit the known Jolt memory panic, so not verified. | d7 emits LUI/AUIPC upper-immediate buckets from executed trace; only the AUIPC PC-limb sub-bucket is mapped, via `extensions/rv32im/circuit/src/auipc/core.rs::fill_trace_row` mutating `pc_limbs`. Program-table LUI/operand mutation remains unavailable. Jolt emits LUI/AUIPC cells only from executed `RVTraceRow`s whose PC maps back to the input program; Jolt install pass mutates the processed `JoltTraceStep.instruction_lookup` virtual advice value in `jolt-core/src/host/mod.rs::Program::trace` and backend maps observed `id3` hits. |
+| id4 | id4.alu_r/id4.alu_i/id4.load/id4.store/id4.branch/id4.jal/id4.jalr/id4.lui/id4.auipc/id4.ecall/id4.mul/id4.div | sem.exec.op_selector_binding | op_idx, pc, opcode, mnemonic | bucket_emitted | bucket_emitted | bucket_emitted | verified | semantic_injection_mapped | verified | verified | verified | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted |  | d7 baseline examples: `cargo run -q --bin beak-trace -- --bin "00100013" --print-buckets`. | d7 emits opcode-class selector cells from executed instruction trace. Raw RV ECALL is not observable for d7 because it transpiles to `unimp`; that cell remains covered by the cf5/cf7 trace-missing notes. SP1-7 verified via CPU-row witness hook in `crates/core/machine/src/cpu/trace.rs::CpuChip::event_to_row`; baseline `00012183 --print-buckets` emitted the bucket and injected `sp1.semantic.exec.op_selector_binding::site=opcode` reported `semantic_injection_applied = true` in `agent_runs/vm-distributed/lead-sp1-7f643da1.md`. SP1-356 verified via 356-only CPU-row hook in `core/src/cpu/trace.rs::CpuChip::event_to_row`; baseline and injected smoke results are recorded in `agent_runs/vm-distributed/lead-sp1-3561f006.md`. |
+| id5 | id5.s_type/id5.b_type/id5.j_type/id5.cross_field | sem.decode.format_immediate_reassembly | op_idx, pc, opcode, mnemonic, imm | verified | bucket_emitted | bucket_emitted | verified | semantic_injection_mapped | verified | verified | verified | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.decode.format_immediate_reassembly` | Baseline: `cargo run -q --bin beak-trace -- --bin "00100113 00200193 00208463 00300193" --print-buckets`; injected: same seed with `--inject-kind openvm.semantic.decode.format_immediate_reassembly --inject-step 2`; injected replay printed `pc=8`, reported `semantic_injection_applied = true`, and failed proof with `ChallengePhaseError`. | OpenVM-336 emits decoded S/B/J scattered immediate cells; 336 install pass mutates the program table operand `c` for targeted decoded instruction rows. OpenVM-f038 emits this bucket from executed instruction trace only; no f038 program-table mutation hook is mapped. I-immediate limb coverage is tracked as AL1. SP1-7 verified via CPU-row witness hook in `crates/core/machine/src/cpu/trace.rs::CpuChip::event_to_row`; baseline `00100093 00108463 00200113 --print-buckets` emitted the bucket and injected `sp1.semantic.decode.format_immediate_reassembly::site=instruction_op_c` reported `semantic_injection_applied = true` in `agent_runs/vm-distributed/lead-sp1-7f643da1.md`. SP1-356 verified via 356-only CPU-row hook in `core/src/cpu/trace.rs::CpuChip::event_to_row`; baseline and injected smoke results are recorded in `agent_runs/vm-distributed/lead-sp1-3561f006.md`. |
+| al1 | al1.single_limb/al1.cross_01/al1.negative/al1.boundary | sem.alu.immediate_limb_consistency | op_idx, pc, opcode, mnemonic, imm | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.alu.immediate_limb_consistency`; `sp1.semantic.alu.immediate_limb_consistency` | d7 baseline/injected: `./target/debug/beak-trace --bin "10000093" --inject-kind openvm.semantic.alu.immediate_limb_consistency --inject-step 18446744073709551615 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.c[0]` in `extensions/rv32im/circuit/src/base_alu/core.rs::fill_trace_row`; OpenVM-336 emits decoded I-ALU immediate limb cells and mutates adapter immediate limbs in `adapters/alu.rs`. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
+| al2 | al2.sll_lt32/al2.sll_ge32/al2.srl_lt32/al2.srl_ge32/al2.sra_*/al2.shamt_zero | sem.alu.shift_mod32 | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val, effective_shamt | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.alu.shift_mod32`; `sp1.semantic.alu.shift_mod32` | d7 baseline `./target/debug/beak-trace --bin "000010b7 00002137 002091b3" --print-buckets` emitted `sem.alu.shift_mod32`; injected same seed with `--inject-kind openvm.semantic.alu.shift_mod32 --inject-step 18446744073709551615` reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.a[0]` in `extensions/rv32im/circuit/src/shift/core.rs::fill_trace_row`; OpenVM-336 emits Shift chip rows and mutates the shift output limb in `shift/core.rs`. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
+| al3 | al3.slt_true/al3.slt_false/al3.sltu_true/al3.sltu_false/al3.equal/al3.sign_disagree | sem.alu.comparison_booleanity | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rd_val, rs1_val, rs2_or_imm_val | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.alu.comparison_booleanity`; `sp1.semantic.alu.comparison_booleanity` | d7 baseline `./target/debug/beak-trace --bin "800000b7 00001137 0020a1b3" --print-buckets` emitted `sem.alu.comparison_booleanity`; injected same seed with `--inject-kind openvm.semantic.alu.comparison_booleanity --inject-step 18446744073709551615` reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 flips `core_row.cmp_result` in `extensions/rv32im/circuit/src/less_than/core.rs::fill_trace_row`; OpenVM-336 emits LessThan chip rows and flips the comparison result column in `less_than/core.rs`. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
+| al4 | al4.no_borrow/al4.borrow/al4.equal/al4.cross_limb | sem.alu.subtraction_borrow_chain | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.alu.subtraction_borrow_chain`; `sp1.semantic.alu.subtraction_borrow_chain` | d7 injected smoke `./target/debug/beak-trace --bin "000010b7 00002137 402081b3" --inject-kind openvm.semantic.alu.subtraction_borrow_chain --inject-step 18446744073709551615 --print-buckets` emitted `sem.alu.subtraction_borrow_chain` and reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.a[0]` for SUB in `extensions/rv32im/circuit/src/base_alu/core.rs::fill_trace_row`; OpenVM-336 emits BaseAlu SUB rows and mutates the SUB result limb in `base_alu/core.rs`. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
+| al5 | al5.first_limb_diff/al5.last_limb_diff/al5.all_equal/al5.alternating_borrow | sem.alu.comparison_auxiliary_chain | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.alu.comparison_auxiliary_chain`; `sp1.semantic.alu.comparison_auxiliary_chain` | d7 injected smoke `./target/debug/beak-trace --bin "800000b7 00001137 0020a1b3" --inject-kind openvm.semantic.alu.comparison_auxiliary_chain --inject-step 18446744073709551615 --print-buckets` emitted `sem.alu.comparison_auxiliary_chain` and reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.diff_marker[0]` in `extensions/rv32im/circuit/src/less_than/core.rs::fill_trace_row`; OpenVM-336 emits LessThan comparison aux rows and mutates `diff_val`/`diff_marker` in `less_than/core.rs`. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
+| md1 | md1.div_zero/md1.divu_zero/md1.rem_zero/md1.remu_zero/md1.dividend_* | sem.arithmetic.special_case_consistency | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val, rd_val | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | verified | bucket_emitted | verified | bucket_emitted | `openvm.semantic.arithmetic.special_case_consistency`; `sp1.semantic.arithmetic.special_case_consistency` | d7 injected smoke `./target/debug/beak-trace --bin "000010b7 0200c1b3" --inject-kind openvm.semantic.arithmetic.special_case_consistency --inject-step 18446744073709551615 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.q[0]` in `extensions/rv32im/circuit/src/divrem/core.rs::fill_trace_row`; OpenVM-336 emits div-by-zero cells from executed DivRem chip rows; reuses existing special-case injection hook. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
+| md2 | md2.div_overflow/md2.rem_overflow | sem.arithmetic.special_case_consistency | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val, rd_val | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | install_patch_available | bucket_emitted | verified | bucket_emitted | `openvm.semantic.arithmetic.special_case_consistency`; `sp1.semantic.arithmetic.special_case_consistency` | d7 uses the same DivRem special-case hook as md1; targeted div-by-zero smoke reported `semantic_injection_applied = true`, and overflow cells use the same concrete `divrem/core.rs::fill_trace_row` mutation point. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | OpenVM-336 emits signed DIV/REM overflow cells from executed DivRem chip rows; reuses existing special-case injection hook. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
+| md3 | md3.pp/md3.pn/md3.np/md3.nn/md3.exact/md3.large_q/md3.one/md3.unsigned | sem.arithmetic.division_remainder_bound | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val, rd_val | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | verified | bucket_emitted | verified | verified | `openvm.semantic.arithmetic.division_remainder_bound`; `sp1.semantic.arithmetic.division_remainder_bound` | d7 baseline/injected `./target/debug/beak-trace --bin "000100b7 00001137 0220c1b3" --inject-kind openvm.semantic.arithmetic.division_remainder_bound --inject-step 18446744073709551615 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.q[0]` for nonzero-divisor rows using preserved `beak_record_c` in `extensions/rv32im/circuit/src/divrem/core.rs::fill_trace_row`; OpenVM-336 emits nonzero-divisor division/remainder cells from executed DivRem chip rows. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
+| md4 | md4.mul_small/md4.mul_overflow/md4.mulh_pp/md4.mulh_pn/md4.mulh_nn/md4.mulhu/md4.zero_op/md4.max_product | sem.arithmetic.product_decomposition | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val, rd_val, product_hi, product_lo | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | verified | bucket_emitted | verified | bucket_emitted | `openvm.semantic.arithmetic.product_decomposition`; `sp1.semantic.arithmetic.product_decomposition` | d7 injected smoke `./target/debug/beak-trace --bin "000010b7 00002137 022081b3" --inject-kind openvm.semantic.arithmetic.product_decomposition --inject-step 18446744073709551615 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.a[0]` in `extensions/rv32im/circuit/src/mul/core.rs::fill_trace_row` and `mulh/core.rs::fill_trace_row`; OpenVM-336 emits product decomposition cells from executed Mul/MulH chip rows. MULHSU-specific correction remains tracked by MD5. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
+| md5 | md5.pos_any/md5.neg_small/md5.neg_large/md5.neg_max/md5.neg_one | sem.arithmetic.signed_unsigned_product_correction | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, chip_name, kind, rs1_val, rs2_val, rd_val, product_hi, product_lo | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | unsupported | verified | bucket_emitted | verified | bucket_emitted | `openvm.semantic.arithmetic.signed_unsigned_product_correction`; `sp1.semantic.arithmetic.signed_unsigned_product_correction` | d7 injected smoke `./target/debug/beak-trace --bin "800000b7 00001137 0220a1b3" --inject-kind openvm.semantic.arithmetic.signed_unsigned_product_correction --inject-step 18446744073709551615 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. SP1 7/811/356 chip-hook smokes are recorded in `agent_runs/vm-distributed/lead-sp1-deep-instrumentation.md`. | d7 mutates `core_row.b_ext` for MULHSU in `extensions/rv32im/circuit/src/mulh/core.rs::fill_trace_row`; OpenVM-336 emits MULHSU correction cells from executed MulH chip rows. SP1 7/811/356: shared install pass `pass4_v4_is_memory.py` patches concrete ALU/mul/div chip trace rows in v4 `crates/core/machine/src/alu/*/mod.rs` and legacy 356 `core/src/alu/*/mod.rs`; target backends map executed bucket hits to pc/clk-anchored applied-site hooks. |
+| me1 | me1.sw_lw/me1.sb_lb/me1.sh_lh/me1.sb_lw/me1.sw_lb/me1.sw_lhu/me1.overwrite | sem.memory.store_load_payload_flow | op_idx, pc, opcode, mnemonic, effective_ptr, width, timestamp, read_data, write_data, store_step_idx | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | trace_missing | unsupported | install_patch_available | verified | verified | bucket_emitted | `openvm.semantic.memory.store_load_payload_flow`; `sp1.semantic.memory.store_load_payload_flow` | See OpenVM-d7 and OpenVM-336 Memory/Time smokes below: pass | OpenVM-d7/OpenVM-336 track adapter memory_access store bytes and later loads to the same true address; backend anchors injection to `store_step_idx`; d7 mutates loadstore core `write_data` at the store payload row. Nexus emits this bucket from executed `UniformTrace` store records only when a later executed load record reaches the same address (width-specific cells when applicable); Nexus pass3 patches `prover/src/chips/instructions/load_store.rs::LoadStoreChip::fill_main_trace` and mutates `Ram1ValCur` at the store row for `nexus.semantic.memory.store_load_payload_flow`. |
+| me2 | me2.half_off1/me2.word_off*/me2.byte_any | sem.memory.address_alignment_consistency | op_idx, pc, opcode, mnemonic, effective_ptr, aligned_ptr, byte_offset, width | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | bucket_emitted | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.memory.address_pointer_consistency`; `sp1.semantic.memory.address_pointer_consistency` | See OpenVM-d7 and OpenVM-336 Memory/Time smokes below: pass | OpenVM-d7/OpenVM-336 emit true adapter memory_access records; d7/336 install passes mutate loadstore adapter `mem_ptr_limbs`. |
+| me3 | me3.lb_*/me3.lh_*/me3.lbu/me3.lhu | sem.memory.load_value_binding | op_idx, pc, opcode, mnemonic, effective_ptr, byte_offset, width, read_data | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | bucket_emitted | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.memory.value_payload_consistency`; `sp1.semantic.memory.value_payload_consistency` | See OpenVM-d7 and OpenVM-336 Memory/Time smokes below: pass | OpenVM-d7/OpenVM-336 derive sign/zero-extension cells from adapter memory_access read_data; d7 mutates loadstore/load-sign-extend core value columns. |
+| me4 | me4.sb_off*/me4.sh_off* | sem.memory.write_payload_consistency | op_idx, pc, opcode, mnemonic, effective_ptr, byte_offset, width, read_data, prev_data | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | bucket_emitted | unsupported | verified | verified | verified | bucket_emitted | `openvm.semantic.memory.value_payload_consistency`; `sp1.semantic.memory.value_payload_consistency` | See OpenVM-d7 and OpenVM-336 Memory/Time smokes below: pass | OpenVM-d7/OpenVM-336 emit subword store mask cells from adapter memory_access records; d7 mutates loadstore core `write_data`. Nexus emits subword SB/SH offset cells from executed `UniformTrace` store records; Nexus pass3 patches `LoadStoreChip::fill_main_trace` and mutates `Ram1ValPrev` at the store row for `nexus.semantic.memory.write_payload_consistency`. |
+| me5 | me5.reg_read/me5.reg_write/me5.mem_read/me5.mem_write | sem.memory.address_space_consistency | op_idx, pc, opcode, mnemonic, address_space, is_load, is_store | verified | semantic_injection_mapped | verified | bucket_emitted | trace_missing | trace_missing | trace_missing | trace_missing | unsupported | semantic_injection_mapped | bucket_emitted | semantic_injection_mapped | bucket_emitted | `openvm.semantic.memory.address_space_consistency` | See OpenVM-d7 and OpenVM-336 Memory/Time smokes below: pass | OpenVM-d7/OpenVM-336 emit load/store address-space direction cells from adapter memory_access records; d7 mutates loadstore adapter `mem_as`. |
+| me6 | me6.near_max_lw/me6.near_max_sw/me6.near_max_lh/me6.near_max_sb/me6.heap_boundary | sem.memory.address_boundary_range | op_idx, pc, opcode, mnemonic, effective_ptr, width, address_space | verified | semantic_injection_mapped | verified | semantic_injection_mapped | trace_missing | trace_missing | trace_missing | trace_missing | unsupported | semantic_injection_mapped | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.memory.address_pointer_consistency` | See OpenVM-d7 and OpenVM-336 Memory/Time smokes below: pass | OpenVM-d7/OpenVM-336 emit address-boundary cells only when adapter memory_access records actually reach boundary addresses; d7/336 install passes mutate loadstore adapter `mem_ptr_limbs`. |
+| me7 | me7.bss_zero/me7.data_loaded | sem.memory.initial_value_binding | op_idx, pc, opcode, mnemonic, effective_ptr, width, read_data, no_prior_write; memory_init seq/address/value for explicit nonzero init cells | bucket_emitted | bucket_emitted | bucket_emitted | trace_missing | bucket_emitted | bucket_emitted | bucket_emitted | trace_missing | unsupported | semantic_injection_mapped | bucket_emitted | verified | bucket_emitted |  | `BEAK_OPENVM_INIT_MEMORY='2:96:127' cargo run -q --bin beak-trace -- --bin '00000013' --print-buckets`: pass; no d7 initial-value hook mapped | First observed load with no prior same-address store is classified as zero vs nonzero initial value; OpenVM-d7/336 now also emit explicit nonzero `memory_init` cells. No d7 semantic injection mapping: no non-underconstrained initial-memory mutation row is identified. |
+| me7 | me7.rodata/me7.stack_uninit | sem.memory.initial_value_binding | ELF/load-region metadata, stack-region metadata | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | trace_missing | trace_missing | trace_missing |  |  | Adapter memory_access exposes values and addresses but not ELF/stack region provenance. |
+| me8 | me8.no_conflict | sem.memory.initial_value_binding | memory_init seq/address/value for explicit nonzero init cells | bucket_emitted | bucket_emitted | trace_missing | trace_missing | bucket_emitted | bucket_emitted | bucket_emitted | trace_missing | unsupported | bucket_emitted | trace_missing | trace_missing | trace_missing |  | `BEAK_OPENVM_INIT_MEMORY='2:96:127' cargo run -q --bin beak-trace -- --bin '00000013' --print-buckets`: pass | OpenVM-d7/336 emit non-conflicting explicit nonzero initialization cells from the initial-memory image; no d7 injection mapping because duplicate/non-underconstrained initial mutation rows are not exposed. |
+| me8 | me8.double_init | sem.memory.initial_value_binding | duplicate initialization writes before MemoryImage coalescing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | trace_missing | trace_missing | trace_missing |  |  | OpenVM-336 receives a coalesced `MemoryImage`, so duplicate initialization writes are lost before `set_initial_memory`; this needs earlier ELF/loader instrumentation. |
+| me9 | me9.off*/me9.adjacent_* | sem.memory.address_progression_consistency | op_idx, pc, opcode, mnemonic, effective_ptr, aligned_ptr, byte_offset, width | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | semantic_injection_mapped | semantic_injection_mapped | bucket_emitted | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.memory.address_pointer_consistency`; `sp1.semantic.memory.address_pointer_consistency` | See OpenVM-d7 and OpenVM-336 Memory/Time smokes below: pass | OpenVM-d7/OpenVM-336 emit byte-offset cells from adapter memory_access records; d7/336 install passes mutate loadstore adapter `mem_ptr_limbs`. |
+| me10 | me10.load/me10.store | sem.memory.kind_selector_consistency | op_idx, pc, opcode, mnemonic, is_load, is_store, width | verified | semantic_injection_mapped | verified | verified | verified | verified | verified | bucket_emitted | unsupported | semantic_injection_mapped | verified | verified | bucket_emitted | `openvm.semantic.memory.kind_selector_consistency`; `sp1.semantic.memory.kind_selector_consistency` | See OpenVM-d7 and OpenVM-336 Memory/Time smokes below: pass | OpenVM-d7/OpenVM-336 emit load/store direction cells from adapter memory_access records; d7 mutates loadstore core `is_load`. Nexus emits load/store direction cells from executed `UniformTrace` memory records; Nexus pass3 patches `LoadStoreChip::fill_main_trace` and flips `IsSw`/`IsLw` selector columns for `nexus.semantic.memory.kind_selector_consistency`. |
+| me11 | me11.written_cells/me11.read_only_cells | sem.memory.finalization_consistency | memory_finalization seq, op_idx, address_space, pointer, timestamp, values, was_initial, changed_from_initial | verified | semantic_injection_mapped | verified | trace_missing | bucket_emitted | bucket_emitted | bucket_emitted | trace_missing | unsupported | semantic_injection_mapped | trace_missing | verified | bucket_emitted | `openvm.semantic.memory.finalization_consistency` | d7 memory seed plus `--inject-kind openvm.semantic.memory.finalization_consistency --inject-step 18446744073709551615`: `semantic_injection_applied = true`; 336 prover smoke: pass | OpenVM-d7/336 emit persistent memory finalization rows from `MemoryController`; d7 mutates final `TimestampedValues` before boundary/merkle finalization. |
+| me11 | me11.untouched_cells | sem.memory.finalization_consistency | complete final memory universe / untouched finalization rows | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | unsupported | semantic_injection_mapped | trace_missing | trace_missing | trace_missing |  |  | The exposed `final_partition` covers accessed/finalized blocks; it does not enumerate untouched memory cells. |
+| ts1 | ts1.standard | sem.time.boundary_origin_consistency | op_idx, pc, timestamp, next_timestamp | verified | semantic_injection_mapped | verified | verified | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | trace_missing | verified | semantic_injection_mapped | bucket_emitted | bucket_emitted | `openvm.semantic.time.boundary_origin_consistency` | d7 injected smoke `./target/debug/beak-trace --bin "00100013" --inject-kind openvm.semantic.time.boundary_origin_consistency --inject-step 0 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. | d7 mutates connector boundary `state.timestamp` in `crates/vm/src/system/connector/mod.rs::generate_proving_ctx`; OpenVM-336 derives standard initial timestamp cell from the first executed instruction and mutates connector boundary timestamp. |
+| ts2 | ts2.small_gap/ts2.large_gap/ts2.consecutive | sem.time.monotonic_access_ordering | op_idx, pc, effective_ptr, address_space, timestamp, previous_timestamp, ts_diff | verified | semantic_injection_mapped | verified | verified | semantic_injection_mapped | verified | semantic_injection_mapped | trace_missing | trace_missing | semantic_injection_mapped | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.time.monotonic_access_ordering`; `sp1.semantic.time.monotonic_access_ordering` | See OpenVM-d7 and OpenVM-336 Memory/Time smokes below: pass | OpenVM-d7/f038 derive same-address timestamp gaps from adapter memory_access records; d7 mutates `MemoryAuxColsFactory::fill` prev-timestamp column after aux generation. Pico emits same-address timestamp buckets and verifies the paired `sem.memory.timestamped_load_path` hook with base inject kind `pico.semantic.memory.timestamped_load_path`; `ts2.cross_segment` remains trace_missing until segment-boundary memory continuity is exposed. |
+| ts2 | ts2.cross_segment | sem.time.monotonic_access_ordering | segment_idx/shard boundary plus memory access continuity | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing |  |  | Current trace does not expose cross-segment memory ordering boundaries. |
+| ts3 | ts3.standard | sem.time.boundary_origin_consistency | op_idx, pc, timestamp | verified | semantic_injection_mapped | verified | verified | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | trace_missing | verified | semantic_injection_mapped | bucket_emitted | bucket_emitted | `openvm.semantic.time.boundary_origin_consistency` | d7 injected smoke `./target/debug/beak-trace --bin "00100013" --inject-kind openvm.semantic.time.boundary_origin_consistency --inject-step 0 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. | d7 mutates connector boundary `state.timestamp` in `crates/vm/src/system/connector/mod.rs::generate_proving_ctx`; OpenVM-336 derives standard clk/pc initialization cell from the first executed instruction and mutates connector boundary timestamp. |
+| cf1 | cf1.blt*/cf1.bge*/cf1.bltu*/cf1.bgeu*/cf1.beq_equal/cf1.bne_not_equal/cf1.sign_flip | sem.exec.control_flow_binding | op_idx, pc, opcode, mnemonic, next_pc, target_pc, taken, chip-row operands for sign_flip | verified | semantic_injection_mapped | bucket_emitted | verified | semantic_injection_mapped | verified | verified | bucket_emitted | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.exec.control_flow_binding`; `jolt.semantic.exec.control_flow_binding` | d7 injected branch smoke `./target/debug/beak-trace --bin "00100113 00200193 00208463 00300193" --inject-kind openvm.semantic.exec.control_flow_binding --inject-step 18446744073709551615 --print-buckets` emitted `sem.exec.control_flow_binding` and reported `semantic_injection_applied = true`. Jolt baseline: `cargo run -q --bin beak-trace -- --bin "00100093 00200113 0020c463 00300193" --print-buckets` emitted `sem.exec.control_flow_binding`; injected Jolt smoke with `--inject-kind jolt.semantic.exec.control_flow_binding --inject-step 18446744073709551615` reported `injection_applied = true` but still hit the known Jolt memory panic, so not verified. | d7 mutates branch compare result in `extensions/rv32im/circuit/src/branch_eq/core.rs` and `branch_lt/core.rs`; branch taken/not-taken cells come from executed instruction next_pc. OpenVM-f038 emits branch buckets from executed instruction trace only; no f038 branch mutation hook is mapped. Jolt emits branch cells from executed `RVTraceRow` register operands and input-PC mapping; Jolt install pass mutates branch `JoltTraceStep.instruction_lookup` variants. |
+| cf2 | cf2.jal_rd/cf2.jal_x0/cf2.jalr_rd/cf2.jalr_x0 | sem.exec.control_flow_binding | op_idx, pc, opcode, mnemonic, rd, next_pc, link_pc | verified | semantic_injection_mapped | bucket_emitted | verified | semantic_injection_mapped | verified | semantic_injection_mapped | bucket_emitted | unsupported | bucket_emitted | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.exec.control_flow_binding` | d7 branch/JAL/JALR control-flow hooks are mapped; branch smoke above reported `semantic_injection_applied = true`, and JAL/JALR use the same base inject kind at `jal_lui/core.rs` and `jalr/core.rs`. | Link-register cells are emitted from executed JAL/JALR instruction trace; d7 mutates JAL/JALR link/target witness columns. OpenVM-f038 emits this bucket from executed instruction trace only; no f038 JAL/JALR mutation hook is mapped. |
+| cf3 | cf3.imm_zero/cf3.imm_pos/cf3.imm_neg | sem.exec.control_flow_binding | op_idx, pc, opcode, mnemonic, imm, next_pc | verified | semantic_injection_mapped | bucket_emitted | verified | semantic_injection_mapped | verified | semantic_injection_mapped | bucket_emitted | unsupported | bucket_emitted | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.exec.control_flow_binding` | d7 JALR hook is mapped in `extensions/rv32im/circuit/src/jalr/core.rs::fill_trace_row`; control-flow injected smoke reported applied-site evidence for the shared base kind. | JALR immediate-sign cells are observable from executed decode; d7/336 JALR hooks mutate target/link witness columns. OpenVM-f038 emits JALR immediate buckets from executed instruction trace only; no f038 JALR mutation hook is mapped. |
+| cf3 | cf3.clear_lsb/cf3.even/cf3.wrap | sem.exec.control_flow_binding | op_idx, pc, opcode, mnemonic, step_idx, row_op_idx, rs1_val, imm, target_before_lsb_clear, target_after_lsb_clear, next_pc | verified | semantic_injection_mapped | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | semantic_injection_mapped | semantic_injection_mapped | trace_missing | `openvm.semantic.exec.control_flow_binding` | d7 JALR chip-row emission includes `target_before_lsb_clear`; mapped JALR hook mutates `rd_data[0]` and `imm_sign` in `jalr/core.rs::fill_trace_row`. | OpenVM-f038 baseline JALR emits executed control-flow buckets, but the installed f038 source does not expose `target_before_lsb_clear` chip-row evidence; clear/even/wrap remain trace_missing. Risc0-98387806 emits JALR target cells from executed register state with `target_before_lsb_clear` / `target_after_lsb_clear`; the shared Risc0 control-flow prover hook maps this row and `cf3.even` has baseline plus injected smoke evidence, while `cf3.clear_lsb` still fails baseline witness generation before injection and wrap targets leave the installed code region. Pico currently emits JALR immediate cells only; `target_before_lsb_clear` / `target_after_lsb_clear` are not emitted in `projects/pico-45e74ccd62758c6d67239913956e749adaba261c/src/lib/trace.rs::cf3_cell`. |
+| cf4 | cf4.default_entry/cf4.custom_entry | sem.control.entrypoint_binding | first op_idx, first pc | verified | semantic_injection_mapped | bucket_emitted | verified | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | unsupported | verified | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.control.entrypoint_binding`; `jolt.semantic.control.entrypoint_binding` | d7 injected smoke `./target/debug/beak-trace --bin "00100013" --inject-kind openvm.semantic.control.entrypoint_binding --inject-step 0 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. Jolt baseline: `cargo run -q --bin beak-trace -- --bin 123450b7 --print-buckets` emitted `sem.control.entrypoint_binding`; injected Jolt smoke with `--inject-kind jolt.semantic.control.entrypoint_binding --inject-step 0` reported `injection_applied = true` but still hit the known Jolt memory panic, so not verified. | d7 mutates connector boundary `state.pc` in `crates/vm/src/system/connector/mod.rs::generate_proving_ctx`; first executed instruction PC is emitted as OpenVM instruction-index PC. OpenVM-f038 emits entrypoint buckets from executed instruction trace only; no f038 boundary-PC mutation hook is mapped. |
+| cf5 | cf5.halt/cf5.io_read/cf5.io_write/cf5.precompile/cf5.arg_zero/cf5.arg_max | sem.control.ecall_argument_decomposition | op_idx, pc, syscall_nr, a0-a7 register values | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | trace_missing | verified | verified | `<vm>.semantic.control.ecall_argument_decomposition` |  | OpenVM-f038 does not expose Linux-style ECALL syscall dispatch or a0-a7 argument reads; RV32 system encodings are transpiled before a raw ECALL obligation bucket is observable. |
+| cf6 | cf6.normal/cf6.after_branch_not_taken | sem.exec.control_flow_binding | op_idx, pc, opcode, mnemonic, next_pc, previous branch next_pc | verified | semantic_injection_mapped | bucket_emitted | verified | semantic_injection_mapped | verified | verified | bucket_emitted | unsupported | bucket_emitted | semantic_injection_mapped | verified | bucket_emitted | `openvm.semantic.exec.control_flow_binding` | d7 injected smoke `./target/debug/beak-trace --bin "00100113 00200193 00208463 00300193" --inject-kind openvm.semantic.exec.control_flow_binding --inject-step 18446744073709551615 --print-buckets` emitted the bucket and reported `semantic_injection_applied = true`. | Sequential and after-branch-not-taken cells use executed instruction trace; d7 branch/JAL/JALR hooks cover concrete control-flow witness mutation. OpenVM-f038 emits sequential buckets from executed instruction trace only; no f038 control-flow mutation hook is mapped. `near_segment_end` still needs segment metadata. |
+| cf6 | cf6.near_segment_end | sem.exec.control_flow_binding | segment boundary metadata | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | trace_missing | trace_missing | trace_missing |  |  | Current trace lacks segment-boundary position metadata; d7eab708 and Pico likewise have no segment-boundary position metadata in the emitted instruction/chip-row trace. |
+| cf7 | cf7.standard | sem.control.ecall_word_validity | op_idx, pc, opcode, mnemonic, raw instruction word | install_patch_available | trace_missing | trace_missing | bucket_emitted | bucket_emitted | bucket_emitted | semantic_injection_mapped | bucket_emitted | unsupported | trace_missing | semantic_injection_mapped | bucket_emitted | bucket_emitted | `openvm.semantic.control.ecall_word_validity` | Hook smoke: `cargo run -q --bin beak-trace -- --bin "00000073" --inject-kind openvm.semantic.control.ecall_word_validity --inject-step 0` printed the program-table mutation and reported `semantic_injection_applied = true` / `verify_app_proof failed: ChallengePhaseError`; baseline `00000073 --print-buckets` emitted 0 buckets because the RV system word transpiled to `unimp`. | OpenVM-f038 has no mapped program-table ECALL hook and no baseline raw-RV ECALL bucket; status remains trace_missing. Pico emits the executed ECALL word bucket when observable, but no real Pico install mutation hook exists for `pico.semantic.control.ecall_word_validity`, so it is bucket-only. |
+| bu1 | bu1.real_row | sem.lookup.boolean_multiplicity | step_idx, table_name, multiplicity, is_real | not_started | semantic_injection_mapped | trace_missing | verified | install_patch_available | install_patch_available | trace_missing | install_patch_available | trace_missing | semantic_injection_mapped | trace_missing | trace_missing | trace_missing | `<vm>.semantic.lookup.boolean_multiplicity` | d7 bitwise lookup smoke emitted `sem.lookup.boolean_multiplicity`; injected `openvm.semantic.lookup.boolean_multiplicity` replay reported `semantic_injection_applied = true`. Pico base-kind injected smoke reported `injection_applied=true` and failed with `Constraint verification failed`. | d7 pass emits nonzero bitwise lookup multiplicity rows from `BitwiseOperationLookupChip::generate_trace` and mutates `mult_range`/`mult_xor`; f038 does not expose boolean lookup multiplicity rows in the current trace. SP1 v4 byte-record/byte-table install patches exist for 39/7/811, but injected lookup replays still reported `semantic_injection_applied = false`; only 39/7 are install-patch-available and 811 remains trace-missing without a durable baseline bucket. |
+| pd1 | pd1.short_trace | sem.row.padding_interaction_send | step_idx, table_name, is_padding, interaction_kind | not_started | bucket_emitted | bucket_emitted | trace_missing | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | trace_missing | semantic_injection_mapped | trace_missing | bucket_emitted | bucket_emitted | `<vm>.semantic.row.padding_interaction_send` |  | f038 baseline smokes emit padding interaction-send buckets; no mutation hook is mapped. |
 
 ## Per-VM Notes
 
@@ -87,46 +87,69 @@ Add short notes here as pilots progress.
 
 ### sp1-39ab52fc
 
-- Status: full-completion pass completed for currently observable SP1 evidence.
-  Instruction-local semantic buckets now come only from oracle-executed
+- Status: central completion pass completed for currently observable SP1 v4
+  evidence. Instruction-local semantic buckets come only from oracle-executed
   instructions, not unexecuted input words.
-- Bucket-emitted from executed instruction trace with contract details:
-  `rf1`-`rf3`, `id1`-`id5`, `al1`-`al5`, `md3`-`md5`,
-  `cf1`-`cf4`, `cf6.normal/after_branch_not_taken`, `cf7`,
-  `ts1.standard`, `ts3.standard`, and SP1 memory-effect `me10`.
-- Verified SP1 semantic injection mappings:
-  `sem.exec.memory_effect_binding` maps to
-  `sp1.semantic.exec.memory_effect_binding`; baseline
-  `cargo run -q --bin beak-trace -- --bin "00012183" --print-buckets`
-  emitted `sem.exec.memory_effect_binding`, and injected
-  `cargo run -q --bin beak-trace -- --bin "00012183" --inject-kind sp1.semantic.exec.memory_effect_binding --inject-step 0 --print-buckets`
-  reported `semantic_injection_applied = true` with oracle/SP1 registers matching.
-- Verified SP1 installed hook replay:
-  `sem.memory.timestamped_load_path` maps to
-  `sp1.semantic.memory.timestamped_load_path`; injected replay on `00012183`
-  with `--inject-step 0` reported `semantic_injection_applied = true`.
-- Verified SP1 control-flow hook replay:
-  `sem.exec.control_flow_binding` maps to
-  `sp1.semantic.exec.control_flow_binding`; injected replay
-  `cargo run -q --bin beak-trace -- --bin "00100093 00108463 00200113" --inject-kind sp1.semantic.exec.control_flow_binding --inject-step 1 --print-buckets`
-  emitted the control-flow bucket and reported
-  `semantic_injection_applied = true`.
-- Install patch available but not verified:
-  `sem.lookup.boolean_multiplicity` maps to
-  `sp1.semantic.lookup.boolean_multiplicity`, and the install pass has a memory
-  write-record hook. A store/load smoke
-  `cargo run -q --bin beak-trace -- --bin "00002023 00002083" --print-buckets`
-  panicked in the installed SP1 memory timestamp ordering assertion before
-  buckets/final regs, so this remains `install_patch_available`.
+- Backend-mapped with real installed-source hooks and applied-site evidence:
+  CPU-row register/decode buckets `rf1`-`rf3`, `id1`, `id2`, `id4`, `id5`;
+  ALU/mul/div chip buckets `al1`-`al5`, `md1`-`md5`; memory buckets `me1`,
+  `me2`, `me3`, `me4`, `me9`, and `me10`; same-address timestamp bucket
+  `ts2`; and control-flow buckets `cf1`, `cf2`, `cf3.imm_*`, and
+  `cf6.normal/after_branch_not_taken`. The durable hooks are in
+  `pass4_v4_is_memory.py` CPU/ALU/mul/div/memory trace patches and the
+  `pass3_collection.py` executor next-PC patch.
+- Verified SP1 memory-effect row: baseline
+  `./target/debug/beak-trace --bin "00012183" --print-buckets` emitted
+  `sem.exec.memory_effect_binding`; injected
+  `./target/debug/beak-trace --bin "00012183" --inject-kind sp1.semantic.exec.memory_effect_binding --inject-step 18446744073709551615 --print-buckets`
+  reported `semantic_injection_applied = true` with proof verification still
+  accepted and oracle/SP1 registers matching. This is the documented
+  underconstrained SP1 v4 `is_memory` candidate.
+- Applied-site smokes for mapped hook families:
+  RF/decode
+  `./target/debug/beak-trace --bin "00010033" --inject-kind "sp1.semantic.decode.zero_register_immutability::site=op_a_access" --inject-step 18446744073709551615 --print-buckets`
+  reported `semantic_injection_applied = true` and prover rejection;
+  ALU
+  `./target/debug/beak-trace --bin "00100093 00108463 00200113" --inject-kind sp1.semantic.alu.immediate_limb_consistency --inject-step 18446744073709551615 --print-buckets`
+  reported applied with AddSub rejection; mul/div chip smokes for
+  `sp1.semantic.arithmetic.division_remainder_bound` on `020141b3` and
+  `sp1.semantic.arithmetic.product_decomposition` on `020101b3` reported
+  applied with DivRem/Mul rejection; control-flow injected replay on
+  `00100093 00108463 00200113` reported applied with proof accepted.
+- SP1 memory/timestamp smokes: baseline
+  `./target/debug/beak-trace --bin "000020b7 02a00113 0020a023 0000a183" --oracle-data-size-bytes 0x3000 --print-buckets`
+  emitted `me1`, `me2`, `me3`, `me8.no_conflict`, `me9`, `me10`, `me11`,
+  and `ts2` buckets. Injected replays with
+  `sp1.semantic.memory.address_pointer_consistency::site=addr_word`,
+  `sp1.semantic.memory.value_payload_consistency::site=access_value`,
+  `sp1.semantic.memory.store_load_payload_flow::site=access_value`,
+  `sp1.semantic.memory.kind_selector_consistency::site=kind_selector`, and
+  `sp1.semantic.time.monotonic_access_ordering::site=prev_clk` all reported
+  `semantic_injection_applied = true`, proof rejection, and matching oracle/SP1
+  registers. Subword smoke
+  `000020b7 02a00113 00208023 0000c183` emitted `me4` and applied the value
+  hook; first-load smoke `000020b7 0000a183` emitted `me7.bss_zero`.
+- SP1-39 `md1`/`md2` now use real DivRem event operands. Div-by-zero seed
+  `000010b7 0200c1b3` and signed-overflow seed
+  `800000b7 fff00113 0220c1b3` emitted the special-case bucket; injected
+  `sp1.semantic.arithmetic.special_case_consistency` replays reported
+  `semantic_injection_applied = true`, proof rejection, and matching registers.
+- Lookup status: byte lookup buckets can be emitted from executed records and
+  the install pass patches byte-record/byte-table counters, but injected
+  `sp1.semantic.lookup.boolean_multiplicity` replays on 39/7/811 still reported
+  `semantic_injection_applied = false`. `bu1` is therefore not mapped.
 - Trace-missing or unsupported cells:
-  `md1`/`md2` exact div-by-zero and signed-overflow cells need per-step operand
-  values; most `me1`-`me9`/`me11`, `ts2.cross_segment`, `cf5`,
+  `id3` is bucket-only; `me5`, exercised `me6` boundary rows,
+  `me7` provenance beyond first-load zero, `me8.double_init`,
+  `me11.untouched_cells`, `ts2.cross_segment`, `cf5`,
   `cf6.near_segment_end`, `rc1`-`rc4`, `bu2`-`bu6`, and `pd2`-`pd5`
-  need real SP1 memory accesses, memory init/finalization rows, syscall
-  argument values, range-check/flag decomposition rows, bus/permutation rows,
-  transcript data, or segment/table lifecycle metadata that the current target
-  trace does not expose.
-- Verification: `cargo check -q` passed in the target project with pre-existing
+  need stable address-space selectors, boundary seeds, provenance/duplicate
+  init evidence, complete final-memory enumeration, syscall argument values,
+  range-check/flag decomposition rows, bus/permutation rows, transcript data,
+  or segment/table lifecycle metadata that the current target trace does not
+  expose.
+- Verification: `cargo check -q`, `cargo build -q --bin beak-trace`, and
+  targeted smokes above passed in the target project with pre-existing
   installed-SP1 warnings. Required final test commands are recorded in the run
   log `agent_runs/vm-distributed/lead-sp1-39ab52fc.md`.
 
@@ -253,39 +276,62 @@ OpenVM-336 Control verifier smoke:
 
 ### openvm-d7eab708
 
-- Status: full-completion pass blocked only by documented missing VM evidence /
-  replay plumbing; no d7 cells are marked `semantic_injection_mapped` or
-  `verified`.
+- Status: deep memory/table instrumentation pass completed for observable d7
+  prover rows. Memory/value/address/finalization same-address timestamp, and
+  bitwise lookup multiplicity rows are `semantic_injection_mapped`; no d7 rows
+  are marked `verified` because the d7 backend path still runs tracegen-only
+  (`new_local_prover` through `generate_proving_ctx`) and does not run proof
+  verification.
 - Owner scope: `projects/openvm-d7eab708f43487b2e7c00524ffd611f835e8e6b5/` and
   `beak-py/projects/openvm-fuzzer/`.
 - Bucket emission: d7eab708 derives contract-style bucket details for executed
-  decode/register/control rows and re-anchored regzero chip rows. Table rows
-  are `bucket_emitted` for `rf1`, `rf2`, `rf3`, `id1`-`id5`, `al1`-`al5`,
-  `md1`-`md5`, `cf1`, `cf2`, `cf3`, `cf4`,
-  `cf6.normal/after_branch_not_taken`, `ts1`, `ts3`, and `pd1`.
-- Install-pass note: regzero chip-row emission now copies required `record.*`
-  fields before the mutable core-row borrow. Without that copy, tail emission
-  read overwritten trace columns and falsely reported DivRem nonzero-divisor
-  rows as zero-divisor rows.
-- Smoke:
-  `cargo run -q --bin beak-trace -- --bin "00100013" --print-buckets`,
-  `cargo run -q --bin beak-trace -- --bin "10000093" --print-buckets`, and
-  `cargo run -q --bin beak-trace -- --bin "00100113 00200193 00208463 00300193" --print-buckets`
-  all emitted the expected semantic buckets and matched oracle registers.
-- Additional smokes: ALU/mul/div/control seeds for `al2`-`al5`, `md1`-`md5`,
-  `cf2`, and `cf3` emitted their expected buckets. The nonzero DivRem smoke
-  `BEAK_OPENVM_DUMP_RAW_LOGS=1 cargo run -q --bin beak-trace -- --bin "000100b7 00001137 0220c1b3" --print-buckets`
-  showed true nonzero `b/c` limbs and emitted
-  `sem.arithmetic.division_remainder_bound`.
-- Injection status: no d7eab708 backend semantic mapping was added. The current
-  d7 backend/CLI path has no durable injected replay plumbing or reliable
-  applied-site signal, so bucket-emitted rows remain bucket-only under the
-  central contract.
-- Trace-missing gaps: `me1`-`me11` and `ts2` lack contract-level
-  `memory_access`, memory-init, memory-finalization, and same-address timestamp
-  lifecycle rows; `cf5`/`cf7` lack syscall argument / raw ECALL observability;
-  `cf6.near_segment_end` lacks segment-boundary metadata; `bu1` lacks lookup
-  multiplicity rows.
+  decode/register/control rows, re-anchored regzero chip rows, adapter
+  `memory_access` rows with source PC, explicit `memory_init` rows, persistent
+  `memory_finalization` rows, and bitwise lookup multiplicity rows.
+- Install-pass notes:
+  `beak-py/projects/openvm-fuzzer/openvm_fuzzer/passes/pass3_collection.py`
+  now patches d7 loadstore/load-sign-extend core rows, loadstore adapter rows,
+  memory timestamp aux rows, persistent memory lifecycle rows, and
+  `BitwiseOperationLookupChip::generate_trace`. `pass1_infrastructure.py`
+  adds `fuzzer_utils` to `openvm-circuit-primitives` so lookup table
+  instrumentation compiles.
+- Replayed install:
+  `cd beak-py && uv run openvm-fuzzer install --commit-or-branch bmk-regzero`
+  completed and refreshed
+  `beak-py/out/openvm-d7eab708f43487b2e7c00524ffd611f835e8e6b5/openvm-src`.
+- Baseline memory/table smoke:
+  `cargo run -q --bin beak-trace -- --bin "04000093 07f00113 0020a023 0000a183 002080a3 00108203" --print-buckets`
+  matched oracle registers and emitted 91 hits including
+  `sem.memory.store_load_payload_flow`, `sem.memory.address_alignment_consistency`,
+  `sem.memory.address_progression_consistency`,
+  `sem.memory.address_space_consistency`, `sem.memory.initial_value_binding`,
+  `sem.memory.finalization_consistency`, `sem.memory.kind_selector_consistency`,
+  `sem.memory.load_value_binding`, `sem.memory.write_payload_consistency`,
+  `sem.time.monotonic_access_ordering`, and `sem.lookup.boolean_multiplicity`.
+- Boundary/init smokes:
+  `cargo run -q --bin beak-trace -- --bin "200000b7 ff008093 0000a103" --print-buckets`
+  emitted `sem.memory.address_boundary_range` and matched registers.
+  `BEAK_OPENVM_INIT_MEMORY="2:96:127" cargo run -q --bin beak-trace -- --bin "00000013" --print-buckets`
+  emitted four `sem.memory.initial_value_binding` hits and matched registers.
+- Injected replay smokes on the memory seed above all reported
+  `semantic_injection_applied = true` and `UNDERCONSTRAINED CANDIDATE DETECTED`
+  for `openvm.semantic.memory.address_pointer_consistency`,
+  `openvm.semantic.memory.address_space_consistency`,
+  `openvm.semantic.memory.value_payload_consistency`,
+  `openvm.semantic.memory.store_load_payload_flow`,
+  `openvm.semantic.memory.kind_selector_consistency`,
+  `openvm.semantic.memory.finalization_consistency`,
+  `openvm.semantic.time.monotonic_access_ordering`, and
+  `openvm.semantic.lookup.boolean_multiplicity`.
+- Trace-missing gaps after audit: `me7.rodata`, `me7.stack_uninit`,
+  `me8.double_init`, and `me11.untouched_cells` still lack stable source rows.
+  d7 exposes a coalesced `SparseMemoryImage` and a touched/finalized memory
+  partition, not duplicate init writes or a complete untouched memory universe.
+  `ts2.cross_segment`, `cf5`, `cf6.near_segment_end`, and `cf7` remain
+  `trace_missing` because the d7 traces still lack segment-boundary memory
+  continuity, Linux-style syscall args/raw ECALL visibility, and near-segment
+  position metadata. `pd1` remains `bucket_emitted`; padding sample rows are
+  visible, but no stable prover/table mutation hook is mapped.
 
 ### openvm-f038f61d
 
@@ -400,8 +446,10 @@ OpenVM-336 Control verifier smoke:
 - Bucket-emitted from executed instruction trace with contract details:
   `rf1`-`rf3`, `id1`-`id5`, `al1`-`al5`, `md3`-`md5`,
   `cf1`-`cf4`, `cf6.normal/after_branch_not_taken`, `cf7`,
-  `ts1.standard`, `ts3.standard`, memory shape buckets `me2`, `me3`,
-  `me4`, `me9`, `me10`, and padding short-trace `pd1`.
+  `ts1.standard`, `ts3.standard`, mapped memory buckets `me1`-`me4`,
+  `me9`, `me10`, and `ts2.same-address`; bucket-only memory lifecycle buckets
+  `me7.bss_zero`, `me8.no_conflict`, `me11.written_cells/read_only_cells`;
+  and padding short-trace `pd1`.
 - Verified SP1 semantic injection mappings with real install hooks:
   `sem.exec.memory_effect_binding` maps to
   `sp1.semantic.exec.memory_effect_binding`; baseline
@@ -410,30 +458,39 @@ OpenVM-336 Control verifier smoke:
   `cargo run -q --bin beak-trace -- --bin "00012183" --inject-kind sp1.semantic.exec.memory_effect_binding --inject-step 0 --print-buckets`
   reported `semantic_injection_applied = true` with oracle/SP1 registers
   matching.
-- Verified SP1 timestamp hook replay:
-  `sem.memory.timestamped_load_path` maps to
-  `sp1.semantic.memory.timestamped_load_path`; injected replay on `00012183`
-  with `--inject-step 0` reported `semantic_injection_applied = true`.
+- Verified SP1 memory/timestamp hook replay:
+  `sem.memory.store_load_payload_flow`,
+  `sem.memory.address_alignment_consistency`,
+  `sem.memory.address_progression_consistency`,
+  `sem.memory.load_value_binding`, `sem.memory.write_payload_consistency`,
+  `sem.memory.kind_selector_consistency`, and
+  `sem.time.monotonic_access_ordering` map to the v4 memory-instruction trace
+  hook in `pass4_v4_is_memory.py`. Store/load smoke
+  `000020b7 02a00113 0020a023 0000a183` with `--oracle-data-size-bytes 0x3000`
+  and subword smoke `000020b7 02a00113 00208023 0000c183` both emitted the
+  expected buckets; injected replays for the address/value/store-load/kind/time
+  hook families reported `semantic_injection_applied = true`, proof rejection,
+  and matching oracle/SP1 registers.
 - Verified SP1 control-flow hook replay:
   `sem.exec.control_flow_binding` maps to
   `sp1.semantic.exec.control_flow_binding`; injected replay
   `cargo run -q --bin beak-trace -- --bin "00100093 00108463 00200113" --inject-kind sp1.semantic.exec.control_flow_binding --inject-step 1 --print-buckets`
   emitted control-flow buckets and reported `semantic_injection_applied = true`.
 - Install patch available but not verified:
-  `sem.lookup.boolean_multiplicity` maps to
-  `sp1.semantic.lookup.boolean_multiplicity`, and the SP1 install pass has a
-  memory write-record hook. Store/load smoke
-  `cargo run -q --bin beak-trace -- --bin "00002023 00002083" --inject-kind sp1.semantic.lookup.boolean_multiplicity --inject-step 0 --print-buckets`
-  panicked in the installed SP1 memory timestamp ordering assertion before
-  buckets/final regs, so this remains `install_patch_available`.
+  `sem.lookup.boolean_multiplicity` has byte-record/byte-table install patches,
+  but injected replay with
+  `sp1.semantic.lookup.boolean_multiplicity --inject-step 18446744073709551615`
+  reported `semantic_injection_applied = false`, so this remains
+  `install_patch_available` and is not promoted to mapped.
 - Trace-missing or unsupported cells:
-  `md1`/`md2` exact div-by-zero and signed-overflow cells need per-step operand
-  values; most `me1`, `me5`-`me8`, `me11`, `ts2.cross_segment`, `cf5`,
-  `cf6.near_segment_end`, `cf3.clear_lsb/even/wrap`, `rc1`-`rc4`,
-  `bu2`-`bu6`, and `pd2`-`pd5` need real SP1 memory address/value/provenance
-  records, memory init/finalization rows, syscall argument values,
-  range-check/flag decomposition rows, bus/permutation rows, transcript data,
-  or segment/table lifecycle metadata that this target trace does not expose.
+  `me5`, exercised `me6` boundary rows, `me7` provenance beyond first-load
+  zero, `me8.double_init`, `me11.untouched_cells`, `ts2.cross_segment`,
+  `cf5`, `cf6.near_segment_end`, `cf3.clear_lsb/even/wrap`, `rc1`-`rc4`,
+  `bu2`-`bu6`, and `pd2`-`pd5` need stable address-space selectors, boundary
+  seeds, provenance/duplicate init evidence, complete final-memory
+  enumeration, syscall argument values, range-check/flag decomposition rows,
+  bus/permutation rows, transcript data, or segment/table lifecycle metadata
+  that this target trace does not expose.
 - Verification commands and results are recorded in
   `agent_runs/vm-distributed/lead-sp1-7f643da1.md`.
 
@@ -447,8 +504,10 @@ OpenVM-336 Control verifier smoke:
 - Bucket-emitted from executed instruction trace with contract details:
   verified injection rows for `rf1`-`rf3`, `id1`, `id2`, `id4`, and `id5`;
   bucket-only coverage remains for `id3`, `al1`-`al5`, `md3`-`md5`, `cf4`,
-  `cf7`, `ts1`, `ts2.same-record`, `ts3`, memory-shape buckets `me2`, `me3`,
-  `me4`, `me9`, `me10`, and padding short-trace `pd1`.
+  `cf7`, `ts1`, `ts3`, mapped memory buckets `me1`-`me4`, `me9`, `me10`,
+  and `ts2.same-address`; bucket-only memory lifecycle buckets
+  `me7.bss_zero`, `me8.no_conflict`, `me11.written_cells/read_only_cells`;
+  and padding short-trace `pd1`.
 - Verified CPU-row semantic injection mappings with real installed hooks in
   `crates/core/machine/src/cpu/trace.rs::CpuChip::event_to_row`:
   `sem.decode.zero_register_immutability` ->
@@ -478,21 +537,34 @@ OpenVM-336 Control verifier smoke:
   matching. The concrete witness step for that load row is `2` because the
   earlier memory-effect hook consumes one witness step per CPU row before the
   CPU semantic hook.
+- SP1 memory/timestamp hook replay:
+  `sem.memory.store_load_payload_flow`,
+  `sem.memory.address_alignment_consistency`,
+  `sem.memory.address_progression_consistency`,
+  `sem.memory.load_value_binding`, `sem.memory.write_payload_consistency`,
+  `sem.memory.kind_selector_consistency`, and
+  `sem.time.monotonic_access_ordering` map to the v4 memory-instruction trace
+  hook in `pass4_v4_is_memory.py`. Store/load smoke
+  `000020b7 02a00113 0020a023 0000a183` with `--oracle-data-size-bytes 0x3000`
+  and subword smoke `000020b7 02a00113 00208023 0000c183` both emitted the
+  expected buckets; injected replays for the address/value/store-load/kind/time
+  hook families reported `semantic_injection_applied = true`, proof rejection,
+  and matching oracle/SP1 registers.
 - Verified control-flow hook replay:
   `sem.exec.control_flow_binding` maps to
   `sp1.semantic.exec.control_flow_binding`; injected replay
   `./target/debug/beak-trace --bin "00100093 00108463 00200113" --inject-kind "sp1.semantic.exec.control_flow_binding::family=branch" --inject-step 1 --print-buckets`
   emitted control-flow buckets and reported `semantic_injection_applied = true`.
-- Conservative injection status: timestamp/lookup runtime hooks from older SP1
-  passes are not present in this installed 811a3f2c source, so the backend does
-  not expose candidates for `sem.memory.timestamped_load_path` or
-  `sem.lookup.boolean_multiplicity`. Bus/lookup remains `trace_missing`.
-- Trace-missing or unsupported cells: `md1`/`md2` exact div-by-zero and
-  signed-overflow cells need per-step operand values; address/value-sensitive
-  memory cells (`me1`, `me5`, `me6`, most `me7`, `me8`, `me11`) need real SP1
-  memory address/value/provenance and finalization records; `ts2.cross_segment`,
-  `cf5`, `cf6.near_segment_end`, range-check/bus/permutation/transcript rows,
-  and broad padding lifecycle cells need VM evidence not exposed by this target.
+- Conservative lookup status: byte-record/byte-table install patches are
+  present, but injected `sp1.semantic.lookup.boolean_multiplicity` replay
+  reported `semantic_injection_applied = false`, and the memory/bitwise smokes
+  used here did not emit a durable 811 `bu1.real_row` baseline. Lookup remains
+  `trace_missing` for this snapshot.
+- Trace-missing or unsupported cells: `me5`, exercised `me6` boundary rows,
+  `me7` provenance beyond first-load zero, `me8.double_init`,
+  `me11.untouched_cells`, `ts2.cross_segment`, `cf5`, `cf6.near_segment_end`,
+  range-check/bus/permutation/transcript rows, and broad padding lifecycle
+  cells need VM evidence not exposed by this target.
 - Verification commands and results are recorded in
   `agent_runs/vm-distributed/lead-sp1-811a3f2c.md`.
 
@@ -561,8 +633,11 @@ OpenVM-336 Control verifier smoke:
   install-pass hooks in `pass5_legacy_recursion.py`, but they are not central
   `sem.*` obligation mappings and do not report contract-complete applied-site
   metadata.
-- Verification and command results are recorded in
-  `agent_runs/vm-distributed/lead-sp1-fb38df2c.md`.
+- Verification: `cargo check -q`, `cargo test -q`, and JSON smokes for
+  `--scenario load`, `--scenario jump`, and `--scenario bneinc` passed. Each
+  injected legacy run diverged while proof verification still succeeded, so the
+  legacy regressions remain covered outside the central matrix. Command results
+  are recorded in `agent_runs/vm-distributed/lead-sp1-fb38df2c.md`.
 
 ### sp1 snapshots
 
@@ -573,62 +648,87 @@ OpenVM-336 Control verifier smoke:
 
 ### jolt-e9caa235
 
-- Status: broad executed-row bucket pass complete for currently observable
-  Jolt `RVTraceRow` evidence. Instruction-local hits come only from rows whose
+- Status: deep instrumentation pass completed for currently reachable Jolt
+  witness/prover rows. Instruction-local hits still come only from rows whose
   executed PC maps back to the input program.
-- Bucket emission: `rf1`-`rf3`, `id1`-`id5`, `al1`-`al5`, `md1`-`md5`,
-  `cf1`-`cf4`, `cf6.normal/after_branch_not_taken`, `ts1.standard`,
-  `ts3.standard`, and Jolt memory-shape buckets `me2`, `me3`, `me4`, `me9`,
-  and `me10` when the matching executed memory row is present.
-- Injection status: `id3`, `cf1`, and `cf4` are now
-  `semantic_injection_mapped`. The Jolt install pass patches
-  `jolt-core/src/host/mod.rs::Program::trace` to mutate processed
-  `JoltTraceStep` witness inputs and set
-  `BEAK_JOLT_WITNESS_INJECTION_APPLIED`; `backend.rs` maps only matching
-  observed baseline buckets. They are not `verified` because baseline and
-  injected prover smokes still hit the known
-  `read_write_memory.rs` out-of-bounds panic before verification.
-- Remaining bucket-only groups inspected:
-  `jolt-core/src/jolt/vm/instruction_lookups.rs::generate_witness`
-  materializes instruction flags, subtable lookups, and lookup outputs from the
-  generic processed trace, but no narrow install hook was added yet for
-  register/decode/ALU/muldiv cells beyond the LUI and branch variants above.
-  `jolt-core/src/jolt/vm/bytecode.rs::generate_witness` exposes bytecode
-  rd/rs1/rs2/imm columns, but mapping those rows still needs a cell-specific
-  mutation design. `jolt-core/src/jolt/vm/read_write_memory.rs::generate_witness`
-  exposes memory values/timestamps, but the current harness panics in that
-  module before verifier evidence is available.
-- Trace-missing gaps: store-load payload flow (`me1`) lacks a valid same-address
-  store-then-load path in the current Jolt public I/O memory model; `me5`-`me8`,
-  `me11`, `ts2`, `cf5`, `cf6.near_segment_end`, `cf7`, bus/lookup, and padding
-  rows need address-space selectors, init/finalization/provenance, timestamps,
-  syscall arguments, raw ECALL execution, segment boundaries, or prover table
-  evidence not exposed by the current target trace.
-- Smoke evidence and command results are recorded in
-  `agent_runs/vm-distributed/lead-jolt-e9caa235.md`.
+- Prover smoke blocker fixed: Jolt read/write memory witness sizing now includes
+  trace RAM rows, bytecode initialization, input initialization, and a minimum
+  size. Baseline `123450b7 --print-buckets` now completes without the previous
+  `read_write_memory.rs` out-of-bounds panic.
+- Verified rows: `rf1`-`rf3`, `id1`-`id5`, `al1`-`al5`, `md1`,
+  `md3`-`md5`, `me2`, `me3`, `me4`, `me9`, `ts1`, `ts3`, `cf1`, and `cf4`.
+  `id3` is verified with underconstrained evidence: the applied
+  upper-immediate trace hook preserved registers and the proof verified.
+- Installed hook locations:
+  `jolt-core/src/host/mod.rs::Program::trace` mutates processed
+  `JoltTraceStep` rows for `id3`, `cf1`, `cf4`, `me5` address-space, and
+  `me10` kind-selector hooks;
+  `jolt-core/src/jolt/vm/read_write_memory.rs::generate_witness` mutates
+  register read/write, RAM address/value, initial/final memory values, and
+  timestamp columns for `rf1`-`rf3`, `me2`-`me7`, `me9`, `me11`, `ts1`,
+  `ts2.same-address`, and `ts3`;
+  `jolt-core/src/jolt/vm/bytecode.rs::generate_witness` mutates bytecode
+  `bitflags`, register, and immediate columns for `id1`, `id2`, `id4`, `id5`,
+  and `al1`;
+  `jolt-core/src/jolt/vm/instruction_lookups.rs::generate_witness` mutates
+  `lookup_outputs` rows for `al2`-`al5`, `md1`, and `md3`-`md5`, and mutates
+  lookup instruction flag bitvectors for `bu1`;
+  `jolt-core/src/jolt/vm/mod.rs::JoltTraceStep::pad` mutates padding rows for
+  `pd1`.
+  `projects/jolt-e9caa235.../src/lib/backend.rs` maps observed buckets to these
+  base inject kinds and keeps the env-armed injection live through
+  `prove_and_verify`.
+- Newly mapped rows from the table/prover pass: `me5`, `me6`, `me7.bss_zero`
+  / `me7.data_loaded`, `me10`, `me11.written_cells/read_only_cells`,
+  `me11.untouched_cells`, `ts2.same-address`, `bu1.real_row`, and `pd1`
+  padding rows. `me8.no_conflict` is bucket-emitted from initialization table
+  evidence but remains unmapped because no duplicate-init/provenance mutation
+  hook was added.
+- Install-patch-available rows: `md2` has the shared special-case lookup hook,
+  but DIV and REM overflow seeds panic in
+  `jolt-core/src/jolt/instruction/{div,rem}.rs` before a baseline bucket is
+  collectable. `me1` has a RAM value hook and backend mapping, but a valid
+  same-address store-then-load baseline remains unavailable in the current Jolt
+  public I/O memory model.
+- Current smoke behavior for new hooks: the repeated-load seed
+  `7fffc0b7 10008093 0000c183 0000c203` emits the new buckets. Injected
+  replays for address-space, address-boundary/address-pointer,
+  initial-value, finalization, timestamp monotonicity, and lookup booleanity all
+  reported `injection_applied = true` and failed prover checks. Kind-selector
+  and padding hooks also reported `injection_applied = true` but preserved
+  registers and verified, so they remain mapped/underconstrained rather than
+  verified.
+- Remaining bucket-only / trace-missing gaps: `cf2`, `cf3.imm_*`, and
+  `cf6.normal/after_branch_not_taken` remain bucket-only because no JAL/JALR or
+  sequential control-flow witness hook was added. `me7.rodata/stack_uninit`,
+  `me8.double_init`, `ts2.cross_segment`, `cf5`, `cf6.near_segment_end`,
+  `cf7`, and bus families still need ELF/stack provenance, duplicate-init
+  evidence before coalescing, segment continuity, syscall arguments, raw ECALL
+  execution, or bus/permutation table visibility not exposed by this snapshot.
 - Owner scope: `projects/jolt-e9caa23565dbb13019afe61a2c95f51d1999e286/` and
   `beak-py/projects/jolt-fuzzer/`.
 
 ### nexus-636ccb36
 
-- Status: expanded bucket pass complete for currently observable Nexus
-  `UniformTrace` evidence; memory buckets `me1`, `me4`, and `me10` are now
-  verified through real installed-source load/store prover hooks.
+- Status: deep instrumentation pass mapped high-value Nexus bucket-only rows to
+  real installed-source prover hooks. Existing verified rows remain `me1`,
+  `me4`, and `me10`.
 - Owner scope: `projects/nexus-636ccb360d0f4ae657ae4bb64e1e275ccec8826/` and
   `beak-py/projects/nexus-fuzzer/`.
 - Bucket emission now comes from executed Nexus `UniformTrace` steps and memory
   records, not raw unexecuted input words. Covered groups:
   `rf1`-`rf3`, `id1`-`id5`, `al1`-`al5`, `md1`-`md5`, `me1`-`me7`,
   `me9`, `me10`, `ts1`-`ts3` same-address cells, and `cf1`-`cf6`.
-- Backend candidate mapping for the old local Nexus trace-rewrite experiment
-  remains disabled. The current contract-valid mappings are
-  `nexus.semantic.memory.store_load_payload_flow`,
-  `nexus.semantic.memory.write_payload_consistency`, and
-  `nexus.semantic.memory.kind_selector_consistency`; pass3 patches
-  `prover/src/chips/instructions/load_store.rs::LoadStoreChip::fill_main_trace`
-  and reports applied-site evidence through
-  `BEAK_NEXUS_SEMANTIC_INJECTION_APPLIED` plus backend
-  `injection_applied = true`.
+- Newly mapped rows: `rf1`-`rf3`, `id1`-`id5`, `al1`-`al5`, `cf1`-`cf4`,
+  `cf6.normal/after_branch_not_taken`, `cf7`, `me2`, `me3`, `me6`, `me9`,
+  `ts1`, `ts2.same-address`, and `ts3`. Pass3 now patches concrete prover columns in
+  `cpu.rs`, `memory_check/register_mem_check.rs`, `instructions/{sll,srl,sra}.rs`,
+  `instructions/{slt,sltu,sub}.rs`, branch/JAL/JALR instruction chips, and
+  `instructions/load_store.rs`.
+- All new mapped smokes printed `BEAK_NEXUS_SEMANTIC_INJECTION_APPLIED` and
+  backend `injection_applied = true`; injected prover runs then failed
+  constraints or Nexus prover checks, so these rows are mapped but not
+  `verified`.
 - Smoke highlights: broad decode/ALU/control seed
   `00100093 00200113 002081b3 40218233 0020c463 00300293 00500313`
   emitted 50 hits; memory seed `00100093 00112023 00012183` emitted
@@ -644,15 +744,24 @@ OpenVM-336 Control verifier smoke:
   load/store selector. Each replay printed
   `BEAK_NEXUS_SEMANTIC_INJECTION_APPLIED`, reported
   `injection_applied = true`, and failed proof/verification as expected.
+- Remaining bucket-only rows and inspected missing mutation points:
+  `md1`-`md5` have executed `UniformTrace` buckets, but installed
+  `prover/src/machine.rs::BaseComponent` and
+  `prover/src/chips/instructions/` expose no mul/div/rem prover chip files in
+  this snapshot. `me5` is emitted as `main_memory` read/write only; inspected
+  `load_store.rs` and `register_mem_check.rs` use separate RAM/register check
+  paths with no address-space selector to mutate. `me7.bss_zero/data_loaded`
+  remains bucket-only because `extensions/ram_init_final.rs` rows are keyed by
+  final memory address order, not the `UniformTrace` `op_idx` emitted for the
+  first-load bucket.
 - Remaining trace-missing gaps: `me7.rodata/stack`, `me8`, `me11`,
-  `ts2.cross_segment`, `cf5`, `cf6.near_segment_end`, `cf7`, `bu1`, and
-  `pd1` need syscall, ELF/provenance, finalization, segment-boundary, or
-  prover/table rows not exposed by the current Nexus trace.
-- Missing concrete mutation points for future injection: decode/register/ALU,
-  mul/div, and control buckets still need installed-source hooks under
-  `prover/src/chips/instructions/*`; timestamp/order rows need hooks under
-  `prover/src/chips/memory_check/{timestamp,program_mem_check,register_mem_check}.rs`;
-  bus/lookup/padding remain blocked on table/padding interaction visibility.
+  `ts2.cross_segment`, `cf5`, `cf6.near_segment_end`, `bu1`, and
+  `pd1`. Inspected paths include `instructions/syscall.rs`,
+  `chips/decoding/type_sys.rs`, `extensions/ram_init_final.rs`,
+  `components/lookups.rs`, and extension padding/lookup trace code; current
+  backend buckets do not expose syscall argument vectors, raw-RV ECALL baseline
+  evidence, segment boundaries, bus multiplicity rows, or padding lifecycle
+  rows with stable row anchors.
 
 ### risc0 snapshots
 
@@ -663,24 +772,69 @@ OpenVM-336 Control verifier smoke:
   stops before ECALL.
 - Verified semantic mappings with baseline plus applied injected smoke:
   `sem.decode.zero_register_immutability`,
-  `sem.decode.operand_index_routing`, `sem.exec.op_selector_binding`,
-  `sem.arithmetic.division_remainder_bound`, and
+  `sem.decode.operand_index_routing`,
+  `sem.decode.rd_bit_decomposition`, `sem.decode.field_range`,
+  `sem.decode.immediate_sign_extension`,
+  `sem.decode.upper_immediate_materialization`,
+  `sem.decode.format_immediate_reassembly`,
+  `sem.exec.dest_binding`, `sem.exec.op_selector_binding`,
+  `sem.alu.immediate_limb_consistency`, `sem.alu.shift_mod32`,
+  `sem.alu.comparison_booleanity`, `sem.alu.subtraction_borrow_chain`,
+  `sem.alu.comparison_auxiliary_chain`,
+  `sem.arithmetic.special_case_consistency`,
+  `sem.arithmetic.division_remainder_bound`,
+  `sem.arithmetic.product_decomposition`,
+  `sem.arithmetic.signed_unsigned_product_correction`,
+  `sem.control.entrypoint_binding`,
+  `sem.exec.control_flow_binding`, and
   `sem.control.ecall_argument_decomposition`.
-- Bucket-only executed-instruction coverage: `rf3`, `id1`-`id3`, `id5`,
-  `al1`-`al5`, `md1`, `md2`, `md4`, `md5`, `me10`, `cf1`-`cf4`, `cf7`, `ts1`,
-  `ts3`, and `rc1.alu_result`. Risc0 now includes AL2 `rs2 >= 32` shift cells
-  and JALR target cells from executed register state when observed. `rf3`/`rc1`,
-  `sem.exec.control_flow_binding`, and `sem.exec.memory_effect_binding` have
-  Risc0 asset hooks or emitted buckets but are not backend-mapped because smoke
-  did not satisfy the contract: dest-binding panicked, control-flow reported
-  `injection_applied=false` or baseline witness-generation failure on a JALR
-  target seed, and memory seeds hit Risc0 access faults.
-- Trace-missing gaps for `risc0-98387806`: address/value/provenance memory
-  obligations `me1`-`me9`, `me11`, same-address and cross-segment timestamp
-  ordering `ts2`, `cf6.near_segment_end`, bus/lookup rows, and padding
-  lifecycle rows need Risc0 prover/table evidence not currently exposed.
+- Risc0-98387806 deep hook pass: `rf3`, `id1`-`id3`, `id5`,
+  `al1`-`al5`, `md1`, `md2`, `md4`, `md5`, `cf1`, `cf2`, `cf3` immediate
+  cells, `cf4`, and `cf6.normal/after_branch_not_taken` now have
+  baseline bucket evidence plus applied injected smokes. `cf3.clear_lsb/even/wrap`
+  is mapped to the shared Risc0 control-flow hook; `cf3.even` verifies with
+  `004000ef 00408067 00100113`, while `cf3.clear_lsb` still fails baseline
+  witness generation before injection (`set(row: 1209, col: 14, val:
+  0x0000000d) cur: 0x0000000c`) and wrap targets leave the installed code
+  region, so that row is not marked verified.
+- Risc0-98387806 memory/preflight hook pass: `me1`, `me2`, `me3`, `me4`,
+  `me6`, `me7.bss_zero/data_loaded`, `me9`, `me10`,
+  `me11.written_cells/read_only_cells`, and `ts2.same-address` now have
+  baseline bucket evidence plus applied injected smokes. The installed-source
+  hooks mutate Risc0 preflight load/store address decomposition, memory
+  transaction value/cycle/address fields, and load/store decoder selectors.
+  Main-memory `me5.mem_read/mem_write` is mapped through domain-specific
+  address-space hooks; the ECALL/register `me5.reg_*` bucket remains
+  bucket-only, so the coarse `me5` row is marked `semantic_injection_mapped`
+  rather than verified. Baseline smokes:
+  `cargo run -q --bin beak-trace -- --bin "000100b7 07f00113 0020a023 0000a183 002080a3 00108203" --print-buckets`
+  emitted `me1`, `me2`, `me3`, `me4`, `me5`, `me9`, `me11.written_cells`,
+  `ts2.same-address`, and `pd1`; `000100b7 0000a183` emitted
+  `me7.bss_zero` and `me11.read_only_cells`; `000100b7 0040a183` emitted
+  `me7.data_loaded`; `bffff0b7 0000a183` emitted `me6.near_max_lw`. Injected
+  replays for `risc0.semantic.memory.store_load_payload_flow` step 2,
+  `risc0.semantic.memory.address_pointer_consistency` steps 1/4,
+  `risc0.semantic.memory.value_payload_consistency` steps 4/5,
+  `risc0.semantic.memory.address_space_consistency::domain=mem_read/mem_write`
+  steps 1/4/5, `risc0.semantic.memory.kind_selector_consistency` steps 4/5,
+  `risc0.semantic.memory.initial_value_binding` step 1,
+  `risc0.semantic.memory.finalization_consistency` steps 1/5, and
+  `risc0.semantic.time.monotonic_access_ordering` step 5 all reported
+  `injection_applied = true` and verifier rejection.
+- Trace-missing gaps for `risc0-98387806`: `me7.rodata/stack_uninit`, `me8`
+  init-conflict cells, `me11.untouched_cells`, `ts2.cross_segment`,
+  `cf6.near_segment_end`, `bu1`, and padding interaction sends remain
+  trace_missing or bucket-only. Inspected paths
+  include `risc0/circuit/rv32im/src/trace.rs::TraceEvent`,
+  `execute/executor.rs`, `execute/r0vm.rs`, `execute/pager.rs`,
+  `prove/witgen/preflight.rs`, and lookup/padding table generation. Preflight
+  exposes accessed memory transactions and stable padding start rows, but not
+  ELF/stack provenance, duplicate pre-coalescing memory init events, a complete
+  untouched final-memory universe, cross-segment memory continuity, a padding
+  interaction-send column, or a lookup-table multiplicity/is_real row suitable
+  for `bu1`.
 - Smoke evidence is recorded in
-  `agent_runs/vm-distributed/lead-risc0-98387806.md`.
+  `agent_runs/vm-distributed/lead-risc0-98387806-deep-instrumentation.md`.
 - `risc0-c0db0713`: obligation pass ported the Risc0 executed-instruction
   trace path to the legacy commit. Instruction-local buckets now come from
   executed RV32IM oracle steps under the Risc0 split code/data layout, with
@@ -699,10 +853,25 @@ OpenVM-336 Control verifier smoke:
   `cf7`, `ts1`, `ts3`, and `rc1.alu_result`. JALR clear-LSB target cells are
   not claimed for c0db because the representative JALR backend smoke terminated
   before bucket output.
-- Trace-missing c0db gaps: address/value/provenance memory obligations
-  `me1`-`me9` except `me10`, memory finalization `me11`, same-address and
-  cross-segment timestamp ordering `ts2`, JALR target clear-LSB/even/wrap cells,
-  `cf6.near_segment_end`, bus/lookup rows, and padding lifecycle rows.
+- Bucket-only c0db preflight coverage: `me1`-`me7.bss_zero/data_loaded`,
+  `me9`, `me11.written_cells/read_only_cells`, `ts2.same-address`, and
+  `pd1.exec_padding`. The legacy asset exports `RawMemoryTransaction` rows and
+  preflight padding summaries; the backend joins them with actual
+  `InstructionStart` events and register-memory reads. Baseline smokes:
+  `cargo run -q --bin beak-trace -- --bin "000100b7 07f00113 0020a023 0000a183 002080a3 00108203" --print-buckets`
+  emitted `me1`, `me2`, `me3`, `me4`, `me5`, `me9`, `me11.written_cells`,
+  `ts2.same-address`, and `pd1`; `000100b7 0000a183` emitted
+  `me7.bss_zero` and `me11.read_only_cells`; `bffff0b7 0000a183` emitted
+  `me6.near_max_lw`.
+- Remaining trace-missing c0db gaps: `me7.rodata/stack_uninit`, `me8`,
+  `me11.untouched_cells`, `ts2.cross_segment`, JALR target
+  clear-LSB/even/wrap cells, `cf6.near_segment_end`, `bu1`, and broader
+  bus/lookup rows. Preflight exposes accessed memory transactions and padding
+  start rows, but not ELF/stack provenance, duplicate pre-coalescing memory init
+  events, a complete untouched final-memory universe, cross-segment memory
+  continuity, or lookup multiplicity/is_real rows. No semantic injection mapping
+  was added for the new memory/time/padding buckets because no stable legacy
+  mutation hook has been validated.
 - Smoke evidence is recorded in
   `agent_runs/vm-distributed/lead-risc0-c0db0713.md`.
 - Owner scope: the specific `projects/risc0-<commit>/` snapshot and

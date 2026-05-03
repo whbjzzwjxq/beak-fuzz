@@ -15,17 +15,28 @@ plus memory records:
 - Memory/time: `me1`-`me7`, `me9`, `me10`, `ts1`, same-address `ts2`, and
   `ts3` from `UniformTrace` memory records.
 
-Most groups are still bucket-only under the shared implementation contract.
-The exceptions are installed-source load/store prover hooks for:
+The following rows are now mapped to installed-source prover hooks, but are not
+marked verified because injected smokes fire the hook and then fail Nexus
+constraints/prover checks:
+
+- Register/decode/ALU/control: `rf1`-`rf3`, `id1`-`id5`, `al1`-`al5`,
+  `cf1`-`cf4`, `cf6.normal/after_branch_not_taken`, and `cf7`.
+- Memory/time: `me2`, `me3`, `me6`, `me9`, `ts1`, same-address `ts2`, and
+  `ts3`.
+
+The verified rows remain installed-source load/store prover hooks for:
 
 - `me1` / `nexus.semantic.memory.store_load_payload_flow`
 - `me4` / `nexus.semantic.memory.write_payload_consistency`
 - `me10` / `nexus.semantic.memory.kind_selector_consistency`
 
-The previous backend semantic candidate mapping for local trace-rewrite
-experiments remains disabled. Current mappings only target the pass3 hook in
-`prover/src/chips/instructions/load_store.rs::LoadStoreChip::fill_main_trace`
-and require applied-site evidence from the installed prover path.
+Current mappings target pass3 hooks in `prover/src/chips/cpu.rs`,
+`prover/src/chips/memory_check/register_mem_check.rs`,
+`prover/src/chips/instructions/{sll,srl,sra}.rs`,
+`prover/src/chips/instructions/{slt,sltu,sub}.rs`, branch/JAL/JALR chips, and
+`prover/src/chips/instructions/load_store.rs`. Each hook reports applied-site
+evidence from the installed prover path through
+`BEAK_NEXUS_SEMANTIC_INJECTION_APPLIED` and backend `injection_applied = true`.
 
 Minimal smoke checks:
 
@@ -36,16 +47,30 @@ cargo run --bin beak-trace -- --bin "08000093 00110023 00010183" --print-buckets
 cargo run --bin beak-trace -- --bin "fff00093 ffd0a103" --print-buckets
 ```
 
-Verified injected load/store smokes:
+Mapped injected smoke examples:
 
 ```bash
+cargo run --bin beak-trace -- --bin "00100013" --inject-kind nexus.semantic.decode.zero_register_immutability --inject-step 0 --print-buckets
+cargo run --bin beak-trace -- --bin "00100093 02000113 002091b3" --inject-kind nexus.semantic.alu.shift_mod32 --inject-step 2 --print-buckets
+cargo run --bin beak-trace -- --bin "008000ef 00100113 00200193" --inject-kind nexus.semantic.exec.control_flow_binding --inject-step 0 --print-buckets
+cargo run --bin beak-trace -- --bin "20100893 00000073" --inject-kind nexus.semantic.control.ecall_word_validity --inject-step 1 --print-buckets
+cargo run --bin beak-trace -- --bin "08000093 00110023 00010183" --inject-kind nexus.semantic.memory.address_alignment_consistency --inject-step 1 --print-buckets
 cargo run --bin beak-trace -- --bin "00100093 00112023 00012183" --inject-kind nexus.semantic.memory.store_load_payload_flow --inject-step 1 --print-buckets
 cargo run --bin beak-trace -- --bin "08000093 00110023 00010183" --inject-kind nexus.semantic.memory.write_payload_consistency --inject-step 1 --print-buckets
 cargo run --bin beak-trace -- --bin "00100093 00112023 00012183" --inject-kind nexus.semantic.memory.kind_selector_consistency --inject-step 1 --print-buckets
 ```
 
-Remaining gaps need Nexus installed-source instrumentation: ECALL syscall
-arguments/raw ECALL baseline, ELF/stack provenance, memory initialization and
-finalization rows, cross-segment ordering, decode/register/ALU/muldiv/control
-prover rows outside load/store, bus/lookup multiplicity rows, and
-padding/table lifecycle rows.
+Remaining gaps after inspection:
+
+- `md1`-`md5` stay bucket-only: installed `prover/src/machine.rs::BaseComponent`
+  and `prover/src/chips/instructions/` expose no mul/div/rem prover chip files
+  in this Nexus snapshot.
+- `me5` stays bucket-only: `load_store.rs` and
+  `memory_check/register_mem_check.rs` use separate RAM/register paths with no
+  address-space selector to mutate.
+- `me7.bss_zero/data_loaded` stays bucket-only: `extensions/ram_init_final.rs`
+  has init/final rows, but they are keyed by final memory address order rather
+  than the `UniformTrace` `op_idx` in the first-load bucket.
+- Trace-missing rows still need durable evidence for ECALL syscall arguments,
+  ELF/stack provenance, finalization/untouched memory, cross-segment ordering,
+  bus/lookup multiplicity, and padding lifecycle rows.

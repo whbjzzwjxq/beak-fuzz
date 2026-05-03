@@ -1,11 +1,16 @@
+use std::collections::{HashMap, HashSet};
+
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{semantic, BucketHit, Trace};
-use common::constants::RAM_START_ADDRESS;
-use common::rv_trace::{MemoryState, RVTraceRow, RV32IM};
+use common::constants::{RAM_START_ADDRESS, REGISTER_COUNT};
+use common::rv_trace::{JoltDevice, MemoryLayout, MemoryOp, MemoryState, RVTraceRow, RV32IM};
+use jolt::jolt_core::jolt::vm::JoltTraceStep;
+use jolt::RV32I;
 use serde_json::{json, Value};
 
 const BACKEND: &str = "jolt";
 const COMMIT: &str = "e9caa23565dbb13019afe61a2c95f51d1999e286";
+const RAM_OP_INDEX: usize = 3;
 
 pub struct JoltTrace {
     bucket_hits: Vec<BucketHit>,
@@ -48,7 +53,7 @@ fn push_row_hit_extra(
     cell_id: &str,
     extras: &[(&str, Value)],
 ) {
-    let mut details = std::collections::HashMap::from([
+    let mut details = HashMap::from([
         ("obligation_id".to_string(), json!(obligation_id)),
         ("cell_id".to_string(), json!(cell_id)),
         ("op_idx".to_string(), json!(op_idx)),
@@ -109,6 +114,30 @@ fn push_row_hit_extra(
         }
         details.insert("address_space".to_string(), json!("ram"));
     }
+    for (key, value) in extras {
+        details.insert((*key).to_string(), value.clone());
+    }
+    hits.push(BucketHit::semantic(bucket, details));
+}
+
+fn push_table_hit_extra(
+    hits: &mut Vec<BucketHit>,
+    bucket: semantic::SemanticBucket,
+    obligation_id: &str,
+    cell_id: &str,
+    trace_source: &str,
+    step_idx: u64,
+    extras: &[(&str, Value)],
+) {
+    let mut details = HashMap::from([
+        ("obligation_id".to_string(), json!(obligation_id)),
+        ("cell_id".to_string(), json!(cell_id)),
+        ("op_idx".to_string(), json!(step_idx)),
+        ("step_idx".to_string(), json!(step_idx)),
+        ("backend".to_string(), json!(BACKEND)),
+        ("commit".to_string(), json!(COMMIT)),
+        ("trace_source".to_string(), json!(trace_source)),
+    ]);
     for (key, value) in extras {
         details.insert((*key).to_string(), value.clone());
     }
@@ -491,14 +520,350 @@ fn me9_cell(address: u64) -> &'static str {
     }
 }
 
+fn memory_state_address(memory: &MemoryState) -> u64 {
+    match memory {
+        MemoryState::Read { address, .. } | MemoryState::Write { address, .. } => *address,
+    }
+}
+
+fn witness_index_for_address(address: u64, layout: &MemoryLayout) -> Option<u64> {
+    if address >= layout.input_start {
+        Some(REGISTER_COUNT + (address - layout.input_start) / 4)
+    } else if address < REGISTER_COUNT {
+        Some(address)
+    } else {
+        None
+    }
+}
+
+fn ram_op_address(op: MemoryOp) -> u64 {
+    match op {
+        MemoryOp::Read(address) | MemoryOp::Write(address, _) => address,
+    }
+}
+
+fn padded_trace_len(len: usize) -> usize {
+    len.max(1).next_power_of_two()
+}
+
+fn me6_cell(address: u64, width: u64, layout: &MemoryLayout) -> Option<&'static str> {
+    let end = address.checked_add(width.saturating_sub(1))?;
+    if end > u32::MAX as u64 || address > u32::MAX as u64 - width.saturating_sub(1) {
+        return Some("me6.near_max");
+    }
+    let boundaries = [
+        layout.stack_end,
+        layout.input_start,
+        layout.input_end,
+        layout.output_start,
+        layout.output_end,
+        RAM_START_ADDRESS,
+        layout.memory_end,
+    ];
+    boundaries
+        .into_iter()
+        .any(|boundary| address <= boundary && end >= boundary.saturating_sub(1))
+        .then_some("me6.heap_boundary")
+}
+
+fn build_initial_words(memory_init: &[(u64, u8)], io_device: &JoltDevice) -> HashMap<u64, u32> {
+    let mut bytes = HashMap::<u64, [u8; 4]>::new();
+    for (address, value) in memory_init {
+        let aligned = *address & !3;
+        bytes.entry(aligned).or_default()[(*address & 3) as usize] = *value;
+    }
+    for (offset, chunk) in io_device.inputs.chunks(4).enumerate() {
+        let mut word = [0u8; 4];
+        for (idx, byte) in chunk.iter().enumerate() {
+            word[idx] = *byte;
+        }
+        bytes.insert(io_device.memory_layout.input_start + (offset as u64 * 4), word);
+    }
+    bytes.into_iter().map(|(address, bytes)| (address, u32::from_le_bytes(bytes))).collect()
+}
+
+fn memory_witness_size(
+    trace: &[JoltTraceStep<RV32I>],
+    memory_init: &[(u64, u8)],
+    io_device: &JoltDevice,
+) -> usize {
+    let layout = &io_device.memory_layout;
+    let max_trace = trace
+        .iter()
+        .filter_map(|step| {
+            witness_index_for_address(ram_op_address(step.memory_ops[RAM_OP_INDEX]), layout)
+        })
+        .max()
+        .unwrap_or(0);
+    let max_init = build_initial_words(memory_init, io_device)
+        .keys()
+        .filter_map(|address| witness_index_for_address(*address, layout))
+        .max()
+        .unwrap_or(0);
+    max_trace.max(max_init).saturating_add(1).max(8).next_power_of_two() as usize
+}
+
+fn emit_initialization_hits(
+    hits: &mut Vec<BucketHit>,
+    memory_init: &[(u64, u8)],
+    io_device: &JoltDevice,
+) {
+    let layout = &io_device.memory_layout;
+    let initial_words = build_initial_words(memory_init, io_device);
+    if let Some((address, value, witness_index)) =
+        initial_words.iter().find_map(|(address, value)| {
+            witness_index_for_address(*address, layout).map(|idx| (*address, *value, idx))
+        })
+    {
+        push_table_hit_extra(
+            hits,
+            semantic::memory::INITIAL_VALUE_BINDING,
+            "me7",
+            "me7.data_loaded",
+            "read_write_memory.initialization",
+            witness_index,
+            &[
+                ("address", json!(address)),
+                ("witness_index", json!(witness_index)),
+                ("initial_value", json!(value)),
+                ("source_kind", json!("memory_init")),
+            ],
+        );
+    }
+
+    let mut seen = HashSet::<u64>::new();
+    let duplicate =
+        memory_init.iter().map(|(address, _)| *address).find(|address| !seen.insert(*address));
+    if let Some(address) = duplicate {
+        let witness_index = witness_index_for_address(address & !3, layout).unwrap_or(0);
+        push_table_hit_extra(
+            hits,
+            semantic::memory::INITIAL_VALUE_BINDING,
+            "me8",
+            "me8.double_init",
+            "read_write_memory.initialization",
+            witness_index,
+            &[
+                ("address", json!(address)),
+                ("witness_index", json!(witness_index)),
+                ("conflict_kind", json!("duplicate_byte")),
+            ],
+        );
+    } else if let Some((address, _)) = memory_init.first() {
+        let witness_index = witness_index_for_address(*address & !3, layout).unwrap_or(0);
+        push_table_hit_extra(
+            hits,
+            semantic::memory::INITIAL_VALUE_BINDING,
+            "me8",
+            "me8.no_conflict",
+            "read_write_memory.initialization",
+            witness_index,
+            &[
+                ("address", json!(address)),
+                ("witness_index", json!(witness_index)),
+                ("initialized_bytes", json!(memory_init.len())),
+                ("conflict_kind", json!("none")),
+            ],
+        );
+    }
+}
+
+fn emit_finalization_hits(
+    hits: &mut Vec<BucketHit>,
+    trace: &[JoltTraceStep<RV32I>],
+    memory_init: &[(u64, u8)],
+    io_device: &JoltDevice,
+) {
+    let layout = &io_device.memory_layout;
+    let memory_size = memory_witness_size(trace, memory_init, io_device);
+    let mut v_init = vec![0u32; memory_size];
+    for (address, value) in build_initial_words(memory_init, io_device) {
+        if let Some(idx) = witness_index_for_address(address, layout) {
+            if let Some(slot) = v_init.get_mut(idx as usize) {
+                *slot = value;
+            }
+        }
+    }
+
+    let mut v_final = v_init.clone();
+    let mut t_final = vec![0u64; memory_size];
+    let mut read_cells = HashSet::<usize>::new();
+    let mut written_cells = HashSet::<usize>::new();
+    let padded_len = padded_trace_len(trace.len());
+    for idx in 0..padded_len {
+        let op =
+            trace.get(idx).map(|step| step.memory_ops[RAM_OP_INDEX]).unwrap_or(MemoryOp::Read(0));
+        let Some(witness_index) = witness_index_for_address(ram_op_address(op), layout) else {
+            continue;
+        };
+        let witness_index = witness_index as usize;
+        if witness_index >= memory_size {
+            continue;
+        }
+        match op {
+            MemoryOp::Read(address) => {
+                t_final[witness_index] = idx as u64;
+                if idx < trace.len() && address >= layout.input_start {
+                    read_cells.insert(witness_index);
+                }
+            }
+            MemoryOp::Write(address, value) => {
+                v_final[witness_index] = value as u32;
+                t_final[witness_index] = idx as u64;
+                if idx < trace.len() && address >= layout.input_start {
+                    written_cells.insert(witness_index);
+                }
+            }
+        }
+    }
+
+    if let Some(idx) = written_cells
+        .iter()
+        .copied()
+        .find(|idx| v_final[*idx] != v_init[*idx])
+        .or_else(|| written_cells.iter().copied().next())
+    {
+        push_table_hit_extra(
+            hits,
+            semantic::memory::FINALIZATION_CONSISTENCY,
+            "me11",
+            "me11.written_cells",
+            "read_write_memory.finalization",
+            idx as u64,
+            &[
+                ("witness_index", json!(idx)),
+                ("initial_value", json!(v_init[idx])),
+                ("final_value", json!(v_final[idx])),
+                ("timestamp", json!(t_final[idx])),
+                ("cell_role", json!("written")),
+            ],
+        );
+    }
+
+    if let Some(idx) = read_cells
+        .iter()
+        .copied()
+        .find(|idx| !written_cells.contains(idx) && v_final[*idx] == v_init[*idx])
+    {
+        push_table_hit_extra(
+            hits,
+            semantic::memory::FINALIZATION_CONSISTENCY,
+            "me11",
+            "me11.read_only_cells",
+            "read_write_memory.finalization",
+            idx as u64,
+            &[
+                ("witness_index", json!(idx)),
+                ("initial_value", json!(v_init[idx])),
+                ("final_value", json!(v_final[idx])),
+                ("timestamp", json!(t_final[idx])),
+                ("cell_role", json!("read_only")),
+            ],
+        );
+    }
+
+    let preferred_untouched = witness_index_for_address(RAM_START_ADDRESS, layout)
+        .and_then(|idx| (idx as usize <= memory_size).then_some(idx as usize));
+    if let Some(idx) = preferred_untouched
+        .filter(|idx| *idx < memory_size && t_final[*idx] == 0)
+        .or_else(|| (REGISTER_COUNT as usize..memory_size).find(|idx| t_final[*idx] == 0))
+    {
+        push_table_hit_extra(
+            hits,
+            semantic::memory::FINALIZATION_CONSISTENCY,
+            "me11",
+            "me11.untouched_cells",
+            "read_write_memory.finalization",
+            idx as u64,
+            &[
+                ("witness_index", json!(idx)),
+                ("initial_value", json!(v_init[idx])),
+                ("final_value", json!(v_final[idx])),
+                ("timestamp", json!(t_final[idx])),
+                ("cell_role", json!("untouched")),
+            ],
+        );
+    }
+}
+
+fn emit_lookup_and_padding_hits(hits: &mut Vec<BucketHit>, trace: &[JoltTraceStep<RV32I>]) {
+    if let Some((idx, step)) =
+        trace.iter().enumerate().find(|(_, step)| step.instruction_lookup.is_some())
+    {
+        push_table_hit_extra(
+            hits,
+            semantic::lookup::BOOLEAN_MULTIPLICITY,
+            "bu1",
+            "bu1.real_row",
+            "instruction_lookups",
+            idx as u64,
+            &[
+                ("table_name", json!("instruction_lookups")),
+                ("multiplicity", json!(1)),
+                ("is_real", json!(true)),
+                ("instruction_lookup", json!(format!("{:?}", step.instruction_lookup))),
+            ],
+        );
+    }
+
+    let padded_len = padded_trace_len(trace.len());
+    if padded_len > trace.len() {
+        let first_padding = trace.len() as u64;
+        push_table_hit_extra(
+            hits,
+            semantic::lookup::BOOLEAN_MULTIPLICITY,
+            "bu1",
+            "bu1.padding_row",
+            "instruction_lookups",
+            first_padding,
+            &[
+                ("table_name", json!("instruction_lookups")),
+                ("multiplicity", json!(0)),
+                ("is_real", json!(false)),
+                ("padded_len", json!(padded_len)),
+            ],
+        );
+        for (cell_id, table_name) in [
+            ("pd1.exec_padding", "jolt_trace"),
+            ("pd1.mem_padding", "read_write_memory"),
+            ("pd1.lookup_padding", "instruction_lookups"),
+        ] {
+            push_table_hit_extra(
+                hits,
+                semantic::row::PADDING_INTERACTION_SEND,
+                "pd1",
+                cell_id,
+                table_name,
+                first_padding,
+                &[
+                    ("table_name", json!(table_name)),
+                    ("is_padding", json!(true)),
+                    ("first_padding_step", json!(first_padding)),
+                    ("unpadded_len", json!(trace.len())),
+                    ("padded_len", json!(padded_len)),
+                ],
+            );
+        }
+    }
+}
+
 impl JoltTrace {
     pub fn from_words(words: &[u32]) -> Result<Self, String> {
         Ok(Self { bucket_hits: Vec::new(), instruction_count: words.len() })
     }
 
     pub fn from_executed_rows(words: &[u32], rows: &[RVTraceRow]) -> Result<Self, String> {
+        let layout = MemoryLayout::new(&common::rv_trace::MemoryConfig::default());
+        Self::from_executed_rows_with_layout(words, rows, &layout)
+    }
+
+    fn from_executed_rows_with_layout(
+        words: &[u32],
+        rows: &[RVTraceRow],
+        layout: &MemoryLayout,
+    ) -> Result<Self, String> {
         let mut bucket_hits = Vec::new();
-        let mut seen_pcs = std::collections::HashSet::new();
+        let mut seen_pcs = HashSet::new();
         let mut executed = Vec::new();
 
         for (idx, row) in rows.iter().enumerate() {
@@ -516,12 +881,57 @@ impl JoltTrace {
             executed.push((idx, row, raw_word, decoded));
         }
 
-        let mut last_store = std::collections::HashMap::<(u64, u64), u64>::new();
+        let mut last_store = HashMap::<(u64, u64), u64>::new();
+        let mut last_access = HashMap::<(u64, u64), u64>::new();
+        let mut first_load = HashSet::<(u64, u64)>::new();
         let mut prev_branch_not_taken = false;
 
         for (exec_idx, (idx, row, raw_word, decoded)) in executed.iter().enumerate() {
             let op_idx = *idx as u64;
             let mnemonic = decoded.mnemonic.as_str();
+
+            for (slot, register_index) in [("rs1", decoded.rs1), ("rs2", decoded.rs2)] {
+                if let Some(register_index) = register_index {
+                    push_row_hit_extra(
+                        &mut bucket_hits,
+                        semantic::memory::ADDRESS_SPACE_CONSISTENCY,
+                        row,
+                        op_idx,
+                        *raw_word,
+                        decoded,
+                        "me5",
+                        "me5.reg_read",
+                        &[
+                            ("address_space", json!("register")),
+                            ("memory_op_slot", json!(slot)),
+                            ("register_index", json!(register_index)),
+                            ("witness_index", json!(register_index)),
+                            ("is_read", json!(true)),
+                            ("is_write", json!(false)),
+                        ],
+                    );
+                }
+            }
+            if let Some(register_index) = decoded.rd {
+                push_row_hit_extra(
+                    &mut bucket_hits,
+                    semantic::memory::ADDRESS_SPACE_CONSISTENCY,
+                    row,
+                    op_idx,
+                    *raw_word,
+                    decoded,
+                    "me5",
+                    "me5.reg_write",
+                    &[
+                        ("address_space", json!("register")),
+                        ("memory_op_slot", json!("rd")),
+                        ("register_index", json!(register_index)),
+                        ("witness_index", json!(register_index)),
+                        ("is_read", json!(false)),
+                        ("is_write", json!(true)),
+                    ],
+                );
+            }
 
             if exec_idx == 0 {
                 push_row_hit(
@@ -820,11 +1230,77 @@ impl JoltTrace {
 
             if let (Some(memory), Some(width)) = (row.memory_state.as_ref(), memory_width(mnemonic))
             {
-                let address = match memory {
-                    MemoryState::Read { address, .. } | MemoryState::Write { address, .. } => {
-                        *address
-                    }
-                };
+                let address = memory_state_address(memory);
+                let witness_index = witness_index_for_address(address, layout);
+                let is_memory_read = matches!(memory, MemoryState::Read { .. });
+                push_row_hit_extra(
+                    &mut bucket_hits,
+                    semantic::memory::ADDRESS_SPACE_CONSISTENCY,
+                    row,
+                    op_idx,
+                    *raw_word,
+                    decoded,
+                    "me5",
+                    if is_memory_read { "me5.mem_read" } else { "me5.mem_write" },
+                    &[
+                        ("address_space", json!("main_memory")),
+                        ("memory_op_slot", json!("ram")),
+                        ("witness_index", json!(witness_index)),
+                        ("width", json!(width)),
+                        ("is_read", json!(is_memory_read)),
+                        ("is_write", json!(!is_memory_read)),
+                    ],
+                );
+                if let Some(cell_id) = me6_cell(address, width, layout) {
+                    push_row_hit_extra(
+                        &mut bucket_hits,
+                        semantic::memory::ADDRESS_BOUNDARY_RANGE,
+                        row,
+                        op_idx,
+                        *raw_word,
+                        decoded,
+                        "me6",
+                        cell_id,
+                        &[
+                            ("address", json!(address)),
+                            ("witness_index", json!(witness_index)),
+                            ("width", json!(width)),
+                            (
+                                "boundary_kind",
+                                json!(cell_id.strip_prefix("me6.").unwrap_or(cell_id)),
+                            ),
+                        ],
+                    );
+                }
+                if let Some(prev_timestamp) = last_access.get(&(address, width)).copied() {
+                    let ts_diff = op_idx.saturating_sub(prev_timestamp);
+                    let cell_id = if ts_diff == 1 {
+                        "ts2.consecutive"
+                    } else if ts_diff <= 4 {
+                        "ts2.small_gap"
+                    } else {
+                        "ts2.large_gap"
+                    };
+                    push_row_hit_extra(
+                        &mut bucket_hits,
+                        semantic::time::MONOTONIC_ACCESS_ORDERING,
+                        row,
+                        op_idx,
+                        *raw_word,
+                        decoded,
+                        "ts2",
+                        cell_id,
+                        &[
+                            ("address", json!(address)),
+                            ("witness_index", json!(witness_index)),
+                            ("prev_timestamp", json!(prev_timestamp)),
+                            ("timestamp", json!(op_idx)),
+                            ("ts_diff", json!(ts_diff)),
+                            ("width", json!(width)),
+                        ],
+                    );
+                }
+                last_access.insert((address, width), op_idx);
                 push_row_hit(
                     &mut bucket_hits,
                     semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY,
@@ -869,6 +1345,28 @@ impl JoltTrace {
                     );
                 }
                 if is_load(mnemonic) {
+                    if !last_store.contains_key(&(address, width))
+                        && first_load.insert((address, width))
+                    {
+                        if let MemoryState::Read { value, .. } = memory {
+                            push_row_hit_extra(
+                                &mut bucket_hits,
+                                semantic::memory::INITIAL_VALUE_BINDING,
+                                row,
+                                op_idx,
+                                *raw_word,
+                                decoded,
+                                "me7",
+                                if *value == 0 { "me7.bss_zero" } else { "me7.data_loaded" },
+                                &[
+                                    ("address", json!(address)),
+                                    ("witness_index", json!(witness_index)),
+                                    ("initial_value", json!(value)),
+                                    ("source_kind", json!("first_load_no_prior_write")),
+                                ],
+                            );
+                        }
+                    }
                     if let Some(store_step_idx) = last_store.get(&(address, width)) {
                         push_row_hit_extra(
                             &mut bucket_hits,
@@ -1012,6 +1510,21 @@ impl JoltTrace {
         }
 
         Ok(Self { bucket_hits, instruction_count: executed.len() })
+    }
+
+    pub fn from_execution(
+        words: &[u32],
+        rows: &[RVTraceRow],
+        trace: &[JoltTraceStep<RV32I>],
+        memory_init: &[(u64, u8)],
+        io_device: &JoltDevice,
+    ) -> Result<Self, String> {
+        let mut derived =
+            Self::from_executed_rows_with_layout(words, rows, &io_device.memory_layout)?;
+        emit_initialization_hits(&mut derived.bucket_hits, memory_init, io_device);
+        emit_finalization_hits(&mut derived.bucket_hits, trace, memory_init, io_device);
+        emit_lookup_and_padding_hits(&mut derived.bucket_hits, trace);
+        Ok(derived)
     }
 
     pub fn instruction_count(&self) -> usize {

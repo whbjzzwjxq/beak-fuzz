@@ -883,6 +883,114 @@ impl GlobalState {
         );
     }
 
+    pub fn emit_memory_access(
+        &mut self,
+        row_op_idx: u64,
+        opcode: u32,
+        rs1_ptr: u32,
+        rd_rs2_ptr: u32,
+        imm: i32,
+        imm_sign: bool,
+        address_space: u32,
+        raw_ptr: u32,
+        effective_ptr: u32,
+        aligned_ptr: u32,
+        byte_offset: u32,
+        width: u32,
+        is_load: bool,
+        is_store: bool,
+        needs_write: bool,
+        timestamp: u32,
+        read_data: Vec<u32>,
+        prev_data: Vec<u32>,
+        write_data: Vec<u32>,
+    ) {
+        let micro_op = json!({
+            "type": "memory_access",
+            "data": {
+                "seq": self.seq,
+                "step_idx": self.step_idx,
+                "op_idx": self.op_idx_in_step,
+                "row_op_idx": row_op_idx,
+                "opcode": opcode,
+                "rs1_ptr": rs1_ptr,
+                "rd_rs2_ptr": rd_rs2_ptr,
+                "imm": imm,
+                "imm_sign": imm_sign,
+                "address_space": address_space,
+                "raw_ptr": raw_ptr,
+                "effective_ptr": effective_ptr,
+                "aligned_ptr": aligned_ptr,
+                "byte_offset": byte_offset,
+                "width": width,
+                "is_load": is_load,
+                "is_store": is_store,
+                "needs_write": needs_write,
+                "timestamp": timestamp,
+                "read_data": read_data,
+                "prev_data": prev_data,
+                "write_data": write_data,
+            }
+        });
+        self.op_idx_in_step += 1;
+        self.emit_micro_op(micro_op);
+    }
+
+    pub fn emit_memory_access_with_pc(
+        &mut self,
+        pc: u32,
+        row_op_idx: u64,
+        opcode: u32,
+        rs1_ptr: u32,
+        rd_rs2_ptr: u32,
+        imm: i32,
+        imm_sign: bool,
+        address_space: u32,
+        raw_ptr: u32,
+        effective_ptr: u32,
+        aligned_ptr: u32,
+        byte_offset: u32,
+        width: u32,
+        is_load: bool,
+        is_store: bool,
+        needs_write: bool,
+        timestamp: u32,
+        read_data: Vec<u32>,
+        prev_data: Vec<u32>,
+        write_data: Vec<u32>,
+    ) {
+        let micro_op = json!({
+            "type": "memory_access",
+            "data": {
+                "seq": self.seq,
+                "step_idx": self.step_idx,
+                "op_idx": self.op_idx_in_step,
+                "pc": pc,
+                "row_op_idx": row_op_idx,
+                "opcode": opcode,
+                "rs1_ptr": rs1_ptr,
+                "rd_rs2_ptr": rd_rs2_ptr,
+                "imm": imm,
+                "imm_sign": imm_sign,
+                "address_space": address_space,
+                "raw_ptr": raw_ptr,
+                "effective_ptr": effective_ptr,
+                "aligned_ptr": aligned_ptr,
+                "byte_offset": byte_offset,
+                "width": width,
+                "is_load": is_load,
+                "is_store": is_store,
+                "needs_write": needs_write,
+                "timestamp": timestamp,
+                "read_data": read_data,
+                "prev_data": prev_data,
+                "write_data": write_data,
+            }
+        });
+        self.op_idx_in_step += 1;
+        self.emit_micro_op(micro_op);
+    }
+
     pub fn emit_memory_init(&mut self, op_idx: u64, address_space: u32, pointer: u32, value: u32) {
         let micro_op = json!({
             "type": "memory_init",
@@ -918,6 +1026,27 @@ impl GlobalState {
                 "values": values,
                 "was_initial": was_initial,
                 "changed_from_initial": changed_from_initial,
+            }
+        });
+        self.emit_micro_op(micro_op);
+    }
+
+    pub fn emit_lookup_multiplicity(
+        &mut self,
+        table_name: &str,
+        row_idx: u64,
+        multiplicity: u32,
+        is_real: bool,
+    ) {
+        let micro_op = json!({
+            "type": "lookup_multiplicity",
+            "data": {
+                "seq": self.seq,
+                "step_idx": row_idx,
+                "table_name": table_name,
+                "row_idx": row_idx,
+                "multiplicity": multiplicity,
+                "is_real": is_real,
             }
         });
         self.emit_micro_op(micro_op);
@@ -1366,6 +1495,98 @@ pub fn emit_memory_interaction(
     state.emit_memory_interaction(direction, row_id, address_space, pointer, data, timestamp);
 }
 
+pub fn emit_memory_access(
+    row_op_idx: u64,
+    opcode: u32,
+    rs1_ptr: u32,
+    rd_rs2_ptr: u32,
+    imm: i32,
+    imm_sign: bool,
+    address_space: u32,
+    raw_ptr: u32,
+    effective_ptr: u32,
+    aligned_ptr: u32,
+    byte_offset: u32,
+    width: u32,
+    is_load: bool,
+    is_store: bool,
+    needs_write: bool,
+    timestamp: u32,
+    read_data: Vec<u32>,
+    prev_data: Vec<u32>,
+    write_data: Vec<u32>,
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_memory_access(
+        row_op_idx,
+        opcode,
+        rs1_ptr,
+        rd_rs2_ptr,
+        imm,
+        imm_sign,
+        address_space,
+        raw_ptr,
+        effective_ptr,
+        aligned_ptr,
+        byte_offset,
+        width,
+        is_load,
+        is_store,
+        needs_write,
+        timestamp,
+        read_data,
+        prev_data,
+        write_data,
+    );
+}
+
+pub fn emit_memory_access_with_pc(
+    pc: u32,
+    row_op_idx: u64,
+    opcode: u32,
+    rs1_ptr: u32,
+    rd_rs2_ptr: u32,
+    imm: i32,
+    imm_sign: bool,
+    address_space: u32,
+    raw_ptr: u32,
+    effective_ptr: u32,
+    aligned_ptr: u32,
+    byte_offset: u32,
+    width: u32,
+    is_load: bool,
+    is_store: bool,
+    needs_write: bool,
+    timestamp: u32,
+    read_data: Vec<u32>,
+    prev_data: Vec<u32>,
+    write_data: Vec<u32>,
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_memory_access_with_pc(
+        pc,
+        row_op_idx,
+        opcode,
+        rs1_ptr,
+        rd_rs2_ptr,
+        imm,
+        imm_sign,
+        address_space,
+        raw_ptr,
+        effective_ptr,
+        aligned_ptr,
+        byte_offset,
+        width,
+        is_load,
+        is_store,
+        needs_write,
+        timestamp,
+        read_data,
+        prev_data,
+        write_data,
+    );
+}
+
 pub fn emit_memory_init(op_idx: u64, address_space: u32, pointer: u32, value: u32) {
     let mut state = GLOBAL_STATE.lock().unwrap();
     state.emit_memory_init(op_idx, address_space, pointer, value);
@@ -1390,6 +1611,16 @@ pub fn emit_memory_finalization(
         was_initial,
         changed_from_initial,
     );
+}
+
+pub fn emit_lookup_multiplicity(
+    table_name: &str,
+    row_idx: u64,
+    multiplicity: u32,
+    is_real: bool,
+) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_lookup_multiplicity(table_name, row_idx, multiplicity, is_real);
 }
 
 pub fn emit_range_check_interaction(

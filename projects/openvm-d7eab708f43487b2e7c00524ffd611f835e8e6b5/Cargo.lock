@@ -2306,6 +2306,7 @@ name = "openvm-circuit-primitives"
 version = "1.4.2"
 dependencies = [
  "derive-new 0.6.0",
+ "fuzzer_utils",
  "itertools 0.14.0",
  "num-bigint 0.4.6",
  "num-traits",

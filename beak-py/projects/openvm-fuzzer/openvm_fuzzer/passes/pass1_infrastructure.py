@@ -177,6 +177,18 @@ def _rv32im_circuit_add_deps(*, openvm_install_path: Path) -> None:
         )
 
 
+def _circuit_primitives_add_deps(*, openvm_install_path: Path) -> None:
+    primitives_cargo = openvm_install_path / "crates" / "circuits" / "primitives" / "Cargo.toml"
+    if not primitives_cargo.exists():
+        return
+    primitives_contents = primitives_cargo.read_text()
+    if "fuzzer_utils.workspace = true" not in primitives_contents:
+        replace_in_file(
+            primitives_cargo,
+            [(r"\[dependencies\]", "[dependencies]\nfuzzer_utils.workspace = true")],
+        )
+
+
 def _patch_instructions_opcode_serde(*, openvm_install_path: Path) -> None:
     """Add Serialize and Deserialize to Opcode enums in rv32im transpiler instructions.rs.
 
@@ -209,5 +221,5 @@ def apply(*, openvm_install_path: Path, commit_or_branch: str) -> None:
     _add_fuzzer_utils_to_workspace(openvm_install_path=openvm_install_path)
     _vm_add_serde_json_dep(openvm_install_path=openvm_install_path)
     _rv32im_circuit_add_deps(openvm_install_path=openvm_install_path)
+    _circuit_primitives_add_deps(openvm_install_path=openvm_install_path)
     _patch_instructions_opcode_serde(openvm_install_path=openvm_install_path)
-

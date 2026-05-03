@@ -25,13 +25,22 @@ host syscall path even though the shared oracle stops before ECALL.
   `rf1`-`rf3`, `id1`-`id5`, `al1`-`al5`, `md1`-`md5`, `me10`, `cf1`-`cf7`
   except JALR clear-LSB/even/wrap target cells, `ts1`, `ts3`, and
   `rc1.alu_result`.
+- Bucket-only preflight memory/padding coverage:
+  `me1`-`me7.bss_zero/data_loaded`, `me9`,
+  `me11.written_cells/read_only_cells`, `ts2.same-address`, and
+  `pd1.exec_padding`. These buckets come from legacy Risc0 prover
+  `RawMemoryTransaction` rows joined with actual `InstructionStart` events and
+  register-memory reads.
 
 ## Gaps
 
-- Address/value memory obligations (`me1`-`me9` except `me10`, and `me11`) lack
-  a Risc0 `memory_access`, init, or finalization record with contract fields.
-- `ts2`, `cf6.near_segment_end`, `bu1`, and padding obligations need segment,
-  bus, lookup, transcript, or table-lifecycle rows not currently exposed.
+- No semantic injection mapping is claimed for the new memory/timestamp/padding
+  buckets: no stable legacy prover mutation hook has been validated for the
+  relevant preflight memory rows, timestamp links, or padding rows.
+- `me7.rodata/stack_uninit`, `me8`, `me11.untouched_cells`,
+  `ts2.cross_segment`, `cf6.near_segment_end`, and `bu1` need provenance,
+  duplicate-init, untouched final-memory, cross-segment continuity, or lookup
+  multiplicity/is_real rows not currently exposed.
 - Representative JALR target-cell replay terminates before bucket output on
   c0db, so `cf3.clear_lsb`, `cf3.even`, and `cf3.wrap` remain `trace_missing`.
 
@@ -61,6 +70,16 @@ host syscall path even though the shared oracle stops before ECALL.
   emitted `sem.memory.kind_selector_consistency`; backend execution then
   reported `StoreAccessFault`, so no memory-effect injection mapping is
   claimed.
+- Memory/preflight smoke:
+  `cargo run -q --bin beak-trace -- --bin "000100b7 07f00113 0020a023 0000a183 002080a3 00108203" --print-buckets`
+  emitted `me1`, `me2`, `me3`, `me4`, `me5`, `me9`,
+  `me11.written_cells`, `ts2.same-address`, and `pd1`.
+- Initial/read-only memory smoke:
+  `cargo run -q --bin beak-trace -- --bin "000100b7 0000a183" --print-buckets`
+  emitted `me7.bss_zero`, `me11.read_only_cells`, and `pd1`.
+- Boundary memory smoke:
+  `cargo run -q --bin beak-trace -- --bin "bffff0b7 0000a183" --print-buckets`
+  emitted `me6.near_max_lw`.
 - Branch/control smoke:
   `cargo run -q --bin beak-trace -- --bin "00100093 00200113 0020c463 00300193" --print-buckets`
   emitted a BLT not-taken `sem.exec.control_flow_binding` bucket and

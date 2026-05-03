@@ -24,6 +24,47 @@ def _legacy_cpu_trace_candidates(sp1_install_path: Path) -> list[Path]:
     return out
 
 
+def _memory_instruction_trace_candidates(sp1_install_path: Path) -> list[Path]:
+    out: list[Path] = []
+    for path in [
+        sp1_install_path
+        / "crates"
+        / "core"
+        / "machine"
+        / "src"
+        / "memory"
+        / "instructions"
+        / "trace.rs"
+    ]:
+        if path.exists():
+            out.append(path)
+    return out
+
+
+def _byte_trace_candidates(sp1_install_path: Path) -> list[Path]:
+    out: list[Path] = []
+    for path in [sp1_install_path / "crates" / "core" / "machine" / "src" / "bytes" / "trace.rs"]:
+        if path.exists():
+            out.append(path)
+    return out
+
+
+def _byte_event_candidates(sp1_install_path: Path) -> list[Path]:
+    out: list[Path] = []
+    for path in [sp1_install_path / "crates" / "core" / "executor" / "src" / "events" / "byte.rs"]:
+        if path.exists():
+            out.append(path)
+    return out
+
+
+def _execution_record_candidates(sp1_install_path: Path) -> list[Path]:
+    out: list[Path] = []
+    for path in [sp1_install_path / "crates" / "core" / "executor" / "src" / "record.rs"]:
+        if path.exists():
+            out.append(path)
+    return out
+
+
 def _ensure_fuzzer_utils_import(path: Path, contents: str) -> str:
     if "use fuzzer_utils;" not in contents:
         prepend_file(path, "#[allow(unused_imports)]\nuse fuzzer_utils;\n")
@@ -382,6 +423,217 @@ def _patch_v4_divrem(path: Path) -> None:
     path.write_text(_insert_before_once(contents, anchor, insert, guard))
 
 
+def _patch_v4_memory_instructions(path: Path) -> None:
+    contents = _ensure_fuzzer_utils_import(path, path.read_text())
+
+    helper_guard = "// BEAK-INSERT: sp1.v4.memory_instr_semantic_injection.helpers"
+    if helper_guard not in contents:
+        helper_anchor = "impl MemoryInstructionsChip {\n"
+        helper_insert = """// BEAK-INSERT: sp1.v4.memory_instr_semantic_injection.helpers
+    fn beak_memory_semantic_injection_kind(step: u64) -> Option<String> {
+        [
+            "sp1.semantic.memory.address_pointer_consistency",
+            "sp1.semantic.memory.value_payload_consistency",
+            "sp1.semantic.memory.store_load_payload_flow",
+            "sp1.semantic.memory.kind_selector_consistency",
+            "sp1.semantic.time.monotonic_access_ordering",
+        ]
+        .iter()
+        .find_map(|kind| fuzzer_utils::matching_injection_kind(kind, step))
+    }
+
+    fn beak_mutate_memory_semantic_row<F: PrimeField32>(
+        cols: &mut MemoryInstructionsColumns<F>,
+        inject_kind: &str,
+    ) {
+        let site = fuzzer_utils::injection_variant_value(inject_kind, "site").unwrap_or("auto");
+        match site {
+            "addr_aligned" => {
+                cols.addr_aligned = cols.addr_aligned + F::one();
+            }
+            "access_value" => {
+                cols.memory_access.access.value[0] =
+                    cols.memory_access.access.value[0] + F::one();
+            }
+            "prev_value" => {
+                cols.memory_access.prev_value[0] = cols.memory_access.prev_value[0] + F::one();
+            }
+            "unsigned_mem_val" => {
+                cols.unsigned_mem_val[0] = cols.unsigned_mem_val[0] + F::one();
+            }
+            "kind_selector" => {
+                cols.is_lw = F::one() - cols.is_lw;
+            }
+            "prev_clk" => {
+                cols.memory_access.access.prev_clk = cols.memory_access.access.prev_clk + F::one();
+            }
+            _ => {
+                cols.addr_word[0] = cols.addr_word[0] + F::one();
+            }
+        }
+    }
+    // BEAK-INSERT-END
+
+"""
+        contents = _insert_after_once(contents, helper_anchor, helper_insert, helper_guard)
+
+    guard = "// BEAK-INSERT: sp1.v4.memory_instr_semantic_injection.row"
+    insert = """
+
+                            // BEAK-INSERT: sp1.v4.memory_instr_semantic_injection.row
+                            let beak_step = idx as u64;
+                            if let Some(beak_kind) =
+                                Self::beak_memory_semantic_injection_kind(beak_step)
+                            {
+                                Self::beak_mutate_memory_semantic_row(cols, beak_kind.as_str());
+                            }
+                            // BEAK-INSERT-END"""
+    anchors = [
+        "                            self.event_to_row(event, cols, &mut blu);",
+        """                            self.event_to_row(
+                                event,
+                                cols,
+                                &input.nonce_lookup,
+                                &mut byte_lookup_events,
+                            );""",
+    ]
+    for anchor in anchors:
+        updated = _insert_after_once(contents, anchor, insert, guard)
+        if updated != contents:
+            contents = updated
+            break
+
+    path.write_text(contents)
+
+
+def _patch_v4_byte_trace(path: Path) -> None:
+    contents = _ensure_fuzzer_utils_import(path, path.read_text())
+    if "NUM_BYTE_OPS" not in contents:
+        contents = contents.replace("ByteChip,\n};", "ByteChip, NUM_BYTE_OPS,\n};", 1)
+
+    anchor = "            cols.multiplicities[index] += F::from_canonical_usize(*mult);"
+    guard = "// BEAK-INSERT: sp1.v4.byte_lookup_semantic_injection.row"
+    insert = """
+
+            // BEAK-INSERT: sp1.v4.byte_lookup_semantic_injection.row
+            let beak_step = (row as u64)
+                .saturating_mul(NUM_BYTE_OPS as u64)
+                .saturating_add(index as u64);
+            if fuzzer_utils::should_inject_witness(
+                "sp1.semantic.lookup.boolean_multiplicity",
+                beak_step,
+            ) {
+                cols.multiplicities[index] = cols.multiplicities[index] + F::one();
+            }
+            // BEAK-INSERT-END"""
+    contents = _insert_after_once(contents, anchor, insert, guard)
+
+    path.write_text(contents)
+
+
+def _patch_v4_byte_record(path: Path) -> None:
+    contents = _ensure_fuzzer_utils_import(path, path.read_text())
+
+    helper_guard = "// BEAK-INSERT: sp1.v4.byte_record_semantic_injection.helpers"
+    if helper_guard not in contents:
+        helper_anchor = """impl ByteLookupEvent {
+    /// Creates a new `ByteLookupEvent`.
+    #[must_use]
+    pub fn new(opcode: ByteOpcode, a1: u16, a2: u8, b: u8, c: u8) -> Self {
+        Self { opcode, a1, a2, b, c }
+    }
+}
+"""
+        helper_insert = """
+// BEAK-INSERT: sp1.v4.byte_record_semantic_injection.helpers
+fn beak_byte_lookup_step(blu_event: ByteLookupEvent) -> u64 {
+    let row = if blu_event.opcode != ByteOpcode::U16Range {
+        (((blu_event.b as u16) << 8) + blu_event.c as u16) as u64
+    } else {
+        blu_event.a1 as u64
+    };
+    row.saturating_mul(NUM_BYTE_OPS as u64).saturating_add(blu_event.opcode as u64)
+}
+// BEAK-INSERT-END
+"""
+        contents = _insert_after_once(contents, helper_anchor, helper_insert, helper_guard)
+
+    anchor = "        self.entry(blu_event).and_modify(|e| *e += 1).or_insert(1);"
+    guard = "// BEAK-INSERT: sp1.v4.byte_record_semantic_injection.row"
+    insert = """        // BEAK-INSERT: sp1.v4.byte_record_semantic_injection.row
+        let beak_step = beak_byte_lookup_step(blu_event);
+        let beak_count = if fuzzer_utils::should_inject_witness(
+            "sp1.semantic.lookup.boolean_multiplicity",
+            beak_step,
+        ) {
+            2
+        } else {
+            1
+        };
+        self.entry(blu_event)
+            .and_modify(|e| *e += beak_count)
+            .or_insert(beak_count);"""
+    if guard in contents:
+        contents = contents.replace(anchor + "        // BEAK-INSERT", "        // BEAK-INSERT", 1)
+        contents = contents.replace(anchor + "\n        // BEAK-INSERT", "        // BEAK-INSERT", 1)
+    elif anchor in contents:
+        contents = contents.replace(anchor, insert, 1)
+
+    path.write_text(contents)
+
+
+def _patch_v4_execution_record(path: Path) -> None:
+    contents = _ensure_fuzzer_utils_import(path, path.read_text())
+
+    helper_guard = "// BEAK-INSERT: sp1.v4.execution_record_byte_semantic_injection.helpers"
+    helper_anchor = "impl ByteRecord for ExecutionRecord {\n"
+    helper_insert = """// BEAK-INSERT: sp1.v4.execution_record_byte_semantic_injection.helpers
+fn beak_execution_record_byte_lookup_step(blu_event: ByteLookupEvent) -> u64 {
+    let row = if blu_event.opcode != crate::ByteOpcode::U16Range {
+        (((blu_event.b as u16) << 8) + blu_event.c as u16) as u64
+    } else {
+        blu_event.a1 as u64
+    };
+    row.saturating_mul(9).saturating_add(blu_event.opcode as u64)
+}
+
+fn beak_execution_record_byte_lookup_count(blu_event: ByteLookupEvent, count: usize) -> usize {
+    let beak_step = beak_execution_record_byte_lookup_step(blu_event);
+    if fuzzer_utils::should_inject_witness(
+        "sp1.semantic.lookup.boolean_multiplicity",
+        beak_step,
+    ) {
+        count.saturating_add(1)
+    } else {
+        count
+    }
+}
+// BEAK-INSERT-END
+
+"""
+    contents = _insert_before_once(contents, helper_anchor, helper_insert, helper_guard)
+
+    direct_anchor = "        *self.byte_lookups.entry(blu_event).or_insert(0) += 1;"
+    direct_guard = "// BEAK-INSERT: sp1.v4.execution_record_byte_semantic_injection.direct"
+    direct_insert = """        // BEAK-INSERT: sp1.v4.execution_record_byte_semantic_injection.direct
+        let beak_count = beak_execution_record_byte_lookup_count(blu_event, 1);
+        *self.byte_lookups.entry(blu_event).or_insert(0) += beak_count;
+        // BEAK-INSERT-END"""
+    if direct_guard not in contents and direct_anchor in contents:
+        contents = contents.replace(direct_anchor, direct_insert, 1)
+
+    map_anchor = "                *self.byte_lookups.entry(*blu_event).or_insert(0) += count;"
+    map_guard = "// BEAK-INSERT: sp1.v4.execution_record_byte_semantic_injection.map"
+    map_insert = """                // BEAK-INSERT: sp1.v4.execution_record_byte_semantic_injection.map
+                let beak_count = beak_execution_record_byte_lookup_count(*blu_event, *count);
+                *self.byte_lookups.entry(*blu_event).or_insert(0) += beak_count;
+                // BEAK-INSERT-END"""
+    if map_guard not in contents and map_anchor in contents:
+        contents = contents.replace(map_anchor, map_insert, 1)
+
+    path.write_text(contents)
+
+
 def _patch_legacy_add_sub(path: Path) -> None:
     contents = _ensure_fuzzer_utils_import(path, path.read_text())
     guard = "// BEAK-INSERT: sp1.356.add_sub_chip_semantic_injection.row"
@@ -612,6 +864,14 @@ def _patch_plonky3_pin(sp1_install_path: Path) -> None:
 def apply(*, sp1_install_path: Path, commit_or_branch: str) -> None:
     _patch_plonky3_pin(sp1_install_path)
     _patch_v4_alu_chip_traces(sp1_install_path)
+    for path in _memory_instruction_trace_candidates(sp1_install_path):
+        _patch_v4_memory_instructions(path)
+    for path in _byte_event_candidates(sp1_install_path):
+        _patch_v4_byte_record(path)
+    for path in _execution_record_candidates(sp1_install_path):
+        _patch_v4_execution_record(path)
+    for path in _byte_trace_candidates(sp1_install_path):
+        _patch_v4_byte_trace(path)
     for path in _cpu_trace_candidates(sp1_install_path):
         _patch_cpu_trace(path)
     if commit_or_branch == SP1_UINT256_DIV_3561_COMMIT:

@@ -21,6 +21,7 @@ beak-core = { path = "../../crates/beak-core" }
 clap = "4.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+fuzzer_utils = { path = "../../beak-py/out/sp1-39ab52fce38172c9d23feed7248198dc14c164a9/sp1-src/crates/fuzzer_utils" }
 sp1-core-executor = { path = "../../beak-py/out/sp1-39ab52fce38172c9d23feed7248198dc14c164a9/sp1-src/crates/core/executor" }
 sp1-core-machine = { path = "../../beak-py/out/sp1-39ab52fce38172c9d23feed7248198dc14c164a9/sp1-src/crates/core/machine" }
 sp1-stark = { path = "../../beak-py/out/sp1-39ab52fce38172c9d23feed7248198dc14c164a9/sp1-src/crates/stark" }

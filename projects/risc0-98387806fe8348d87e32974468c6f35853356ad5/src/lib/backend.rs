@@ -20,25 +20,53 @@ use risc0_circuit_rv32im::{
         testutil::DEFAULT_SESSION_LIMIT,
         CycleLimit, Executor, DEFAULT_SEGMENT_LIMIT_PO2,
     },
-    prove::beak::{prove_segment_with_injection, BeakInjectionPlan},
+    prove::beak::{
+        collect_preflight_trace_records, prove_segment_with_injection, BeakInjectionPlan,
+    },
     trace::{TraceCallback, TraceEvent},
     Rv32imV2Claim, MAX_INSN_CYCLES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::trace::{executed_instructions, Risc0Trace};
+use crate::trace::{
+    executed_instructions, Risc0ExecutedInsnRecord, Risc0PreflightMemoryTxn,
+    Risc0PreflightSegmentSummary, Risc0Trace,
+};
 
 const ZERO_REGISTER_INJECT_KIND: &str = "risc0.semantic.decode.zero_register_immutability";
 const OPERAND_ROUTE_INJECT_KIND: &str = "risc0.semantic.decode.operand_index_routing";
 const RD_BITS_INJECT_KIND: &str = "risc0.semantic.decode.rd_bit_decomposition";
+const FIELD_RANGE_INJECT_KIND: &str = "risc0.semantic.decode.field_range";
+const IMM_SIGN_INJECT_KIND: &str = "risc0.semantic.decode.immediate_sign_extension";
+const UPPER_IMM_INJECT_KIND: &str = "risc0.semantic.decode.upper_immediate_materialization";
+const FORMAT_IMM_INJECT_KIND: &str = "risc0.semantic.decode.format_immediate_reassembly";
+const ALU_IMM_LIMB_INJECT_KIND: &str = "risc0.semantic.alu.immediate_limb_consistency";
+const ALU_SHIFT_MOD32_INJECT_KIND: &str = "risc0.semantic.alu.shift_mod32";
+const ALU_CMP_BOOL_INJECT_KIND: &str = "risc0.semantic.alu.comparison_booleanity";
+const ALU_SUB_BORROW_INJECT_KIND: &str = "risc0.semantic.alu.subtraction_borrow_chain";
+const ALU_CMP_AUX_INJECT_KIND: &str = "risc0.semantic.alu.comparison_auxiliary_chain";
+const ARITH_SPECIAL_CASE_INJECT_KIND: &str = "risc0.semantic.arithmetic.special_case_consistency";
 const DIV_REM_BOUND_INJECT_KIND: &str = "risc0.semantic.arithmetic.division_remainder_bound";
+const ARITH_PRODUCT_INJECT_KIND: &str = "risc0.semantic.arithmetic.product_decomposition";
+const ARITH_SIGNED_UNSIGNED_PRODUCT_INJECT_KIND: &str =
+    "risc0.semantic.arithmetic.signed_unsigned_product_correction";
 const ECALL_ARG_DECOMP_INJECT_KIND: &str = "risc0.semantic.control.ecall_argument_decomposition";
+const ENTRYPOINT_INJECT_KIND: &str = "risc0.semantic.control.entrypoint_binding";
 const EXEC_SOURCE_BINDING_INJECT_KIND: &str = "risc0.semantic.exec.source_operand_binding";
 const EXEC_DEST_BINDING_INJECT_KIND: &str = "risc0.semantic.exec.dest_binding";
 const EXEC_OP_SELECTOR_BINDING_INJECT_KIND: &str = "risc0.semantic.exec.op_selector_binding";
 const EXEC_CONTROL_FLOW_BINDING_INJECT_KIND: &str = "risc0.semantic.exec.control_flow_binding";
 const EXEC_MEMORY_EFFECT_BINDING_INJECT_KIND: &str = "risc0.semantic.exec.memory_effect_binding";
+const MEMORY_STORE_LOAD_FLOW_INJECT_KIND: &str = "risc0.semantic.memory.store_load_payload_flow";
+const MEMORY_ADDRESS_POINTER_INJECT_KIND: &str =
+    "risc0.semantic.memory.address_pointer_consistency";
+const MEMORY_ADDRESS_SPACE_INJECT_KIND: &str = "risc0.semantic.memory.address_space_consistency";
+const MEMORY_VALUE_PAYLOAD_INJECT_KIND: &str = "risc0.semantic.memory.value_payload_consistency";
+const MEMORY_KIND_SELECTOR_INJECT_KIND: &str = "risc0.semantic.memory.kind_selector_consistency";
+const MEMORY_INITIAL_VALUE_INJECT_KIND: &str = "risc0.semantic.memory.initial_value_binding";
+const MEMORY_FINALIZATION_INJECT_KIND: &str = "risc0.semantic.memory.finalization_consistency";
+const TIME_MONOTONIC_INJECT_KIND: &str = "risc0.semantic.time.monotonic_access_ordering";
 
 #[cfg(test)]
 const EXEC_SOURCE_BINDING_SUFFIX: &str = "::src2_from_src1_word";
@@ -81,6 +109,18 @@ pub struct RunResponse {
 
 fn base_inject_kind(kind: &str) -> &str {
     kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
+}
+
+fn detail_u64(hit: &BucketHit, key: &str) -> Option<u64> {
+    hit.details.get(key).and_then(Value::as_u64)
+}
+
+fn detail_str<'a>(hit: &'a BucketHit, key: &str) -> Option<&'a str> {
+    hit.details.get(key).and_then(Value::as_str)
+}
+
+fn inject_kind_domain(kind: &str) -> Option<&str> {
+    kind.split("::").find_map(|part| part.strip_prefix("domain="))
 }
 
 #[cfg(test)]
@@ -222,6 +262,47 @@ fn execute_session(
         })
         .map_err(|e| format!("risc0 execute failed: {e}"))?;
     Ok((segments, result))
+}
+
+fn collect_preflight_records_for_segments(
+    segments: &[risc0_circuit_rv32im::execute::Segment],
+) -> Result<(Vec<Risc0PreflightMemoryTxn>, Vec<Risc0PreflightSegmentSummary>), String> {
+    let mut txns = Vec::new();
+    let mut summaries = Vec::new();
+
+    for (segment_idx, segment) in segments.iter().enumerate() {
+        let records = collect_preflight_trace_records(segment)
+            .map_err(|e| format!("risc0 preflight record collection failed: {e}"))?;
+        let segment_idx = segment_idx as u64;
+        summaries.push(Risc0PreflightSegmentSummary {
+            segment_idx,
+            table_split_cycle: records.table_split_cycle,
+            padding_start_row: records.padding_start_row,
+            total_rows: records.total_rows,
+            lookup_table_rows: records.lookup_table_rows,
+        });
+        txns.extend(records.txns.into_iter().map(|txn| Risc0PreflightMemoryTxn {
+            segment_idx,
+            row_idx: txn.row_idx,
+            row_step_idx: txn.row_step_idx,
+            row_pc: txn.row_pc,
+            major: txn.major,
+            minor: txn.minor,
+            machine_mode: txn.machine_mode,
+            txn_idx: txn.txn_idx,
+            row_txn_start: txn.row_txn_start,
+            row_txn_end: txn.row_txn_end,
+            addr_word: txn.addr_word,
+            txn_cycle: txn.txn_cycle,
+            word: txn.word,
+            prev_cycle: txn.prev_cycle,
+            prev_word: txn.prev_word,
+            is_load: txn.is_load,
+            is_store: txn.is_store,
+        }));
+    }
+
+    Ok((txns, summaries))
 }
 
 #[derive(Default)]
@@ -378,12 +459,20 @@ fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
     };
     for insn in instructions {
         let mut kinds = BTreeSet::<&str>::new();
+        if insn.mnemonic != "ecall" {
+            kinds.insert(FIELD_RANGE_INJECT_KIND);
+        }
+        if insn.imm.is_some() {
+            kinds.insert(IMM_SIGN_INJECT_KIND);
+        }
         match insn.mnemonic.as_str() {
             "div" | "divu" | "rem" | "remu" => {
                 kinds.insert(OPERAND_ROUTE_INJECT_KIND);
                 if let Some(rs2) = insn.rs2 {
                     if insn.regs_before[rs2 as usize] != 0 {
                         kinds.insert(DIV_REM_BOUND_INJECT_KIND);
+                    } else {
+                        kinds.insert(ARITH_SPECIAL_CASE_INJECT_KIND);
                     }
                 }
             }
@@ -392,6 +481,50 @@ fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
                 kinds.insert(ECALL_ARG_DECOMP_INJECT_KIND);
             }
             _ => {}
+        }
+        if matches!(insn.mnemonic.as_str(), "lui" | "auipc") {
+            kinds.insert(UPPER_IMM_INJECT_KIND);
+        }
+        if matches!(
+            insn.mnemonic.as_str(),
+            "sb" | "sh" | "sw" | "beq" | "bne" | "blt" | "bge" | "bltu" | "bgeu" | "jal"
+        ) {
+            kinds.insert(FORMAT_IMM_INJECT_KIND);
+        }
+        if matches!(
+            insn.mnemonic.as_str(),
+            "addi" | "slti" | "sltiu" | "xori" | "ori" | "andi" | "slli" | "srli" | "srai"
+        ) {
+            kinds.insert(ALU_IMM_LIMB_INJECT_KIND);
+        }
+        if matches!(insn.mnemonic.as_str(), "sll" | "slli" | "srl" | "srli" | "sra" | "srai") {
+            kinds.insert(ALU_SHIFT_MOD32_INJECT_KIND);
+        }
+        if matches!(insn.mnemonic.as_str(), "slt" | "slti" | "sltu" | "sltiu") {
+            kinds.insert(ALU_CMP_BOOL_INJECT_KIND);
+            kinds.insert(ALU_CMP_AUX_INJECT_KIND);
+        }
+        if matches!(
+            insn.mnemonic.as_str(),
+            "sub"
+                | "slt"
+                | "slti"
+                | "sltu"
+                | "sltiu"
+                | "beq"
+                | "bne"
+                | "blt"
+                | "bge"
+                | "bltu"
+                | "bgeu"
+        ) {
+            kinds.insert(ALU_SUB_BORROW_INJECT_KIND);
+        }
+        if matches!(insn.mnemonic.as_str(), "mul" | "mulh" | "mulhu" | "mulhsu") {
+            kinds.insert(ARITH_PRODUCT_INJECT_KIND);
+        }
+        if insn.mnemonic == "mulhsu" {
+            kinds.insert(ARITH_SIGNED_UNSIGNED_PRODUCT_INJECT_KIND);
         }
         if insn.rd == Some(0) {
             kinds.insert(ZERO_REGISTER_INJECT_KIND);
@@ -440,34 +573,29 @@ fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
         {
             kinds.insert(EXEC_DEST_BINDING_INJECT_KIND);
         }
-        if matches!(
-            insn.mnemonic.as_str(),
-            "div"
-                | "divu"
-                | "rem"
-                | "remu"
-                | "beq"
-                | "bne"
-                | "blt"
-                | "bge"
-                | "bltu"
-                | "bgeu"
-                | "lb"
-                | "lbu"
-                | "lh"
-                | "lhu"
-        ) {
+        if !matches!(insn.mnemonic.as_str(), "ecall" | "ebreak" | "fence") {
             kinds.insert(EXEC_OP_SELECTOR_BINDING_INJECT_KIND);
         }
-        if matches!(
-            insn.mnemonic.as_str(),
-            "beq" | "bne" | "blt" | "bge" | "bltu" | "bgeu" | "jal" | "jalr" | "ecall"
-        ) {
+        if insn.mnemonic != "ecall" {
             kinds.insert(EXEC_CONTROL_FLOW_BINDING_INJECT_KIND);
+        }
+        if insn.step_idx == 0 {
+            kinds.insert(ENTRYPOINT_INJECT_KIND);
         }
         if matches!(insn.mnemonic.as_str(), "lb" | "lh" | "lw" | "lbu" | "lhu" | "sb" | "sh" | "sw")
         {
             kinds.insert(EXEC_MEMORY_EFFECT_BINDING_INJECT_KIND);
+            kinds.insert(MEMORY_ADDRESS_POINTER_INJECT_KIND);
+            kinds.insert(MEMORY_ADDRESS_SPACE_INJECT_KIND);
+            kinds.insert(MEMORY_KIND_SELECTOR_INJECT_KIND);
+            kinds.insert(MEMORY_VALUE_PAYLOAD_INJECT_KIND);
+            kinds.insert(MEMORY_FINALIZATION_INJECT_KIND);
+            kinds.insert(TIME_MONOTONIC_INJECT_KIND);
+            if matches!(insn.mnemonic.as_str(), "lb" | "lh" | "lw" | "lbu" | "lhu") {
+                kinds.insert(MEMORY_INITIAL_VALUE_INJECT_KIND);
+            } else {
+                kinds.insert(MEMORY_STORE_LOAD_FLOW_INJECT_KIND);
+            }
         }
         for kind in kinds {
             sites.entry(kind.to_string()).or_default().push(insn.step_idx);
@@ -490,11 +618,38 @@ fn bump_hit_detail(hit: &mut BucketHit, kind: &str, step: u64) {
         RD_BITS_INJECT_KIND => {
             details.insert("beak_rd_bits_tampered".to_string(), json!(true));
         }
+        FIELD_RANGE_INJECT_KIND => {
+            details.insert("beak_decoder_field".to_string(), json!("func3_xor_1"));
+        }
+        IMM_SIGN_INJECT_KIND => {
+            details.insert("beak_decoder_field".to_string(), json!("imm_sign_flip"));
+        }
+        UPPER_IMM_INJECT_KIND => {
+            details.insert("beak_decoder_field".to_string(), json!("upper_imm_limb_flip"));
+        }
+        FORMAT_IMM_INJECT_KIND => {
+            details.insert("beak_decoder_field".to_string(), json!("scattered_imm_bit_flip"));
+        }
+        ALU_IMM_LIMB_INJECT_KIND
+        | ALU_SHIFT_MOD32_INJECT_KIND
+        | ALU_CMP_BOOL_INJECT_KIND
+        | ALU_SUB_BORROW_INJECT_KIND
+        | ALU_CMP_AUX_INJECT_KIND
+        | ARITH_PRODUCT_INJECT_KIND
+        | ARITH_SIGNED_UNSIGNED_PRODUCT_INJECT_KIND => {
+            details.insert("beak_preflight_binding".to_string(), json!("write_data_plus_one"));
+        }
+        ARITH_SPECIAL_CASE_INJECT_KIND => {
+            details.insert("beak_divrem_relation".to_string(), json!("special_case_quot_plus_one"));
+        }
         DIV_REM_BOUND_INJECT_KIND => {
             details.insert("beak_divrem_relation".to_string(), json!("rem_plus_denom"));
         }
         ECALL_ARG_DECOMP_INJECT_KIND => {
             details.insert("beak_len_decomposition".to_string(), json!("force_low2_hot_1"));
+        }
+        ENTRYPOINT_INJECT_KIND => {
+            details.insert("beak_entrypoint_binding".to_string(), json!("pc_addr_med14_plus_one"));
         }
         EXEC_SOURCE_BINDING_INJECT_KIND => {
             details.insert("beak_preflight_binding".to_string(), json!("src2_from_src1"));
@@ -506,37 +661,132 @@ fn bump_hit_detail(hit: &mut BucketHit, kind: &str, step: u64) {
             details.insert("beak_preflight_binding".to_string(), json!("toggle_selector"));
         }
         EXEC_CONTROL_FLOW_BINDING_INJECT_KIND => {
-            details.insert("beak_preflight_binding".to_string(), json!("branch_negate"));
+            details.insert("beak_preflight_binding".to_string(), json!("control_flow_mutation"));
         }
         EXEC_MEMORY_EFFECT_BINDING_INJECT_KIND => {
             details.insert("beak_preflight_binding".to_string(), json!("memory_route"));
+        }
+        MEMORY_STORE_LOAD_FLOW_INJECT_KIND => {
+            details.insert(
+                "beak_preflight_binding".to_string(),
+                json!("store_write_data_low_plus_one"),
+            );
+        }
+        MEMORY_ADDRESS_POINTER_INJECT_KIND => {
+            details.insert("beak_preflight_binding".to_string(), json!("memory_addr_low_bit_flip"));
+        }
+        MEMORY_ADDRESS_SPACE_INJECT_KIND => {
+            details
+                .insert("beak_preflight_binding".to_string(), json!("address_space_addr_retarget"));
+        }
+        MEMORY_VALUE_PAYLOAD_INJECT_KIND => {
+            details.insert("beak_preflight_binding".to_string(), json!("memory_data_low_plus_one"));
+        }
+        MEMORY_KIND_SELECTOR_INJECT_KIND => {
+            details.insert("beak_preflight_binding".to_string(), json!("load_store_opcode_flip"));
+        }
+        MEMORY_INITIAL_VALUE_INJECT_KIND => {
+            details.insert(
+                "beak_preflight_binding".to_string(),
+                json!("initial_read_data_low_plus_one"),
+            );
+        }
+        MEMORY_FINALIZATION_INJECT_KIND => {
+            details.insert(
+                "beak_preflight_binding".to_string(),
+                json!("final_access_data_low_plus_one"),
+            );
+        }
+        TIME_MONOTONIC_INJECT_KIND => {
+            details.insert("beak_preflight_binding".to_string(), json!("previous_cycle_plus_two"));
         }
         _ => {}
     }
 }
 
+fn hit_anchor_for_inject_kind(hit: &BucketHit, kind: &str) -> u64 {
+    match base_inject_kind(kind) {
+        MEMORY_STORE_LOAD_FLOW_INJECT_KIND => detail_u64(hit, "store_step_idx"),
+        MEMORY_FINALIZATION_INJECT_KIND => detail_u64(hit, "last_access_step_idx"),
+        _ => detail_u64(hit, "op_idx").or_else(|| detail_u64(hit, "step_idx")),
+    }
+    .unwrap_or(0)
+}
+
+fn hit_matches_kind_domain(hit: &BucketHit, kind: &str) -> bool {
+    if base_inject_kind(kind) != MEMORY_ADDRESS_SPACE_INJECT_KIND {
+        return true;
+    }
+    let Some(domain) = inject_kind_domain(kind) else {
+        return true;
+    };
+    let Some(cell_id) = detail_str(hit, "cell_id") else {
+        return false;
+    };
+    matches!(
+        (domain, cell_id),
+        ("reg_read", "me5.reg_read")
+            | ("reg_write", "me5.reg_write")
+            | ("mem_read", "me5.mem_read")
+            | ("mem_write", "me5.mem_write")
+    )
+}
+
 fn apply_injected_hit_details(hits: &mut [BucketHit], kind: &str, step: u64) {
-    let target_bucket = match base_inject_kind(kind) {
-        ZERO_REGISTER_INJECT_KIND => semantic::decode::ZERO_REGISTER_IMMUTABILITY.id,
-        OPERAND_ROUTE_INJECT_KIND => semantic::decode::OPERAND_INDEX_ROUTING.id,
-        RD_BITS_INJECT_KIND => semantic::decode::RD_BIT_DECOMPOSITION.id,
-        DIV_REM_BOUND_INJECT_KIND => semantic::arithmetic::DIVISION_REMAINDER_BOUND.id,
-        ECALL_ARG_DECOMP_INJECT_KIND => semantic::control::ECALL_ARGUMENT_DECOMPOSITION.id,
-        EXEC_SOURCE_BINDING_INJECT_KIND => semantic::exec::SOURCE_OPERAND_BINDING.id,
-        EXEC_DEST_BINDING_INJECT_KIND => semantic::exec::DEST_BINDING.id,
-        EXEC_OP_SELECTOR_BINDING_INJECT_KIND => semantic::exec::OP_SELECTOR_BINDING.id,
-        EXEC_CONTROL_FLOW_BINDING_INJECT_KIND => semantic::exec::CONTROL_FLOW_BINDING.id,
-        EXEC_MEMORY_EFFECT_BINDING_INJECT_KIND => semantic::exec::MEMORY_EFFECT_BINDING.id,
+    let target_buckets = match base_inject_kind(kind) {
+        ZERO_REGISTER_INJECT_KIND => vec![semantic::decode::ZERO_REGISTER_IMMUTABILITY.id],
+        OPERAND_ROUTE_INJECT_KIND => vec![semantic::decode::OPERAND_INDEX_ROUTING.id],
+        RD_BITS_INJECT_KIND => vec![semantic::decode::RD_BIT_DECOMPOSITION.id],
+        FIELD_RANGE_INJECT_KIND => vec![semantic::decode::FIELD_RANGE.id],
+        IMM_SIGN_INJECT_KIND => vec![semantic::decode::IMMEDIATE_SIGN_EXTENSION.id],
+        UPPER_IMM_INJECT_KIND => vec![semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.id],
+        FORMAT_IMM_INJECT_KIND => vec![semantic::decode::FORMAT_IMMEDIATE_REASSEMBLY.id],
+        ALU_IMM_LIMB_INJECT_KIND => vec![semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id],
+        ALU_SHIFT_MOD32_INJECT_KIND => vec![semantic::alu::SHIFT_MOD32.id],
+        ALU_CMP_BOOL_INJECT_KIND => vec![semantic::alu::COMPARISON_BOOLEANITY.id],
+        ALU_SUB_BORROW_INJECT_KIND => vec![semantic::alu::SUBTRACTION_BORROW_CHAIN.id],
+        ALU_CMP_AUX_INJECT_KIND => vec![semantic::alu::COMPARISON_AUXILIARY_CHAIN.id],
+        ARITH_SPECIAL_CASE_INJECT_KIND => vec![semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.id],
+        DIV_REM_BOUND_INJECT_KIND => vec![semantic::arithmetic::DIVISION_REMAINDER_BOUND.id],
+        ARITH_PRODUCT_INJECT_KIND => vec![semantic::arithmetic::PRODUCT_DECOMPOSITION.id],
+        ARITH_SIGNED_UNSIGNED_PRODUCT_INJECT_KIND => {
+            vec![semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION.id]
+        }
+        ECALL_ARG_DECOMP_INJECT_KIND => vec![semantic::control::ECALL_ARGUMENT_DECOMPOSITION.id],
+        ENTRYPOINT_INJECT_KIND => vec![semantic::control::ENTRYPOINT_BINDING.id],
+        EXEC_SOURCE_BINDING_INJECT_KIND => vec![semantic::exec::SOURCE_OPERAND_BINDING.id],
+        EXEC_DEST_BINDING_INJECT_KIND => vec![semantic::exec::DEST_BINDING.id],
+        EXEC_OP_SELECTOR_BINDING_INJECT_KIND => vec![semantic::exec::OP_SELECTOR_BINDING.id],
+        EXEC_CONTROL_FLOW_BINDING_INJECT_KIND => vec![semantic::exec::CONTROL_FLOW_BINDING.id],
+        EXEC_MEMORY_EFFECT_BINDING_INJECT_KIND => vec![semantic::exec::MEMORY_EFFECT_BINDING.id],
+        MEMORY_STORE_LOAD_FLOW_INJECT_KIND => vec![semantic::memory::STORE_LOAD_PAYLOAD_FLOW.id],
+        MEMORY_ADDRESS_POINTER_INJECT_KIND => vec![
+            semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id,
+            semantic::memory::ADDRESS_BOUNDARY_RANGE.id,
+            semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.id,
+        ],
+        MEMORY_ADDRESS_SPACE_INJECT_KIND => vec![semantic::memory::ADDRESS_SPACE_CONSISTENCY.id],
+        MEMORY_VALUE_PAYLOAD_INJECT_KIND => vec![
+            semantic::memory::LOAD_VALUE_BINDING.id,
+            semantic::memory::WRITE_PAYLOAD_CONSISTENCY.id,
+        ],
+        MEMORY_KIND_SELECTOR_INJECT_KIND => vec![semantic::memory::KIND_SELECTOR_CONSISTENCY.id],
+        MEMORY_INITIAL_VALUE_INJECT_KIND => vec![semantic::memory::INITIAL_VALUE_BINDING.id],
+        MEMORY_FINALIZATION_INJECT_KIND => vec![semantic::memory::FINALIZATION_CONSISTENCY.id],
+        TIME_MONOTONIC_INJECT_KIND => vec![semantic::time::MONOTONIC_ACCESS_ORDERING.id],
         _ => return,
     };
 
     let mut applied = false;
     for hit in hits {
-        if hit.bucket_id != target_bucket {
+        if !target_buckets.iter().any(|bucket| hit.bucket_id == *bucket) {
             continue;
         }
-        let op_idx = hit.details.get("op_idx").and_then(Value::as_u64).unwrap_or(0);
-        if step == u64::MAX || op_idx == step {
+        if !hit_matches_kind_domain(hit, kind) {
+            continue;
+        }
+        let anchor = hit_anchor_for_inject_kind(hit, kind);
+        if step == u64::MAX || anchor == step {
             bump_hit_detail(hit, kind, step);
             applied = true;
         }
@@ -551,12 +801,32 @@ pub fn run_backend_once(
     inject_kind: Option<&str>,
     inject_step: u64,
 ) -> Result<RunResponse, String> {
-    let trace = Risc0Trace::from_words(words)?;
     let observed_injection_sites = observe_sites_for_words(words);
 
     let program = build_program(words);
     let image = risc0_binfmt::MemoryImage::new_kernel(program);
-    let (segments, _result) = execute_session(image, DEFAULT_SESSION_LIMIT, Vec::new())?;
+    let executed_records = Rc::new(RefCell::new(Vec::<Risc0ExecutedInsnRecord>::new()));
+    let records_cb = executed_records.clone();
+    let trace_cb: Rc<RefCell<dyn TraceCallback>> =
+        Rc::new(RefCell::new(move |event: TraceEvent| {
+            if let TraceEvent::InstructionStart { cycle, pc, insn } = event {
+                records_cb.borrow_mut().push(Risc0ExecutedInsnRecord {
+                    step_idx: cycle,
+                    pc,
+                    word: insn,
+                });
+            }
+            Ok(())
+        }));
+    let (segments, _result) = execute_session(image, DEFAULT_SESSION_LIMIT, vec![trace_cb])?;
+    let executed_records = executed_records.borrow().clone();
+    let (preflight_txns, preflight_summaries) = collect_preflight_records_for_segments(&segments)?;
+    let trace = Risc0Trace::from_words_with_preflight_and_executed(
+        words,
+        &executed_records,
+        &preflight_txns,
+        &preflight_summaries,
+    )?;
     let plan =
         inject_kind.map(|kind| BeakInjectionPlan { kind: kind.to_string(), step: inject_step });
     let mut witness_mutation_observed = false;
@@ -624,39 +894,200 @@ impl Risc0Backend {
     }
 
     fn step_from_hit(hit: &BucketHit) -> u64 {
-        hit.details.get("op_idx").and_then(Value::as_u64).unwrap_or(0)
+        detail_u64(hit, "op_idx").or_else(|| detail_u64(hit, "step_idx")).unwrap_or(0)
+    }
+
+    fn address_space_inject_kind(hit: &BucketHit) -> Option<String> {
+        let domain = match detail_str(hit, "cell_id")? {
+            "me5.reg_read" => "reg_read",
+            "me5.reg_write" => "reg_write",
+            "me5.mem_read" => "mem_read",
+            "me5.mem_write" => "mem_write",
+            _ => return None,
+        };
+        Some(format!("{MEMORY_ADDRESS_SPACE_INJECT_KIND}::domain={domain}"))
     }
 
     fn semantic_candidate_from_hit(&self, hit: &BucketHit) -> Vec<SemanticInjectionCandidate> {
-        let anchor = Self::step_from_hit(hit);
+        let mut anchor = Self::step_from_hit(hit);
         let bucket_id = hit.bucket_id.as_str();
-        let (semantic_class, inject_kind) = if bucket_id
-            == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id
-        {
-            (semantic::decode::ZERO_REGISTER_IMMUTABILITY.semantic_class, ZERO_REGISTER_INJECT_KIND)
+        let mapping = if bucket_id == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id {
+            Some((
+                semantic::decode::ZERO_REGISTER_IMMUTABILITY.semantic_class,
+                ZERO_REGISTER_INJECT_KIND.to_string(),
+            ))
         } else if bucket_id == semantic::decode::OPERAND_INDEX_ROUTING.id {
-            (semantic::decode::OPERAND_INDEX_ROUTING.semantic_class, OPERAND_ROUTE_INJECT_KIND)
+            Some((
+                semantic::decode::OPERAND_INDEX_ROUTING.semantic_class,
+                OPERAND_ROUTE_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::decode::RD_BIT_DECOMPOSITION.id {
+            Some((
+                semantic::decode::RD_BIT_DECOMPOSITION.semantic_class,
+                RD_BITS_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::decode::FIELD_RANGE.id {
+            Some((
+                semantic::decode::FIELD_RANGE.semantic_class,
+                FIELD_RANGE_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::decode::IMMEDIATE_SIGN_EXTENSION.id {
+            Some((
+                semantic::decode::IMMEDIATE_SIGN_EXTENSION.semantic_class,
+                IMM_SIGN_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.id {
+            Some((
+                semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.semantic_class,
+                UPPER_IMM_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::decode::FORMAT_IMMEDIATE_REASSEMBLY.id {
+            Some((
+                semantic::decode::FORMAT_IMMEDIATE_REASSEMBLY.semantic_class,
+                FORMAT_IMM_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id {
+            Some((
+                semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.semantic_class,
+                ALU_IMM_LIMB_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::alu::SHIFT_MOD32.id {
+            Some((
+                semantic::alu::SHIFT_MOD32.semantic_class,
+                ALU_SHIFT_MOD32_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::alu::COMPARISON_BOOLEANITY.id {
+            Some((
+                semantic::alu::COMPARISON_BOOLEANITY.semantic_class,
+                ALU_CMP_BOOL_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::alu::SUBTRACTION_BORROW_CHAIN.id {
+            Some((
+                semantic::alu::SUBTRACTION_BORROW_CHAIN.semantic_class,
+                ALU_SUB_BORROW_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::alu::COMPARISON_AUXILIARY_CHAIN.id {
+            Some((
+                semantic::alu::COMPARISON_AUXILIARY_CHAIN.semantic_class,
+                ALU_CMP_AUX_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.id {
+            Some((
+                semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.semantic_class,
+                ARITH_SPECIAL_CASE_INJECT_KIND.to_string(),
+            ))
         } else if bucket_id == semantic::arithmetic::DIVISION_REMAINDER_BOUND.id {
-            (
+            Some((
                 semantic::arithmetic::DIVISION_REMAINDER_BOUND.semantic_class,
-                DIV_REM_BOUND_INJECT_KIND,
-            )
+                DIV_REM_BOUND_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::arithmetic::PRODUCT_DECOMPOSITION.id {
+            Some((
+                semantic::arithmetic::PRODUCT_DECOMPOSITION.semantic_class,
+                ARITH_PRODUCT_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION.id {
+            Some((
+                semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION.semantic_class,
+                ARITH_SIGNED_UNSIGNED_PRODUCT_INJECT_KIND.to_string(),
+            ))
         } else if bucket_id == semantic::control::ECALL_ARGUMENT_DECOMPOSITION.id {
-            (
+            Some((
                 semantic::control::ECALL_ARGUMENT_DECOMPOSITION.semantic_class,
-                ECALL_ARG_DECOMP_INJECT_KIND,
-            )
+                ECALL_ARG_DECOMP_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::control::ENTRYPOINT_BINDING.id {
+            Some((
+                semantic::control::ENTRYPOINT_BINDING.semantic_class,
+                ENTRYPOINT_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::exec::DEST_BINDING.id {
+            Some((
+                semantic::exec::DEST_BINDING.semantic_class,
+                EXEC_DEST_BINDING_INJECT_KIND.to_string(),
+            ))
         } else if bucket_id == semantic::exec::OP_SELECTOR_BINDING.id {
-            (
+            Some((
                 semantic::exec::OP_SELECTOR_BINDING.semantic_class,
-                "risc0.semantic.exec.op_selector_binding::toggle_selector_word",
-            )
+                EXEC_OP_SELECTOR_BINDING_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id {
+            Some((
+                semantic::exec::CONTROL_FLOW_BINDING.semantic_class,
+                EXEC_CONTROL_FLOW_BINDING_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::memory::STORE_LOAD_PAYLOAD_FLOW.id {
+            let Some(store_step) = detail_u64(hit, "store_step_idx") else {
+                return Vec::new();
+            };
+            anchor = store_step;
+            Some((
+                semantic::memory::STORE_LOAD_PAYLOAD_FLOW.semantic_class,
+                MEMORY_STORE_LOAD_FLOW_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id {
+            Some((
+                semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.semantic_class,
+                MEMORY_ADDRESS_POINTER_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::memory::ADDRESS_BOUNDARY_RANGE.id {
+            Some((
+                semantic::memory::ADDRESS_BOUNDARY_RANGE.semantic_class,
+                MEMORY_ADDRESS_POINTER_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.id {
+            Some((
+                semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.semantic_class,
+                MEMORY_ADDRESS_POINTER_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::memory::ADDRESS_SPACE_CONSISTENCY.id {
+            let Some(inject_kind) = Self::address_space_inject_kind(hit) else {
+                return Vec::new();
+            };
+            Some((semantic::memory::ADDRESS_SPACE_CONSISTENCY.semantic_class, inject_kind))
+        } else if bucket_id == semantic::memory::LOAD_VALUE_BINDING.id {
+            Some((
+                semantic::memory::LOAD_VALUE_BINDING.semantic_class,
+                MEMORY_VALUE_PAYLOAD_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::memory::WRITE_PAYLOAD_CONSISTENCY.id {
+            Some((
+                semantic::memory::WRITE_PAYLOAD_CONSISTENCY.semantic_class,
+                MEMORY_VALUE_PAYLOAD_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id {
+            Some((
+                semantic::memory::KIND_SELECTOR_CONSISTENCY.semantic_class,
+                MEMORY_KIND_SELECTOR_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::memory::INITIAL_VALUE_BINDING.id {
+            Some((
+                semantic::memory::INITIAL_VALUE_BINDING.semantic_class,
+                MEMORY_INITIAL_VALUE_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::memory::FINALIZATION_CONSISTENCY.id {
+            let Some(last_access_step) = detail_u64(hit, "last_access_step_idx") else {
+                return Vec::new();
+            };
+            anchor = last_access_step;
+            Some((
+                semantic::memory::FINALIZATION_CONSISTENCY.semantic_class,
+                MEMORY_FINALIZATION_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id {
+            Some((
+                semantic::time::MONOTONIC_ACCESS_ORDERING.semantic_class,
+                TIME_MONOTONIC_INJECT_KIND.to_string(),
+            ))
         } else {
+            None
+        };
+        let Some((semantic_class, inject_kind)) = mapping else {
             return Vec::new();
         };
 
         if let Some(observed_steps) =
-            self.last_observed_injection_sites.get(base_inject_kind(inject_kind))
+            self.last_observed_injection_sites.get(base_inject_kind(&inject_kind))
         {
             if !observed_steps.iter().any(|step| *step == anchor) {
                 return Vec::new();
@@ -669,7 +1100,7 @@ impl Risc0Backend {
             bucket_id: hit.bucket_id.clone(),
             trigger_signal_id: None,
             semantic_class: semantic_class.to_string(),
-            inject_kind: inject_kind.to_string(),
+            inject_kind,
             schedule,
         }]
     }

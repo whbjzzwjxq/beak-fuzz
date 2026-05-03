@@ -9,8 +9,8 @@ use beak_core::fuzz::benchmark::{
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
-use common::constants::RAM_START_ADDRESS;
-use common::rv_trace::{CircuitFlags, MemoryConfig, RVTraceRow};
+use common::constants::{RAM_START_ADDRESS, REGISTER_COUNT};
+use common::rv_trace::{CircuitFlags, MemoryConfig, MemoryLayout, MemoryOp, RVTraceRow};
 use jolt::jolt_core::jolt::vm::rv32i_vm::{C, M};
 use jolt::jolt_core::jolt::vm::JoltTraceStep;
 use jolt::{host, Jolt, ProofTranscript, RV32IJoltVM, F, PCS, RV32I};
@@ -21,12 +21,41 @@ use crate::trace::JoltTrace;
 const UPPER_IMMEDIATE_INJECT_KIND: &str = "jolt.semantic.decode.upper_immediate_materialization";
 const ENTRYPOINT_INJECT_KIND: &str = "jolt.semantic.control.entrypoint_binding";
 const CONTROL_FLOW_INJECT_KIND: &str = "jolt.semantic.exec.control_flow_binding";
+const ZERO_REGISTER_INJECT_KIND: &str = "jolt.semantic.decode.zero_register_immutability";
+const OPERAND_INDEX_INJECT_KIND: &str = "jolt.semantic.decode.operand_index_routing";
+const DEST_BINDING_INJECT_KIND: &str = "jolt.semantic.exec.dest_binding";
+const FIELD_RANGE_INJECT_KIND: &str = "jolt.semantic.decode.field_range";
+const IMMEDIATE_SIGN_INJECT_KIND: &str = "jolt.semantic.decode.immediate_sign_extension";
+const FORMAT_IMMEDIATE_INJECT_KIND: &str = "jolt.semantic.decode.format_immediate_reassembly";
+const OP_SELECTOR_INJECT_KIND: &str = "jolt.semantic.exec.op_selector_binding";
+const ALU_IMMEDIATE_INJECT_KIND: &str = "jolt.semantic.alu.immediate_limb_consistency";
+const SHIFT_INJECT_KIND: &str = "jolt.semantic.alu.shift_mod32";
+const COMPARISON_BOOL_INJECT_KIND: &str = "jolt.semantic.alu.comparison_booleanity";
+const SUBTRACTION_INJECT_KIND: &str = "jolt.semantic.alu.subtraction_borrow_chain";
+const COMPARISON_AUX_INJECT_KIND: &str = "jolt.semantic.alu.comparison_auxiliary_chain";
+const ARITH_SPECIAL_INJECT_KIND: &str = "jolt.semantic.arithmetic.special_case_consistency";
+const DIV_BOUND_INJECT_KIND: &str = "jolt.semantic.arithmetic.division_remainder_bound";
+const PRODUCT_INJECT_KIND: &str = "jolt.semantic.arithmetic.product_decomposition";
+const SIGNED_UNSIGNED_INJECT_KIND: &str =
+    "jolt.semantic.arithmetic.signed_unsigned_product_correction";
+const MEMORY_ADDRESS_SPACE_INJECT_KIND: &str = "jolt.semantic.memory.address_space_consistency";
+const MEMORY_ADDRESS_INJECT_KIND: &str = "jolt.semantic.memory.address_pointer_consistency";
+const MEMORY_KIND_SELECTOR_INJECT_KIND: &str = "jolt.semantic.memory.kind_selector_consistency";
+const MEMORY_VALUE_INJECT_KIND: &str = "jolt.semantic.memory.value_payload_consistency";
+const STORE_LOAD_INJECT_KIND: &str = "jolt.semantic.memory.store_load_payload_flow";
+const MEMORY_INITIAL_INJECT_KIND: &str = "jolt.semantic.memory.initial_value_binding";
+const MEMORY_FINALIZATION_INJECT_KIND: &str = "jolt.semantic.memory.finalization_consistency";
+const TIME_BOUNDARY_INJECT_KIND: &str = "jolt.semantic.time.boundary_origin_consistency";
+const TIME_MONOTONIC_INJECT_KIND: &str = "jolt.semantic.time.monotonic_access_ordering";
+const LOOKUP_BOOLEAN_INJECT_KIND: &str = "jolt.semantic.lookup.boolean_multiplicity";
+const PADDING_INJECT_KIND: &str = "jolt.semantic.row.padding_interaction_send";
 const JOLT_INJECT_KIND_ENV: &str = "BEAK_JOLT_WITNESS_INJECT_KIND";
 const JOLT_INJECT_STEP_ENV: &str = "BEAK_JOLT_WITNESS_INJECT_STEP";
 const JOLT_INJECT_APPLIED_ENV: &str = "BEAK_JOLT_WITNESS_INJECTION_APPLIED";
 const LOOP_FOREVER_WORD: u32 = 0x0000_006f;
 const T0_REG: u32 = 5;
 const T1_REG: u32 = 6;
+const RAM_OP_INDEX: usize = 3;
 static TEMP_ELF_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
@@ -54,6 +83,8 @@ struct JoltExecution {
     bytecode: Vec<common::rv_trace::ELFInstruction>,
     memory_init: Vec<(u64, u8)>,
     injection_applied: bool,
+    inject_kind: Option<String>,
+    inject_step: u64,
 }
 
 fn record_site(sites: &mut BTreeMap<String, Vec<u64>>, kind: &str, step: u64) {
@@ -61,6 +92,10 @@ fn record_site(sites: &mut BTreeMap<String, Vec<u64>>, kind: &str, step: u64) {
     if steps.last().copied() != Some(step) {
         steps.push(step);
     }
+}
+
+fn base_inject_kind(kind: &str) -> &str {
+    kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
 }
 
 fn build_program_words(words: &[u32]) -> Vec<u32> {
@@ -277,6 +312,8 @@ fn execute_trace(
         bytecode,
         memory_init,
         injection_applied,
+        inject_kind: inject_kind.map(ToOwned::to_owned),
+        inject_step,
     })
 }
 
@@ -290,17 +327,101 @@ fn is_branch_step(step: &JoltTraceStep<RV32I>) -> bool {
         && !step.circuit_flags[CircuitFlags::Virtual as usize]
 }
 
-fn collect_observed_injection_sites(trace: &[JoltTraceStep<RV32I>]) -> BTreeMap<String, Vec<u64>> {
+fn remap_memory_address(address: u64, memory_layout: &MemoryLayout) -> Option<u64> {
+    if address >= memory_layout.input_start {
+        Some(REGISTER_COUNT + (address - memory_layout.input_start) / 4)
+    } else if address < REGISTER_COUNT {
+        Some(address)
+    } else {
+        None
+    }
+}
+
+fn ram_op_address(step: &JoltTraceStep<RV32I>) -> u64 {
+    match step.memory_ops[RAM_OP_INDEX] {
+        MemoryOp::Read(address) | MemoryOp::Write(address, _) => address,
+    }
+}
+
+fn is_real_ram_op(step: &JoltTraceStep<RV32I>, memory_layout: &MemoryLayout) -> bool {
+    ram_op_address(step) >= memory_layout.input_start
+}
+
+fn memory_init_witness_size(memory_init: &[(u64, u8)], memory_layout: &MemoryLayout) -> usize {
+    memory_init
+        .iter()
+        .filter_map(|(address, _)| remap_memory_address(address & !3, memory_layout))
+        .map(|idx| idx.saturating_add(1) as usize)
+        .max()
+        .unwrap_or(0)
+}
+
+fn trace_memory_witness_size(
+    trace: &[JoltTraceStep<RV32I>],
+    memory_init: &[(u64, u8)],
+    memory_layout: &MemoryLayout,
+) -> usize {
+    let max_trace_address = trace
+        .iter()
+        .filter_map(|step| remap_memory_address(ram_op_address(step), memory_layout))
+        .max()
+        .map(|idx| idx.saturating_add(1) as usize)
+        .unwrap_or(0);
+    max_trace_address
+        .max(memory_init_witness_size(memory_init, memory_layout))
+        .max(8)
+        .next_power_of_two()
+}
+
+fn collect_observed_injection_sites(
+    trace: &[JoltTraceStep<RV32I>],
+    memory_layout: &MemoryLayout,
+) -> BTreeMap<String, Vec<u64>> {
     let mut sites = BTreeMap::<String, Vec<u64>>::new();
     if !trace.is_empty() {
         record_site(&mut sites, ENTRYPOINT_INJECT_KIND, 0);
+        record_site(&mut sites, TIME_BOUNDARY_INJECT_KIND, 0);
+    }
+    if trace.len().next_power_of_two() > trace.len() {
+        record_site(&mut sites, PADDING_INJECT_KIND, trace.len() as u64);
     }
     for (idx, step) in trace.iter().enumerate() {
+        let step_idx = idx as u64;
+        record_site(&mut sites, MEMORY_ADDRESS_SPACE_INJECT_KIND, step_idx);
+        record_site(&mut sites, FIELD_RANGE_INJECT_KIND, step_idx);
+        record_site(&mut sites, OP_SELECTOR_INJECT_KIND, step_idx);
+        record_site(&mut sites, OPERAND_INDEX_INJECT_KIND, step_idx);
+        record_site(&mut sites, IMMEDIATE_SIGN_INJECT_KIND, step_idx);
+        record_site(&mut sites, FORMAT_IMMEDIATE_INJECT_KIND, step_idx);
+        record_site(&mut sites, ALU_IMMEDIATE_INJECT_KIND, step_idx);
+        record_site(&mut sites, SHIFT_INJECT_KIND, step_idx);
+        record_site(&mut sites, COMPARISON_BOOL_INJECT_KIND, step_idx);
+        record_site(&mut sites, SUBTRACTION_INJECT_KIND, step_idx);
+        record_site(&mut sites, COMPARISON_AUX_INJECT_KIND, step_idx);
+        record_site(&mut sites, ARITH_SPECIAL_INJECT_KIND, step_idx);
+        record_site(&mut sites, DIV_BOUND_INJECT_KIND, step_idx);
+        record_site(&mut sites, PRODUCT_INJECT_KIND, step_idx);
+        record_site(&mut sites, SIGNED_UNSIGNED_INJECT_KIND, step_idx);
         if is_branch_step(step) {
-            record_site(&mut sites, CONTROL_FLOW_INJECT_KIND, idx as u64);
+            record_site(&mut sites, CONTROL_FLOW_INJECT_KIND, step_idx);
         }
         if is_real_lui_step(step) {
-            record_site(&mut sites, UPPER_IMMEDIATE_INJECT_KIND, idx as u64);
+            record_site(&mut sites, UPPER_IMMEDIATE_INJECT_KIND, step_idx);
+        }
+        if step.instruction_lookup.is_some() {
+            record_site(&mut sites, LOOKUP_BOOLEAN_INJECT_KIND, step_idx);
+        }
+        match step.memory_ops[2] {
+            MemoryOp::Write(0, _) => record_site(&mut sites, ZERO_REGISTER_INJECT_KIND, step_idx),
+            MemoryOp::Write(_, _) => record_site(&mut sites, DEST_BINDING_INJECT_KIND, step_idx),
+            MemoryOp::Read(_) => {}
+        }
+        if is_real_ram_op(step, memory_layout) {
+            record_site(&mut sites, MEMORY_ADDRESS_INJECT_KIND, step_idx);
+            record_site(&mut sites, MEMORY_KIND_SELECTOR_INJECT_KIND, step_idx);
+            record_site(&mut sites, MEMORY_VALUE_INJECT_KIND, step_idx);
+            record_site(&mut sites, STORE_LOAD_INJECT_KIND, step_idx);
+            record_site(&mut sites, TIME_MONOTONIC_INJECT_KIND, step_idx);
         }
     }
     sites
@@ -308,13 +429,25 @@ fn collect_observed_injection_sites(trace: &[JoltTraceStep<RV32I>]) -> BTreeMap<
 
 fn proving_sizes(exec: &JoltExecution) -> (usize, usize, usize) {
     let bytecode_size = exec.bytecode.len().max(8).next_power_of_two();
-    let memory_size = exec.memory_init.len().max(8).next_power_of_two();
+    let memory_size =
+        trace_memory_witness_size(&exec.trace, &exec.memory_init, &exec.io_device.memory_layout);
     let trace_size = exec.trace.len().max(8).next_power_of_two();
     (bytecode_size, memory_size, trace_size)
 }
 
-fn prove_and_verify(exec: JoltExecution) -> Result<Option<String>, String> {
+fn prove_and_verify(exec: JoltExecution) -> Result<(Option<String>, bool), String> {
     let (max_bytecode_size, max_memory_size, max_trace_length) = proving_sizes(&exec);
+    let prev_kind = std::env::var_os(JOLT_INJECT_KIND_ENV);
+    let prev_step = std::env::var_os(JOLT_INJECT_STEP_ENV);
+    let prev_applied = std::env::var_os(JOLT_INJECT_APPLIED_ENV);
+    std::env::remove_var(JOLT_INJECT_APPLIED_ENV);
+    if let Some(kind) = exec.inject_kind.as_deref() {
+        std::env::set_var(JOLT_INJECT_KIND_ENV, kind);
+        std::env::set_var(JOLT_INJECT_STEP_ENV, exec.inject_step.to_string());
+    } else {
+        std::env::remove_var(JOLT_INJECT_KIND_ENV);
+        std::env::remove_var(JOLT_INJECT_STEP_ENV);
+    }
     let prove_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let preprocessing = RV32IJoltVM::prover_preprocess(
             exec.bytecode.clone(),
@@ -340,9 +473,13 @@ fn prove_and_verify(exec: JoltExecution) -> Result<Option<String>, String> {
         .err()
         .map(|e| format!("jolt verify failed: {e}"))
     }));
+    let injection_applied = std::env::var(JOLT_INJECT_APPLIED_ENV).ok().as_deref() == Some("1");
+    restore_env_var(JOLT_INJECT_KIND_ENV, prev_kind);
+    restore_env_var(JOLT_INJECT_STEP_ENV, prev_step);
+    restore_env_var(JOLT_INJECT_APPLIED_ENV, prev_applied);
 
     match prove_result {
-        Ok(verify_res) => Ok(verify_res),
+        Ok(verify_res) => Ok((verify_res, injection_applied)),
         Err(payload) => {
             let msg = if let Some(s) = payload.downcast_ref::<&str>() {
                 (*s).to_string()
@@ -351,7 +488,7 @@ fn prove_and_verify(exec: JoltExecution) -> Result<Option<String>, String> {
             } else {
                 "unknown panic payload".to_string()
             };
-            Ok(Some(format!("jolt panic: {msg}")))
+            Ok((Some(format!("jolt panic: {msg}")), injection_applied))
         }
     }
 }
@@ -362,12 +499,20 @@ pub fn run_backend_once(
     inject_step: u64,
 ) -> Result<RunResponse, String> {
     let exec = execute_trace(words, inject_kind, inject_step)?;
-    let derived = JoltTrace::from_executed_rows(words, &exec.rows)?;
+    let derived = JoltTrace::from_execution(
+        words,
+        &exec.rows,
+        &exec.trace,
+        &exec.memory_init,
+        &exec.io_device,
+    )?;
     let final_regs = exec.final_regs;
     let micro_op_count = exec.trace.len();
-    let observed_injection_sites = collect_observed_injection_sites(&exec.trace);
-    let injection_applied = exec.injection_applied;
-    let backend_error = prove_and_verify(exec)?;
+    let observed_injection_sites =
+        collect_observed_injection_sites(&exec.trace, &exec.io_device.memory_layout);
+    let trace_injection_applied = exec.injection_applied;
+    let (backend_error, proof_injection_applied) = prove_and_verify(exec)?;
+    let injection_applied = trace_injection_applied || proof_injection_applied;
 
     Ok(RunResponse {
         final_regs: Some(final_regs),
@@ -398,13 +543,23 @@ impl JoltBackend {
     }
 
     fn candidate_schedule(&self, inject_kind: &str, anchor: u64) -> InjectionSchedule {
-        if let Some(steps) = self.last_observed_injection_sites.get(inject_kind) {
+        let base_kind = base_inject_kind(inject_kind);
+        if let Some(steps) = self
+            .last_observed_injection_sites
+            .get(inject_kind)
+            .or_else(|| self.last_observed_injection_sites.get(base_kind))
+        {
             if !steps.is_empty() {
                 return InjectionSchedule::Explicit(steps.clone());
             }
         }
-        if inject_kind == ENTRYPOINT_INJECT_KIND {
+        if base_kind == ENTRYPOINT_INJECT_KIND {
             InjectionSchedule::Exact(0)
+        } else if matches!(
+            base_kind,
+            MEMORY_INITIAL_INJECT_KIND | MEMORY_FINALIZATION_INJECT_KIND | PADDING_INJECT_KIND
+        ) {
+            InjectionSchedule::Exact(anchor)
         } else {
             InjectionSchedule::AroundAnchor(anchor)
         }
@@ -412,21 +567,134 @@ impl JoltBackend {
 
     fn candidate_for_hit(&self, hit: &BucketHit) -> Option<SemanticInjectionCandidate> {
         let obligation_id = hit.details.get("obligation_id")?.as_str()?;
-        let anchor = hit
+        let step_anchor = hit
             .details
             .get("step_idx")
             .and_then(|v| v.as_u64())
-            .or_else(|| hit.details.get("op_idx").and_then(|v| v.as_u64()))?;
+            .or_else(|| hit.details.get("op_idx").and_then(|v| v.as_u64()));
+        let witness_anchor = hit.details.get("witness_index").and_then(|v| v.as_u64());
+        let anchor = if matches!(obligation_id, "me7" | "me11") {
+            witness_anchor.or(step_anchor)?
+        } else {
+            step_anchor.or(witness_anchor)?
+        };
         let (semantic_class, inject_kind) = match (hit.bucket_id.as_str(), obligation_id) {
+            (id, "rf1") if id == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id => (
+                semantic::decode::ZERO_REGISTER_IMMUTABILITY.semantic_class,
+                ZERO_REGISTER_INJECT_KIND,
+            ),
+            (id, "rf2") if id == semantic::decode::OPERAND_INDEX_ROUTING.id => {
+                (semantic::decode::OPERAND_INDEX_ROUTING.semantic_class, OPERAND_INDEX_INJECT_KIND)
+            }
+            (id, "rf3") if id == semantic::exec::DEST_BINDING.id => {
+                (semantic::exec::DEST_BINDING.semantic_class, DEST_BINDING_INJECT_KIND)
+            }
+            (id, "id1") if id == semantic::decode::FIELD_RANGE.id => {
+                (semantic::decode::FIELD_RANGE.semantic_class, FIELD_RANGE_INJECT_KIND)
+            }
+            (id, "id2") if id == semantic::decode::IMMEDIATE_SIGN_EXTENSION.id => (
+                semantic::decode::IMMEDIATE_SIGN_EXTENSION.semantic_class,
+                IMMEDIATE_SIGN_INJECT_KIND,
+            ),
             (id, "id3") if id == semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.id => (
                 semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.semantic_class,
                 UPPER_IMMEDIATE_INJECT_KIND,
+            ),
+            (id, "id4") if id == semantic::exec::OP_SELECTOR_BINDING.id => {
+                (semantic::exec::OP_SELECTOR_BINDING.semantic_class, OP_SELECTOR_INJECT_KIND)
+            }
+            (id, "id5") if id == semantic::decode::FORMAT_IMMEDIATE_REASSEMBLY.id => (
+                semantic::decode::FORMAT_IMMEDIATE_REASSEMBLY.semantic_class,
+                FORMAT_IMMEDIATE_INJECT_KIND,
+            ),
+            (id, "al1") if id == semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id => (
+                semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.semantic_class,
+                ALU_IMMEDIATE_INJECT_KIND,
+            ),
+            (id, "al2") if id == semantic::alu::SHIFT_MOD32.id => {
+                (semantic::alu::SHIFT_MOD32.semantic_class, SHIFT_INJECT_KIND)
+            }
+            (id, "al3") if id == semantic::alu::COMPARISON_BOOLEANITY.id => {
+                (semantic::alu::COMPARISON_BOOLEANITY.semantic_class, COMPARISON_BOOL_INJECT_KIND)
+            }
+            (id, "al4") if id == semantic::alu::SUBTRACTION_BORROW_CHAIN.id => {
+                (semantic::alu::SUBTRACTION_BORROW_CHAIN.semantic_class, SUBTRACTION_INJECT_KIND)
+            }
+            (id, "al5") if id == semantic::alu::COMPARISON_AUXILIARY_CHAIN.id => (
+                semantic::alu::COMPARISON_AUXILIARY_CHAIN.semantic_class,
+                COMPARISON_AUX_INJECT_KIND,
+            ),
+            (id, "md1" | "md2") if id == semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.id => (
+                semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.semantic_class,
+                ARITH_SPECIAL_INJECT_KIND,
+            ),
+            (id, "md3") if id == semantic::arithmetic::DIVISION_REMAINDER_BOUND.id => (
+                semantic::arithmetic::DIVISION_REMAINDER_BOUND.semantic_class,
+                DIV_BOUND_INJECT_KIND,
+            ),
+            (id, "md4") if id == semantic::arithmetic::PRODUCT_DECOMPOSITION.id => {
+                (semantic::arithmetic::PRODUCT_DECOMPOSITION.semantic_class, PRODUCT_INJECT_KIND)
+            }
+            (id, "md5") if id == semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION.id => (
+                semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION.semantic_class,
+                SIGNED_UNSIGNED_INJECT_KIND,
+            ),
+            (id, "me1") if id == semantic::memory::STORE_LOAD_PAYLOAD_FLOW.id => {
+                (semantic::memory::STORE_LOAD_PAYLOAD_FLOW.semantic_class, STORE_LOAD_INJECT_KIND)
+            }
+            (id, "me2") if id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id => (
+                semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.semantic_class,
+                MEMORY_ADDRESS_INJECT_KIND,
+            ),
+            (id, "me3") if id == semantic::memory::LOAD_VALUE_BINDING.id => {
+                (semantic::memory::LOAD_VALUE_BINDING.semantic_class, MEMORY_VALUE_INJECT_KIND)
+            }
+            (id, "me4") if id == semantic::memory::WRITE_PAYLOAD_CONSISTENCY.id => (
+                semantic::memory::WRITE_PAYLOAD_CONSISTENCY.semantic_class,
+                MEMORY_VALUE_INJECT_KIND,
+            ),
+            (id, "me5") if id == semantic::memory::ADDRESS_SPACE_CONSISTENCY.id => (
+                semantic::memory::ADDRESS_SPACE_CONSISTENCY.semantic_class,
+                MEMORY_ADDRESS_SPACE_INJECT_KIND,
+            ),
+            (id, "me6") if id == semantic::memory::ADDRESS_BOUNDARY_RANGE.id => (
+                semantic::memory::ADDRESS_BOUNDARY_RANGE.semantic_class,
+                MEMORY_ADDRESS_INJECT_KIND,
+            ),
+            (id, "me7") if id == semantic::memory::INITIAL_VALUE_BINDING.id => {
+                (semantic::memory::INITIAL_VALUE_BINDING.semantic_class, MEMORY_INITIAL_INJECT_KIND)
+            }
+            (id, "me9") if id == semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.id => (
+                semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.semantic_class,
+                MEMORY_ADDRESS_INJECT_KIND,
+            ),
+            (id, "me10") if id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id => (
+                semantic::memory::KIND_SELECTOR_CONSISTENCY.semantic_class,
+                MEMORY_KIND_SELECTOR_INJECT_KIND,
+            ),
+            (id, "me11") if id == semantic::memory::FINALIZATION_CONSISTENCY.id => (
+                semantic::memory::FINALIZATION_CONSISTENCY.semantic_class,
+                MEMORY_FINALIZATION_INJECT_KIND,
+            ),
+            (id, "ts1" | "ts3") if id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id => (
+                semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.semantic_class,
+                TIME_BOUNDARY_INJECT_KIND,
+            ),
+            (id, "ts2") if id == semantic::time::MONOTONIC_ACCESS_ORDERING.id => (
+                semantic::time::MONOTONIC_ACCESS_ORDERING.semantic_class,
+                TIME_MONOTONIC_INJECT_KIND,
             ),
             (id, "cf4") if id == semantic::control::ENTRYPOINT_BINDING.id => {
                 (semantic::control::ENTRYPOINT_BINDING.semantic_class, ENTRYPOINT_INJECT_KIND)
             }
             (id, "cf1") if id == semantic::exec::CONTROL_FLOW_BINDING.id => {
                 (semantic::exec::CONTROL_FLOW_BINDING.semantic_class, CONTROL_FLOW_INJECT_KIND)
+            }
+            (id, "bu1") if id == semantic::lookup::BOOLEAN_MULTIPLICITY.id => {
+                (semantic::lookup::BOOLEAN_MULTIPLICITY.semantic_class, LOOKUP_BOOLEAN_INJECT_KIND)
+            }
+            (id, "pd1") if id == semantic::row::PADDING_INTERACTION_SEND.id => {
+                (semantic::row::PADDING_INTERACTION_SEND.semantic_class, PADDING_INJECT_KIND)
             }
             _ => return None,
         };

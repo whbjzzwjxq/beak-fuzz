@@ -24,6 +24,7 @@ pub struct OpenVMTrace {
     memory_accesses: Vec<OpenVMMemoryAccess>,
     memory_inits: Vec<OpenVMMemoryInit>,
     memory_finalizations: Vec<OpenVMMemoryFinalization>,
+    lookup_multiplicities: Vec<OpenVMLookupMultiplicity>,
 
     bucket_hits: Vec<BucketHit>,
     trace_signals: Vec<TraceSignal>,
@@ -51,6 +52,8 @@ pub struct OpenVMMemoryAccess {
     seq: u64,
     step_idx: u64,
     op_idx: u64,
+    #[serde(default)]
+    pc: Option<u32>,
     row_op_idx: u64,
     opcode: u32,
     rs1_ptr: u32,
@@ -92,6 +95,16 @@ pub struct OpenVMMemoryFinalization {
     values: Vec<u32>,
     was_initial: bool,
     changed_from_initial: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenVMLookupMultiplicity {
+    seq: u64,
+    step_idx: u64,
+    table_name: String,
+    row_idx: u64,
+    multiplicity: u32,
+    is_real: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -765,6 +778,7 @@ impl OpenVMTrace {
         let mut memory_accesses = Vec::new();
         let mut memory_inits = Vec::new();
         let mut memory_finalizations = Vec::new();
+        let mut lookup_multiplicities = Vec::new();
 
         for (idx, log) in logs.into_iter().enumerate() {
             let obj = log.as_object().ok_or_else(|| format!("log[{}]: not an object", idx))?;
@@ -808,6 +822,11 @@ impl OpenVMTrace {
                         .map_err(|e| format!("log[{}] memory_finalization: {}", idx, e))?;
                     memory_finalizations.push(finalization);
                 }
+                "lookup_multiplicity" => {
+                    let row: OpenVMLookupMultiplicity = serde_json::from_value(data)
+                        .map_err(|e| format!("log[{}] lookup_multiplicity: {}", idx, e))?;
+                    lookup_multiplicities.push(row);
+                }
                 _ => return Err(format!("log[{}]: unknown type \"{}\"", idx, ty)),
             }
         }
@@ -819,6 +838,7 @@ impl OpenVMTrace {
             memory_accesses,
             memory_inits,
             memory_finalizations,
+            lookup_multiplicities,
         ))
     }
 
@@ -838,6 +858,7 @@ impl OpenVMTrace {
         memory_accesses: Vec<OpenVMMemoryAccess>,
         memory_inits: Vec<OpenVMMemoryInit>,
         memory_finalizations: Vec<OpenVMMemoryFinalization>,
+        lookup_multiplicities: Vec<OpenVMLookupMultiplicity>,
     ) -> Self {
         let mut insn_by_seq: Vec<Option<usize>> = Vec::new();
         let mut chip_row_by_seq: Vec<Option<usize>> = Vec::new();
@@ -907,6 +928,7 @@ impl OpenVMTrace {
             memory_accesses,
             memory_inits,
             memory_finalizations,
+            lookup_multiplicities,
             bucket_hits: Vec::new(),
             trace_signals: Vec::new(),
             insn_by_seq,
@@ -1015,6 +1037,7 @@ impl OpenVMTrace {
         self.derive_memory_lifecycle_obligation_hits(&mut hits);
         self.derive_timestamp_obligation_hits(&mut hits);
         self.derive_timestamp_memory_order_hits(&decoded, &mut hits);
+        self.derive_lookup_multiplicity_obligation_hits(&mut hits);
         self.bucket_hits.extend(hits);
     }
 
@@ -1465,6 +1488,13 @@ impl OpenVMTrace {
     ) {
         let decoded_by_step =
             decoded.iter().map(|(step_idx, insn)| (*step_idx, insn)).collect::<HashMap<_, _>>();
+        let decoded_by_pc = decoded
+            .iter()
+            .filter_map(|(step_idx, insn)| {
+                self.trace_instruction_for_step(*step_idx)
+                    .map(|trace_insn| (trace_insn.pc, (*step_idx, insn)))
+            })
+            .collect::<HashMap<_, _>>();
         let mut previous_subword: Option<(&OpenVMMemoryAccess, &RV32IMInstruction)> = None;
         #[derive(Clone)]
         struct StoreByte {
@@ -1476,7 +1506,11 @@ impl OpenVMTrace {
         let mut store_count_by_addr: HashMap<(u32, u32), u32> = HashMap::new();
 
         for access in &self.memory_accesses {
-            let Some(insn) = decoded_by_step.get(&access.step_idx) else {
+            let decoded_entry =
+                access.pc.and_then(|pc| decoded_by_pc.get(&pc).copied()).or_else(|| {
+                    decoded_by_step.get(&access.step_idx).map(|insn| (access.step_idx, *insn))
+                });
+            let Some((hit_op_idx, insn)) = decoded_entry else {
                 continue;
             };
             let mnemonic = insn.mnemonic.as_str();
@@ -1489,6 +1523,8 @@ impl OpenVMTrace {
                 ("row_op_idx", json!(access.row_op_idx)),
                 ("memory_seq", json!(access.seq)),
                 ("memory_op_idx", json!(access.op_idx)),
+                ("memory_step_idx", json!(access.step_idx)),
+                ("memory_pc", json!(access.pc)),
                 ("row_opcode", json!(access.opcode)),
                 ("rs1_ptr", json!(access.rs1_ptr)),
                 ("rd_rs2_ptr", json!(access.rd_rs2_ptr)),
@@ -1528,7 +1564,7 @@ impl OpenVMTrace {
                             hits,
                             semantic::memory::STORE_LOAD_PAYLOAD_FLOW,
                             insn,
-                            access.step_idx,
+                            hit_op_idx,
                             "me1",
                             cell_id,
                             "memory_access",
@@ -1552,7 +1588,7 @@ impl OpenVMTrace {
                             hits,
                             semantic::memory::STORE_LOAD_PAYLOAD_FLOW,
                             insn,
-                            access.step_idx,
+                            hit_op_idx,
                             "me1",
                             "me1.overwrite",
                             "memory_access",
@@ -1571,7 +1607,7 @@ impl OpenVMTrace {
                         hits,
                         semantic::memory::INITIAL_VALUE_BINDING,
                         insn,
-                        access.step_idx,
+                        hit_op_idx,
                         "me7",
                         cell_id,
                         "memory_access",
@@ -1594,7 +1630,7 @@ impl OpenVMTrace {
                         hits,
                         semantic::memory::ADDRESS_BOUNDARY_RANGE,
                         insn,
-                        access.step_idx,
+                        hit_op_idx,
                         "me6",
                         cell_id,
                         "memory_access",
@@ -1607,7 +1643,7 @@ impl OpenVMTrace {
                     hits,
                     semantic::memory::ADDRESS_BOUNDARY_RANGE,
                     insn,
-                    access.step_idx,
+                    hit_op_idx,
                     "me6",
                     "me6.heap_boundary",
                     "memory_access",
@@ -1620,7 +1656,7 @@ impl OpenVMTrace {
                     hits,
                     semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY,
                     insn,
-                    access.step_idx,
+                    hit_op_idx,
                     "me2",
                     "me2.byte_any",
                     "memory_access",
@@ -1631,7 +1667,7 @@ impl OpenVMTrace {
                     hits,
                     semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY,
                     insn,
-                    access.step_idx,
+                    hit_op_idx,
                     "me2",
                     "me2.half_off1",
                     "memory_access",
@@ -1648,7 +1684,7 @@ impl OpenVMTrace {
                     hits,
                     semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY,
                     insn,
-                    access.step_idx,
+                    hit_op_idx,
                     "me2",
                     cell_id,
                     "memory_access",
@@ -1661,7 +1697,7 @@ impl OpenVMTrace {
                     hits,
                     semantic::memory::LOAD_VALUE_BINDING,
                     insn,
-                    access.step_idx,
+                    hit_op_idx,
                     "me3",
                     cell_id,
                     "memory_access",
@@ -1680,7 +1716,7 @@ impl OpenVMTrace {
                     hits,
                     semantic::memory::WRITE_PAYLOAD_CONSISTENCY,
                     insn,
-                    access.step_idx,
+                    hit_op_idx,
                     "me4",
                     cell_id,
                     "memory_access",
@@ -1697,7 +1733,7 @@ impl OpenVMTrace {
                         hits,
                         semantic::memory::WRITE_PAYLOAD_CONSISTENCY,
                         insn,
-                        access.step_idx,
+                        hit_op_idx,
                         "me4",
                         cell_id,
                         "memory_access",
@@ -1715,7 +1751,7 @@ impl OpenVMTrace {
                     hits,
                     semantic::memory::ADDRESS_SPACE_CONSISTENCY,
                     insn,
-                    access.step_idx,
+                    hit_op_idx,
                     "me5",
                     cell_id,
                     "memory_access",
@@ -1734,7 +1770,7 @@ impl OpenVMTrace {
                     hits,
                     semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY,
                     insn,
-                    access.step_idx,
+                    hit_op_idx,
                     "me9",
                     cell_id,
                     "memory_access",
@@ -1752,7 +1788,7 @@ impl OpenVMTrace {
                             hits,
                             semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY,
                             insn,
-                            access.step_idx,
+                            hit_op_idx,
                             "me9",
                             cell_id,
                             "memory_access",
@@ -1768,7 +1804,7 @@ impl OpenVMTrace {
                 hits,
                 semantic::memory::KIND_SELECTOR_CONSISTENCY,
                 insn,
-                access.step_idx,
+                hit_op_idx,
                 "me10",
                 cell_id,
                 "memory_access",
@@ -1787,11 +1823,7 @@ impl OpenVMTrace {
                     let key = (access.address_space, addr);
                     last_store_by_addr.insert(
                         key,
-                        StoreByte {
-                            mnemonic: mnemonic.to_string(),
-                            step_idx: access.step_idx,
-                            byte,
-                        },
+                        StoreByte { mnemonic: mnemonic.to_string(), step_idx: hit_op_idx, byte },
                     );
                     *store_count_by_addr.entry(key).or_insert(0) += 1;
                 }
@@ -1928,15 +1960,26 @@ impl OpenVMTrace {
     ) {
         let decoded_by_step =
             decoded.iter().map(|(step_idx, insn)| (*step_idx, insn)).collect::<HashMap<_, _>>();
-        let mut last_by_access_key: HashMap<(u32, u32), (&OpenVMMemoryAccess, &RV32IMInstruction)> =
+        let decoded_by_pc = decoded
+            .iter()
+            .filter_map(|(step_idx, insn)| {
+                self.trace_instruction_for_step(*step_idx)
+                    .map(|trace_insn| (trace_insn.pc, (*step_idx, insn)))
+            })
+            .collect::<HashMap<_, _>>();
+        let mut last_by_access_key: HashMap<(u32, u32), (&OpenVMMemoryAccess, u64)> =
             HashMap::new();
 
         for access in &self.memory_accesses {
-            let Some(insn) = decoded_by_step.get(&access.step_idx) else {
+            let decoded_entry =
+                access.pc.and_then(|pc| decoded_by_pc.get(&pc).copied()).or_else(|| {
+                    decoded_by_step.get(&access.step_idx).map(|insn| (access.step_idx, *insn))
+                });
+            let Some((hit_op_idx, insn)) = decoded_entry else {
                 continue;
             };
             let key = (access.address_space, access.effective_ptr);
-            if let Some((prev_access, _prev_insn)) = last_by_access_key.get(&key) {
+            if let Some((prev_access, prev_op_idx)) = last_by_access_key.get(&key) {
                 let ts_diff = access.timestamp.wrapping_sub(prev_access.timestamp);
                 let mut cells = Vec::new();
                 if ts_diff == 1 {
@@ -1953,12 +1996,15 @@ impl OpenVMTrace {
                         hits,
                         semantic::time::MONOTONIC_ACCESS_ORDERING,
                         insn,
-                        access.step_idx,
+                        hit_op_idx,
                         "ts2",
                         cell_id,
                         "memory_access",
                         &[
-                            ("previous_step_idx", json!(prev_access.step_idx)),
+                            ("previous_step_idx", json!(prev_op_idx)),
+                            ("previous_memory_step_idx", json!(prev_access.step_idx)),
+                            ("memory_step_idx", json!(access.step_idx)),
+                            ("memory_pc", json!(access.pc)),
                             ("previous_timestamp", json!(prev_access.timestamp)),
                             ("timestamp", json!(access.timestamp)),
                             ("ts_diff", json!(ts_diff)),
@@ -1971,7 +2017,41 @@ impl OpenVMTrace {
                     );
                 }
             }
-            last_by_access_key.insert(key, (access, insn));
+            last_by_access_key.insert(key, (access, hit_op_idx));
+        }
+    }
+
+    fn derive_lookup_multiplicity_obligation_hits(&self, hits: &mut Vec<BucketHit>) {
+        for row in &self.lookup_multiplicities {
+            if !row.is_real && row.multiplicity == 0 {
+                continue;
+            }
+            let cell_id = if row.is_real {
+                if row.multiplicity > 1 {
+                    "bu1.multi_send"
+                } else {
+                    "bu1.real_row"
+                }
+            } else {
+                "bu1.padding_row"
+            };
+            hits.push(BucketHit::semantic(
+                semantic::lookup::BOOLEAN_MULTIPLICITY,
+                HashMap::from([
+                    ("obligation_id".to_string(), json!("bu1")),
+                    ("cell_id".to_string(), json!(cell_id)),
+                    ("op_idx".to_string(), json!(row.step_idx)),
+                    ("step_idx".to_string(), json!(row.step_idx)),
+                    ("backend".to_string(), json!("openvm")),
+                    ("commit".to_string(), json!(OPENVM_COMMIT)),
+                    ("trace_source".to_string(), json!("lookup_multiplicity")),
+                    ("lookup_seq".to_string(), json!(row.seq)),
+                    ("table_name".to_string(), json!(row.table_name)),
+                    ("row_idx".to_string(), json!(row.row_idx)),
+                    ("multiplicity".to_string(), json!(row.multiplicity)),
+                    ("is_real".to_string(), json!(row.is_real)),
+                ]),
+            ));
         }
     }
 
@@ -2840,7 +2920,7 @@ mod tests {
         OpenVMChipRowBase, OpenVMChipRowEnvelope, OpenVMChipRowKind, OpenVMChipRowPayload,
     };
 
-    use super::{OpenVMMemoryAccess, OpenVMTrace};
+    use super::{OpenVMLookupMultiplicity, OpenVMMemoryAccess, OpenVMTrace};
 
     #[test]
     fn decoded_group_1_3_hits_use_registered_contract_buckets() {
@@ -2853,6 +2933,7 @@ mod tests {
         ];
 
         let trace = OpenVMTrace::new(
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -3002,8 +3083,15 @@ mod tests {
                 },
             },
         ];
-        let trace =
-            OpenVMTrace::new(Vec::new(), rows, Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let trace = OpenVMTrace::new(
+            Vec::new(),
+            rows,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
         let mut hits = Vec::new();
         trace.derive_chip_row_obligation_hits(&decoded, &mut hits);
 
@@ -3079,8 +3167,15 @@ mod tests {
                 },
             },
         ];
-        let trace =
-            OpenVMTrace::new(Vec::new(), rows, Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let trace = OpenVMTrace::new(
+            Vec::new(),
+            rows,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
         let mut hits = Vec::new();
         trace.derive_chip_row_obligation_hits(&decoded, &mut hits);
 
@@ -3111,6 +3206,7 @@ mod tests {
                 seq: 1,
                 step_idx: 0,
                 op_idx: 0,
+                pc: None,
                 row_op_idx: 0,
                 opcode: 0,
                 rs1_ptr: 1,
@@ -3131,6 +3227,7 @@ mod tests {
                 prev_data: vec![0, 0, 0, 0],
                 write_data: vec![0, 0x80, 0, 0],
             }],
+            Vec::new(),
             Vec::new(),
             Vec::new(),
         );
@@ -3181,6 +3278,7 @@ mod tests {
                     seq: 1,
                     step_idx: 0,
                     op_idx: 0,
+                    pc: None,
                     row_op_idx: 0,
                     opcode: 0,
                     rs1_ptr: 1,
@@ -3205,6 +3303,7 @@ mod tests {
                     seq: 2,
                     step_idx: 1,
                     op_idx: 0,
+                    pc: None,
                     row_op_idx: 0,
                     opcode: 0,
                     rs1_ptr: 1,
@@ -3228,6 +3327,7 @@ mod tests {
             ],
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         );
         let mut hits = Vec::new();
         trace.derive_memory_access_obligation_hits(&decoded, &mut hits);
@@ -3242,6 +3342,37 @@ mod tests {
             hit.bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id
                 && hit.details.get("cell_id").and_then(|v| v.as_str()) == Some("ts2.consecutive")
                 && hit.details.get("ts_diff").and_then(|v| v.as_u64()) == Some(1)
+        }));
+    }
+
+    #[test]
+    fn lookup_multiplicity_rows_emit_bu1_cells() {
+        let trace = OpenVMTrace::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![OpenVMLookupMultiplicity {
+                seq: 7,
+                step_idx: 42,
+                table_name: "bitwise_op_lookup.xor".to_string(),
+                row_idx: 42,
+                multiplicity: 2,
+                is_real: true,
+            }],
+        );
+        let mut hits = Vec::new();
+        trace.derive_lookup_multiplicity_obligation_hits(&mut hits);
+
+        assert!(hits.iter().any(|hit| {
+            hit.bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id
+                && hit.details.get("obligation_id").and_then(|v| v.as_str()) == Some("bu1")
+                && hit.details.get("cell_id").and_then(|v| v.as_str()) == Some("bu1.multi_send")
+                && hit.details.get("table_name").and_then(|v| v.as_str())
+                    == Some("bitwise_op_lookup.xor")
+                && hit.details.get("multiplicity").and_then(|v| v.as_u64()) == Some(2)
         }));
     }
 }

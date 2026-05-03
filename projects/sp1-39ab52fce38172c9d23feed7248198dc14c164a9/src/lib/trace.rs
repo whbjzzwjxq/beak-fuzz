@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel, RISCVOracle};
 use beak_core::trace::observations::{SequenceInsnObservation, SequenceSemanticMatcherProfile};
 use beak_core::trace::{semantic, semantic_matchers, BucketHit, Trace, TraceSignal};
 use serde_json::{json, Value};
-use sp1_core_executor::{Instruction as SP1Instruction, Opcode, Program};
+use sp1_core_executor::{
+    ByteOpcode, ExecutionRecord, Executor, ExecutorMode, Instruction as SP1Instruction, Opcode,
+    Program,
+};
+use sp1_stark::SP1CoreOpts;
 
 use crate::chip_row::Sp1ChipRow;
 use crate::insn::Sp1Insn;
@@ -14,7 +17,6 @@ use crate::interaction::Sp1Interaction;
 const SP1_CODE_BASE: u32 = 0x1000;
 const BACKEND: &str = "sp1";
 const COMMIT: &str = "39ab52fce38172c9d23feed7248198dc14c164a9";
-const ORACLE_MAX_TRACE_STEPS: u32 = 1000;
 
 #[derive(Debug, Clone)]
 pub struct Sp1Trace {
@@ -38,12 +40,10 @@ fn op_u64_to_i32(v: u32) -> i32 {
     v as i32
 }
 
-fn sp1_trace_oracle_config() -> OracleConfig {
-    OracleConfig {
-        memory_model: OracleMemoryModel::SplitCodeData,
-        code_base: SP1_CODE_BASE,
-        data_size_bytes: 0,
-    }
+fn word_for_pc(words: &[u32], program: &Program, pc: u32) -> Option<u32> {
+    let offset = pc.checked_sub(program.pc_base)?;
+    let idx = (offset / 4) as usize;
+    words.get(idx).copied()
 }
 
 pub fn build_sp1_program(words: &[u32]) -> Result<Program, String> {
@@ -602,6 +602,15 @@ fn base_details(insn: &Sp1Insn, obligation_id: &str, cell_id: &str) -> HashMap<S
     if let Some(imm) = insn.imm {
         details.insert("imm".to_string(), json!(imm));
     }
+    if let Some(rd_val) = insn.rd_val {
+        details.insert("rd_val".to_string(), json!(rd_val));
+    }
+    if let Some(rs1_val) = insn.rs1_val {
+        details.insert("rs1_val".to_string(), json!(rs1_val));
+    }
+    if let Some(rs2_or_imm_val) = insn.rs2_or_imm_val {
+        details.insert("rs2_or_imm_val".to_string(), json!(rs2_or_imm_val));
+    }
     details
 }
 
@@ -613,6 +622,432 @@ fn push_obligation_hit(
     cell_id: &str,
 ) {
     hits.push(BucketHit::semantic(bucket, base_details(insn, obligation_id, cell_id)));
+}
+
+#[derive(Debug, Clone)]
+struct MemoryAccessObservation {
+    insn_idx: usize,
+    memory_hook_step: u64,
+    effective_ptr: u32,
+    aligned_ptr: u32,
+    byte_offset: u32,
+    width: u32,
+    is_load: bool,
+    is_store: bool,
+    value: u32,
+    prev_value: u32,
+    shard: u32,
+    prev_shard: u32,
+    timestamp: u32,
+    previous_timestamp: u32,
+}
+
+impl MemoryAccessObservation {
+    fn start(&self) -> u64 {
+        self.effective_ptr as u64
+    }
+
+    fn end(&self) -> u64 {
+        self.start().saturating_add(self.width as u64)
+    }
+}
+
+fn memory_width_for_opcode(opcode: Opcode) -> Option<u32> {
+    match opcode {
+        Opcode::LB | Opcode::LBU | Opcode::SB => Some(1),
+        Opcode::LH | Opcode::LHU | Opcode::SH => Some(2),
+        Opcode::LW | Opcode::SW => Some(4),
+        _ => None,
+    }
+}
+
+fn memory_access_details(
+    insn: &Sp1Insn,
+    obligation_id: &str,
+    cell_id: &str,
+    obs: &MemoryAccessObservation,
+) -> HashMap<String, Value> {
+    let mut details = base_details(insn, obligation_id, cell_id);
+    details.insert("trace_source".to_string(), json!("memory_instr_event"));
+    details.insert("memory_hook_step".to_string(), json!(obs.memory_hook_step));
+    details.insert("memory_row_idx".to_string(), json!(obs.memory_hook_step));
+    details.insert("effective_ptr".to_string(), json!(obs.effective_ptr));
+    details.insert("aligned_ptr".to_string(), json!(obs.aligned_ptr));
+    details.insert("byte_offset".to_string(), json!(obs.byte_offset));
+    details.insert("width".to_string(), json!(obs.width));
+    details.insert("is_load".to_string(), json!(obs.is_load));
+    details.insert("is_store".to_string(), json!(obs.is_store));
+    details.insert("address_space".to_string(), json!("memory"));
+    details.insert("timestamp".to_string(), json!(obs.timestamp));
+    details.insert("previous_timestamp".to_string(), json!(obs.previous_timestamp));
+    details.insert("shard".to_string(), json!(obs.shard));
+    details.insert("previous_shard".to_string(), json!(obs.prev_shard));
+    if obs.is_load {
+        details.insert("read_data".to_string(), json!(obs.value));
+    }
+    if obs.is_store {
+        details.insert("write_data".to_string(), json!(obs.value));
+        details.insert("prev_data".to_string(), json!(obs.prev_value));
+    }
+    details
+}
+
+fn push_memory_hit(
+    hits: &mut Vec<BucketHit>,
+    bucket: semantic::SemanticBucket,
+    insn: &Sp1Insn,
+    obligation_id: &str,
+    cell_id: &str,
+    obs: &MemoryAccessObservation,
+) {
+    hits.push(BucketHit::semantic(
+        bucket,
+        memory_access_details(insn, obligation_id, cell_id, obs),
+    ));
+}
+
+fn load_value_cell(mnemonic: &str, value: u32, byte_offset: u32) -> Option<&'static str> {
+    match mnemonic {
+        "lb" => {
+            let byte = value.to_le_bytes()[byte_offset as usize];
+            Some(if byte & 0x80 == 0 { "me3.lb_pos" } else { "me3.lb_neg" })
+        }
+        "lh" => {
+            let half = if byte_offset < 2 { value & 0xffff } else { value >> 16 };
+            Some(if half & 0x8000 == 0 { "me3.lh_pos" } else { "me3.lh_neg" })
+        }
+        "lbu" => Some("me3.lbu"),
+        "lhu" => Some("me3.lhu"),
+        _ => None,
+    }
+}
+
+fn write_payload_cell(mnemonic: &str, byte_offset: u32) -> Option<&'static str> {
+    match (mnemonic, byte_offset) {
+        ("sb", 0) => Some("me4.sb_off0"),
+        ("sb", 1) => Some("me4.sb_off1"),
+        ("sb", 2) => Some("me4.sb_off2"),
+        ("sb", 3) => Some("me4.sb_off3"),
+        ("sh", 0) => Some("me4.sh_off0"),
+        ("sh", 2) => Some("me4.sh_off2"),
+        _ => None,
+    }
+}
+
+fn alignment_cell(width: u32, byte_offset: u32) -> Option<&'static str> {
+    match (width, byte_offset) {
+        (1, _) => Some("me2.byte_any"),
+        (2, 1) | (2, 3) => Some("me2.half_off1"),
+        (4, 1) => Some("me2.word_off1"),
+        (4, 2) => Some("me2.word_off2"),
+        (4, 3) => Some("me2.word_off3"),
+        _ => None,
+    }
+}
+
+fn boundary_cell(mnemonic: &str, effective_ptr: u32) -> Option<&'static str> {
+    match mnemonic {
+        "lw" if effective_ptr >= 0xffff_fffc => Some("me6.near_max_lw"),
+        "sw" if effective_ptr >= 0xffff_fffc => Some("me6.near_max_sw"),
+        "lh" | "lhu" if effective_ptr >= 0xffff_fffe => Some("me6.near_max_lh"),
+        "sb" if effective_ptr == u32::MAX => Some("me6.near_max_sb"),
+        _ => None,
+    }
+}
+
+fn ranges_overlap(a: &MemoryAccessObservation, b: &MemoryAccessObservation) -> bool {
+    a.start() < b.end() && b.start() < a.end()
+}
+
+fn store_load_cell(
+    store: &MemoryAccessObservation,
+    load: &MemoryAccessObservation,
+    store_mnemonic: &str,
+    load_mnemonic: &str,
+    overwrite: bool,
+) -> Option<&'static str> {
+    if overwrite {
+        return Some("me1.overwrite");
+    }
+    match (store_mnemonic, load_mnemonic, store.width, load.width) {
+        ("sw", "lw", 4, 4) if store.effective_ptr == load.effective_ptr => Some("me1.sw_lw"),
+        ("sb", "lb" | "lbu", 1, 1) if store.effective_ptr == load.effective_ptr => {
+            Some("me1.sb_lb")
+        }
+        ("sh", "lh" | "lhu", 2, 2) if store.effective_ptr == load.effective_ptr => {
+            Some("me1.sh_lh")
+        }
+        ("sb", "lw", 1, 4) if ranges_overlap(store, load) => Some("me1.sb_lw"),
+        ("sw", "lb" | "lbu", 4, 1) if ranges_overlap(store, load) => Some("me1.sw_lb"),
+        ("sw", "lhu", 4, 2) if ranges_overlap(store, load) => Some("me1.sw_lhu"),
+        _ => None,
+    }
+}
+
+fn byte_lookup_step(row: usize, opcode_index: usize) -> u64 {
+    (row as u64).saturating_mul(9).saturating_add(opcode_index as u64)
+}
+
+fn emit_memory_event_obligation_hits(
+    records: &[ExecutionRecord],
+    instructions: &[Sp1Insn],
+) -> Vec<BucketHit> {
+    let mut hits = Vec::new();
+    let insn_by_pc_clk = instructions
+        .iter()
+        .enumerate()
+        .map(|(idx, insn)| ((insn.pc, insn.timestamp), idx))
+        .collect::<HashMap<_, _>>();
+
+    let mut observations = Vec::<MemoryAccessObservation>::new();
+    let mut memory_hook_step = 0u64;
+    for record in records {
+        for event in &record.memory_instr_events {
+            let Some(width) = memory_width_for_opcode(event.opcode) else {
+                memory_hook_step = memory_hook_step.saturating_add(1);
+                continue;
+            };
+            let Some(&insn_idx) = insn_by_pc_clk.get(&(event.pc, event.clk)) else {
+                memory_hook_step = memory_hook_step.saturating_add(1);
+                continue;
+            };
+            let current = event.mem_access.current_record();
+            let previous = event.mem_access.previous_record();
+            let effective_ptr = event.b.wrapping_add(event.c);
+            observations.push(MemoryAccessObservation {
+                insn_idx,
+                memory_hook_step,
+                effective_ptr,
+                aligned_ptr: effective_ptr.wrapping_sub(effective_ptr % 4),
+                byte_offset: effective_ptr % 4,
+                width,
+                is_load: matches!(
+                    event.opcode,
+                    Opcode::LB | Opcode::LBU | Opcode::LH | Opcode::LHU | Opcode::LW
+                ),
+                is_store: matches!(event.opcode, Opcode::SB | Opcode::SH | Opcode::SW),
+                value: current.value,
+                prev_value: previous.value,
+                shard: current.shard,
+                prev_shard: previous.shard,
+                timestamp: current.timestamp,
+                previous_timestamp: previous.timestamp,
+            });
+            memory_hook_step = memory_hook_step.saturating_add(1);
+        }
+    }
+
+    let mut prior_stores = Vec::<MemoryAccessObservation>::new();
+    let mut store_counts_by_word = HashMap::<u32, u64>::new();
+    for obs in &observations {
+        let insn = &instructions[obs.insn_idx];
+        if let Some(cell) = alignment_cell(obs.width, obs.byte_offset) {
+            push_memory_hit(
+                &mut hits,
+                semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY,
+                insn,
+                "me2",
+                cell,
+                obs,
+            );
+        }
+        let offset_cell = match obs.byte_offset {
+            0 => "me9.off0",
+            1 => "me9.off1",
+            2 => "me9.off2",
+            _ => "me9.off3",
+        };
+        push_memory_hit(
+            &mut hits,
+            semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY,
+            insn,
+            "me9",
+            offset_cell,
+            obs,
+        );
+        if let Some(cell) = boundary_cell(insn.mnemonic.as_str(), obs.effective_ptr) {
+            push_memory_hit(
+                &mut hits,
+                semantic::memory::ADDRESS_BOUNDARY_RANGE,
+                insn,
+                "me6",
+                cell,
+                obs,
+            );
+        }
+        let kind_cell = if obs.is_load { "me10.load" } else { "me10.store" };
+        push_memory_hit(
+            &mut hits,
+            semantic::memory::KIND_SELECTOR_CONSISTENCY,
+            insn,
+            "me10",
+            kind_cell,
+            obs,
+        );
+        if obs.timestamp > obs.previous_timestamp {
+            let ts_diff = obs.timestamp.saturating_sub(obs.previous_timestamp);
+            let cell = if ts_diff == 1 {
+                "ts2.consecutive"
+            } else if ts_diff >= 1024 {
+                "ts2.large_gap"
+            } else {
+                "ts2.small_gap"
+            };
+            let mut details = memory_access_details(insn, "ts2", cell, obs);
+            details.insert("ts_diff".to_string(), json!(ts_diff));
+            hits.push(BucketHit::semantic(semantic::time::MONOTONIC_ACCESS_ORDERING, details));
+        }
+
+        if obs.is_load {
+            if let Some(cell) = load_value_cell(insn.mnemonic.as_str(), obs.value, obs.byte_offset)
+            {
+                push_memory_hit(
+                    &mut hits,
+                    semantic::memory::LOAD_VALUE_BINDING,
+                    insn,
+                    "me3",
+                    cell,
+                    obs,
+                );
+            }
+            if obs.previous_timestamp <= 1
+                && obs.prev_value == 0
+                && !prior_stores.iter().any(|store| ranges_overlap(store, obs))
+            {
+                let mut details = memory_access_details(insn, "me7", "me7.bss_zero", obs);
+                details.insert("no_prior_write".to_string(), json!(true));
+                hits.push(BucketHit::semantic(semantic::memory::INITIAL_VALUE_BINDING, details));
+            }
+            if let Some(store) = prior_stores.iter().rev().find(|store| ranges_overlap(store, obs))
+            {
+                let store_insn = &instructions[store.insn_idx];
+                let overwrite =
+                    store_counts_by_word.get(&store.aligned_ptr).copied().unwrap_or(0) > 1;
+                if let Some(cell) = store_load_cell(
+                    store,
+                    obs,
+                    store_insn.mnemonic.as_str(),
+                    insn.mnemonic.as_str(),
+                    overwrite,
+                ) {
+                    let mut details = memory_access_details(insn, "me1", cell, obs);
+                    details.insert("store_step_idx".to_string(), json!(store.memory_hook_step));
+                    details.insert("store_pc".to_string(), json!(store_insn.pc));
+                    details.insert("store_mnemonic".to_string(), json!(store_insn.mnemonic));
+                    details.insert("write_data".to_string(), json!(store.value));
+                    hits.push(BucketHit::semantic(
+                        semantic::memory::STORE_LOAD_PAYLOAD_FLOW,
+                        details,
+                    ));
+                }
+            }
+        }
+
+        if obs.is_store {
+            if let Some(cell) = write_payload_cell(insn.mnemonic.as_str(), obs.byte_offset) {
+                push_memory_hit(
+                    &mut hits,
+                    semantic::memory::WRITE_PAYLOAD_CONSISTENCY,
+                    insn,
+                    "me4",
+                    cell,
+                    obs,
+                );
+            }
+            *store_counts_by_word.entry(obs.aligned_ptr).or_default() += 1;
+            prior_stores.push(obs.clone());
+        }
+    }
+
+    for record in records {
+        for (lookup, mult) in &record.byte_lookups {
+            if *mult == 0 {
+                continue;
+            }
+            let row = if lookup.opcode != ByteOpcode::U16Range {
+                (((lookup.b as u16) << 8) + lookup.c as u16) as usize
+            } else {
+                lookup.a1 as usize
+            };
+            let opcode_index = lookup.opcode as usize;
+            let cell = if *mult == 1 { "bu1.real_row" } else { "bu1.multi_send" };
+            let mut details = HashMap::new();
+            details.insert("obligation_id".to_string(), json!("bu1"));
+            details.insert("cell_id".to_string(), json!(cell));
+            details.insert("backend".to_string(), json!(BACKEND));
+            details.insert("commit".to_string(), json!(COMMIT));
+            details.insert("trace_source".to_string(), json!("byte_lookup"));
+            details.insert("op_idx".to_string(), json!(byte_lookup_step(row, opcode_index)));
+            details
+                .insert("byte_lookup_step".to_string(), json!(byte_lookup_step(row, opcode_index)));
+            details.insert("byte_lookup_row".to_string(), json!(row));
+            details.insert("byte_lookup_opcode_index".to_string(), json!(opcode_index));
+            details.insert("byte_opcode".to_string(), json!(format!("{:?}", lookup.opcode)));
+            details.insert("multiplicity".to_string(), json!(*mult));
+            hits.push(BucketHit::semantic(semantic::lookup::BOOLEAN_MULTIPLICITY, details));
+        }
+    }
+
+    let mut initial_values = HashMap::<u32, u32>::new();
+    let mut init_conflict = false;
+    for record in records {
+        for event in &record.global_memory_initialize_events {
+            if event.used == 0 {
+                continue;
+            }
+            if initial_values.insert(event.addr, event.value).is_some() {
+                init_conflict = true;
+            }
+        }
+    }
+    if !initial_values.is_empty() && !init_conflict {
+        let mut details = HashMap::new();
+        details.insert("obligation_id".to_string(), json!("me8"));
+        details.insert("cell_id".to_string(), json!("me8.no_conflict"));
+        details.insert("backend".to_string(), json!(BACKEND));
+        details.insert("commit".to_string(), json!(COMMIT));
+        details.insert("trace_source".to_string(), json!("memory_initialization"));
+        details.insert("op_idx".to_string(), json!(0));
+        details.insert("memory_init_count".to_string(), json!(initial_values.len()));
+        hits.push(BucketHit::semantic(semantic::memory::INITIAL_VALUE_BINDING, details));
+    }
+
+    for record in records {
+        for event in &record.global_memory_finalize_events {
+            if event.used == 0 {
+                continue;
+            }
+            let initial = initial_values.get(&event.addr).copied().unwrap_or(0);
+            let Some(cell) = (if event.value != initial || event.timestamp > 1 {
+                Some("me11.written_cells")
+            } else if initial_values.contains_key(&event.addr) {
+                Some("me11.read_only_cells")
+            } else {
+                None
+            }) else {
+                continue;
+            };
+            let mut details = HashMap::new();
+            details.insert("obligation_id".to_string(), json!("me11"));
+            details.insert("cell_id".to_string(), json!(cell));
+            details.insert("backend".to_string(), json!(BACKEND));
+            details.insert("commit".to_string(), json!(COMMIT));
+            details.insert("trace_source".to_string(), json!("memory_finalization"));
+            details.insert("op_idx".to_string(), json!(event.timestamp));
+            details.insert("pointer".to_string(), json!(event.addr));
+            details.insert("effective_ptr".to_string(), json!(event.addr));
+            details.insert("address_space".to_string(), json!("memory"));
+            details.insert("timestamp".to_string(), json!(event.timestamp));
+            details.insert("value".to_string(), json!(event.value));
+            details.insert("initial_value".to_string(), json!(initial));
+            details
+                .insert("was_initial".to_string(), json!(initial_values.contains_key(&event.addr)));
+            details.insert("changed_from_initial".to_string(), json!(event.value != initial));
+            hits.push(BucketHit::semantic(semantic::memory::FINALIZATION_CONSISTENCY, details));
+        }
+    }
+
+    hits
 }
 
 fn emit_instruction_obligation_hits(instructions: &[Sp1Insn]) -> Vec<BucketHit> {
@@ -822,13 +1257,42 @@ fn emit_instruction_obligation_hits(instructions: &[Sp1Insn]) -> Vec<BucketHit> 
 
         match mnemonic {
             "div" | "divu" | "rem" | "remu" => {
-                push_obligation_hit(
-                    &mut hits,
-                    semantic::arithmetic::DIVISION_REMAINDER_BOUND,
-                    insn,
-                    "md3",
-                    if matches!(mnemonic, "divu" | "remu") { "md3.unsigned" } else { "md3.pp" },
-                );
+                let divisor = insn.rs2_or_imm_val;
+                let signed_overflow = matches!(mnemonic, "div" | "rem")
+                    && insn.rs1_val == Some(0x8000_0000)
+                    && divisor == Some(u32::MAX);
+                if divisor == Some(0) {
+                    let cell = match mnemonic {
+                        "div" => "md1.div_zero",
+                        "divu" => "md1.divu_zero",
+                        "rem" => "md1.rem_zero",
+                        "remu" => "md1.remu_zero",
+                        _ => "md1.zero",
+                    };
+                    push_obligation_hit(
+                        &mut hits,
+                        semantic::arithmetic::SPECIAL_CASE_CONSISTENCY,
+                        insn,
+                        "md1",
+                        cell,
+                    );
+                } else if signed_overflow {
+                    push_obligation_hit(
+                        &mut hits,
+                        semantic::arithmetic::SPECIAL_CASE_CONSISTENCY,
+                        insn,
+                        "md2",
+                        if mnemonic == "div" { "md2.div_overflow" } else { "md2.rem_overflow" },
+                    );
+                } else {
+                    push_obligation_hit(
+                        &mut hits,
+                        semantic::arithmetic::DIVISION_REMAINDER_BOUND,
+                        insn,
+                        "md3",
+                        if matches!(mnemonic, "divu" | "remu") { "md3.unsigned" } else { "md3.pp" },
+                    );
+                }
             }
             "mul" | "mulh" | "mulhu" | "mulhsu" => {
                 let cell = match mnemonic {
@@ -1036,40 +1500,94 @@ impl Sp1Trace {
     }
 
     pub fn from_words(words: &[u32]) -> Result<Self, String> {
-        let executed_steps = RISCVOracle::executed_steps_with_config(
-            words,
-            sp1_trace_oracle_config(),
-            ORACLE_MAX_TRACE_STEPS,
-        );
-        let mut instructions = Vec::with_capacity(executed_steps.len());
-        for executed in executed_steps {
-            let exec_insn = decode_word_to_sp1_instruction(executed.word)?;
-            let (rd, rs1, rs2, imm) = decoded_ops_from_executor_instruction(&exec_insn);
-            let mnemonic = RV32IMInstruction::from_word(executed.word)
-                .map(|insn| insn.mnemonic)
-                .unwrap_or_else(|_| exec_insn.opcode.mnemonic().to_string());
-            let asm = asm_from_parts(&mnemonic, rd, rs1, rs2, imm);
-            instructions.push(Sp1Insn {
-                seq: executed.step_idx as u64,
-                step_idx: executed.step_idx as u64,
-                pc: executed.pc,
-                timestamp: executed.step_idx,
-                next_pc: executed.pc.wrapping_add(4),
-                next_timestamp: executed.step_idx.saturating_add(1),
-                word: executed.word,
-                mnemonic,
-                rd,
-                rs1,
-                rs2,
-                imm,
-                asm,
-            });
-        }
-        let next_pcs: Vec<u32> =
-            instructions.iter().skip(1).map(|insn| insn.pc).chain(std::iter::once(0)).collect();
-        for (insn, next_pc) in instructions.iter_mut().zip(next_pcs) {
-            if next_pc != 0 {
-                insn.next_pc = next_pc;
+        let program = build_sp1_program(words)?;
+        let mut executor = Executor::new(program, SP1CoreOpts::default());
+        executor.executor_mode = ExecutorMode::Trace;
+        executor.run().map_err(|e| format!("sp1 executor run failed while building trace: {e}"))?;
+        let records = std::mem::take(&mut executor.records);
+        Self::from_execution_records(words, &records)
+    }
+
+    pub fn from_execution_records(
+        words: &[u32],
+        records: &[ExecutionRecord],
+    ) -> Result<Self, String> {
+        let mut instructions = Vec::new();
+        let mut seq = 0u64;
+        let mut step_idx = 0u64;
+
+        for record in records {
+            for cpu in &record.cpu_events {
+                let exec_insn = record.program.fetch(cpu.pc);
+                let fallback_word = word_for_pc(words, &record.program, cpu.pc);
+
+                let insn = if let Some(word) = fallback_word {
+                    if let Ok(dec) = RV32IMInstruction::from_word(word) {
+                        Sp1Insn {
+                            seq,
+                            step_idx,
+                            pc: cpu.pc,
+                            timestamp: cpu.clk,
+                            next_pc: cpu.next_pc,
+                            next_timestamp: cpu.clk.saturating_add(1),
+                            word: dec.word,
+                            mnemonic: dec.mnemonic,
+                            rd: dec.rd,
+                            rs1: dec.rs1,
+                            rs2: dec.rs2,
+                            imm: dec.imm,
+                            rd_val: Some(cpu.a),
+                            rs1_val: Some(cpu.b),
+                            rs2_or_imm_val: Some(cpu.c),
+                            asm: dec.asm,
+                        }
+                    } else {
+                        let mnemonic = exec_insn.opcode.mnemonic().to_string();
+                        let (rd, rs1, rs2, imm) = decoded_ops_from_executor_instruction(exec_insn);
+                        Sp1Insn {
+                            seq,
+                            step_idx,
+                            pc: cpu.pc,
+                            timestamp: cpu.clk,
+                            next_pc: cpu.next_pc,
+                            next_timestamp: cpu.clk.saturating_add(1),
+                            word,
+                            mnemonic: mnemonic.clone(),
+                            rd,
+                            rs1,
+                            rs2,
+                            imm,
+                            rd_val: Some(cpu.a),
+                            rs1_val: Some(cpu.b),
+                            rs2_or_imm_val: Some(cpu.c),
+                            asm: asm_from_parts(&mnemonic, rd, rs1, rs2, imm),
+                        }
+                    }
+                } else {
+                    let mnemonic = exec_insn.opcode.mnemonic().to_string();
+                    let (rd, rs1, rs2, imm) = decoded_ops_from_executor_instruction(exec_insn);
+                    Sp1Insn {
+                        seq,
+                        step_idx,
+                        pc: cpu.pc,
+                        timestamp: cpu.clk,
+                        next_pc: cpu.next_pc,
+                        next_timestamp: cpu.clk.saturating_add(1),
+                        word: 0,
+                        mnemonic: mnemonic.clone(),
+                        rd,
+                        rs1,
+                        rs2,
+                        imm,
+                        rd_val: Some(cpu.a),
+                        rs1_val: Some(cpu.b),
+                        rs2_or_imm_val: Some(cpu.c),
+                        asm: asm_from_parts(&mnemonic, rd, rs1, rs2, imm),
+                    }
+                };
+                instructions.push(insn);
+                seq = seq.saturating_add(1);
+                step_idx = step_idx.saturating_add(1);
             }
         }
 
@@ -1131,6 +1649,7 @@ impl Sp1Trace {
             enrich_sequence_hit(hit, insn);
         }
         out.bucket_hits.extend(emit_instruction_obligation_hits(&out.instructions));
+        out.bucket_hits.extend(emit_memory_event_obligation_hits(records, &out.instructions));
         Ok(out)
     }
 

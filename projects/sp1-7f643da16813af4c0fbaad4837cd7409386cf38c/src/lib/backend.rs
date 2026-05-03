@@ -11,7 +11,7 @@ use beak_core::fuzz::benchmark::{
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
 use serde::{Deserialize, Serialize};
-use sp1_core_executor::{ExecutionRecord, Executor, ExecutorMode, Opcode, Register};
+use sp1_core_executor::{ByteOpcode, ExecutionRecord, Executor, ExecutorMode, Opcode, Register};
 use sp1_core_machine::utils::run_test;
 use sp1_stark::{CpuProver, SP1CoreOpts};
 
@@ -63,7 +63,11 @@ struct RealRunnerResponse {
 
 const S28_INJECT_KIND: &str = "sp1.semantic.exec.control_flow_binding";
 const IS_MEMORY_INJECT_KIND: &str = "sp1.semantic.exec.memory_effect_binding";
-const TIMESTAMPED_LOAD_INJECT_KIND: &str = "sp1.semantic.memory.timestamped_load_path";
+const MEMORY_ADDRESS_INJECT_KIND: &str = "sp1.semantic.memory.address_pointer_consistency";
+const MEMORY_VALUE_INJECT_KIND: &str = "sp1.semantic.memory.value_payload_consistency";
+const MEMORY_STORE_LOAD_INJECT_KIND: &str = "sp1.semantic.memory.store_load_payload_flow";
+const MEMORY_KIND_SELECTOR_INJECT_KIND: &str = "sp1.semantic.memory.kind_selector_consistency";
+const TIME_MONOTONIC_INJECT_KIND: &str = "sp1.semantic.time.monotonic_access_ordering";
 const LOOKUP_BOOLEAN_INJECT_KIND: &str = "sp1.semantic.lookup.boolean_multiplicity";
 const RF1_INJECT_KIND: &str = "sp1.semantic.decode.zero_register_immutability";
 const RF2_INJECT_KIND: &str = "sp1.semantic.decode.operand_index_routing";
@@ -100,7 +104,11 @@ fn supports_official_injection_kind(kind: &str) -> bool {
         base_inject_kind(kind),
         S28_INJECT_KIND
             | IS_MEMORY_INJECT_KIND
-            | TIMESTAMPED_LOAD_INJECT_KIND
+            | MEMORY_ADDRESS_INJECT_KIND
+            | MEMORY_VALUE_INJECT_KIND
+            | MEMORY_STORE_LOAD_INJECT_KIND
+            | MEMORY_KIND_SELECTOR_INJECT_KIND
+            | TIME_MONOTONIC_INJECT_KIND
             | LOOKUP_BOOLEAN_INJECT_KIND
             | RF1_INJECT_KIND
             | RF2_INJECT_KIND
@@ -286,6 +294,34 @@ fn record_alu_muldiv_chip_sites(sites: &mut BTreeMap<String, Vec<u64>>, opcode: 
     }
 }
 
+fn record_memory_instr_sites(sites: &mut BTreeMap<String, Vec<u64>>, opcode: Opcode, step: u64) {
+    match opcode {
+        Opcode::LB | Opcode::LBU | Opcode::LH | Opcode::LHU | Opcode::LW => {
+            record_site(sites, MEMORY_ADDRESS_INJECT_KIND, step);
+            record_site(sites, MEMORY_VALUE_INJECT_KIND, step);
+            record_site(sites, MEMORY_KIND_SELECTOR_INJECT_KIND, step);
+            record_site(sites, TIME_MONOTONIC_INJECT_KIND, step);
+        }
+        Opcode::SB | Opcode::SH | Opcode::SW => {
+            record_site(sites, MEMORY_ADDRESS_INJECT_KIND, step);
+            record_site(sites, MEMORY_VALUE_INJECT_KIND, step);
+            record_site(sites, MEMORY_STORE_LOAD_INJECT_KIND, step);
+            record_site(sites, MEMORY_KIND_SELECTOR_INJECT_KIND, step);
+            record_site(sites, TIME_MONOTONIC_INJECT_KIND, step);
+        }
+        _ => {}
+    }
+}
+
+fn byte_lookup_step(opcode: ByteOpcode, a1: u16, b: u8, c: u8) -> u64 {
+    let row = if opcode != ByteOpcode::U16Range {
+        (((b as u16) << 8) + c as u16) as u64
+    } else {
+        a1 as u64
+    };
+    row.saturating_mul(9).saturating_add(opcode as u64)
+}
+
 fn panic_payload_to_string(p: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = p.downcast_ref::<&str>() {
         (*s).to_string()
@@ -299,6 +335,7 @@ fn panic_payload_to_string(p: &(dyn std::any::Any + Send)) -> String {
 fn collect_observed_injection_sites(records: &[ExecutionRecord]) -> BTreeMap<String, Vec<u64>> {
     let mut sites = BTreeMap::<String, Vec<u64>>::new();
     let mut flat_cpu_idx = 0u64;
+    let mut memory_hook_step = 0u64;
     for record in records {
         for event in &record.cpu_events {
             let instruction = record.program.fetch(event.pc);
@@ -329,12 +366,24 @@ fn collect_observed_injection_sites(records: &[ExecutionRecord]) -> BTreeMap<Str
                 | Opcode::SH
                 | Opcode::SW => {
                     record_site(&mut sites, IS_MEMORY_INJECT_KIND, flat_cpu_idx);
-                    record_site(&mut sites, TIMESTAMPED_LOAD_INJECT_KIND, flat_cpu_idx);
-                    record_site(&mut sites, LOOKUP_BOOLEAN_INJECT_KIND, flat_cpu_idx);
                 }
                 _ => {}
             }
             flat_cpu_idx = flat_cpu_idx.saturating_add(1);
+        }
+        for event in &record.memory_instr_events {
+            record_memory_instr_sites(&mut sites, event.opcode, memory_hook_step);
+            memory_hook_step = memory_hook_step.saturating_add(1);
+        }
+        for (lookup, mult) in &record.byte_lookups {
+            if *mult == 0 {
+                continue;
+            }
+            record_site(
+                &mut sites,
+                LOOKUP_BOOLEAN_INJECT_KIND,
+                byte_lookup_step(lookup.opcode, lookup.a1, lookup.b, lookup.c),
+            );
         }
     }
     sites
@@ -442,7 +491,7 @@ fn run_sp1_real_backend(
             prove_ok: false,
             verify_ok: false,
             error: Some(format!(
-                "sp1 official prove path only supports baseline and {S28_INJECT_KIND}; requested {} still depended on the removed raw-record shortcut",
+                "sp1 official prove path has no installed hook/applied signal for requested kind {}; mapped hooks include CPU-row decode/register/control hooks, {IS_MEMORY_INJECT_KIND}, v4 memory-instruction hooks, and byte-table multiplicity hooks",
                 inject_kind.unwrap_or_default()
             )),
             observed_injection_sites,
@@ -619,6 +668,21 @@ impl Sp1Backend {
             .unwrap_or_else(|| Self::step_from_hit(hit))
     }
 
+    fn memory_hook_step_from_hit(hit: &BucketHit) -> u64 {
+        hit.details
+            .get("store_step_idx")
+            .and_then(|v| v.as_u64())
+            .or_else(|| hit.details.get("memory_hook_step").and_then(|v| v.as_u64()))
+            .unwrap_or_else(|| Self::step_from_hit(hit))
+    }
+
+    fn byte_lookup_step_from_hit(hit: &BucketHit) -> u64 {
+        hit.details
+            .get("byte_lookup_step")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_else(|| Self::step_from_hit(hit))
+    }
+
     fn mnemonic_from_hit(hit: &BucketHit) -> Option<&str> {
         hit.details.get("mnemonic").and_then(|value| value.as_str())
     }
@@ -633,6 +697,19 @@ impl Sp1Backend {
             || bucket_id == semantic::arithmetic::DIVISION_REMAINDER_BOUND.id
             || bucket_id == semantic::arithmetic::PRODUCT_DECOMPOSITION.id
             || bucket_id == semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION.id
+    }
+
+    fn is_memory_hook_bucket(bucket_id: &str) -> bool {
+        bucket_id == semantic::memory::STORE_LOAD_PAYLOAD_FLOW.id
+            || bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id
+            || bucket_id == semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.id
+            || bucket_id == semantic::memory::ADDRESS_BOUNDARY_RANGE.id
+            || bucket_id == semantic::memory::LOAD_VALUE_BINDING.id
+            || bucket_id == semantic::memory::WRITE_PAYLOAD_CONSISTENCY.id
+            || bucket_id == semantic::exec::PARTIAL_WORD_WRITE_CONSISTENCY.id
+            || bucket_id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id
+            || bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id
+            || bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id
     }
 
     fn s28_variant_specs_for_family(family: &str) -> Vec<String> {
@@ -690,6 +767,10 @@ impl Sp1Backend {
         let bucket_id = hit.bucket_id.as_str();
         let anchor = if Self::is_chip_scheduled_bucket(bucket_id) {
             Self::pc_word_step_from_hit(hit)
+        } else if bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id {
+            Self::byte_lookup_step_from_hit(hit)
+        } else if Self::is_memory_hook_bucket(bucket_id) {
+            Self::memory_hook_step_from_hit(hit)
         } else {
             Self::step_from_hit(hit)
         };
@@ -715,19 +796,76 @@ impl Sp1Backend {
                 IS_MEMORY_INJECT_KIND.to_string(),
                 InjectionSchedule::AroundAnchor(anchor),
             )
+        } else if bucket_id == semantic::memory::STORE_LOAD_PAYLOAD_FLOW.id {
+            (
+                semantic::memory::STORE_LOAD_PAYLOAD_FLOW.semantic_class.to_string(),
+                vec![inject_kind_with_variant(MEMORY_STORE_LOAD_INJECT_KIND, "site=access_value")],
+                MEMORY_STORE_LOAD_INJECT_KIND.to_string(),
+                InjectionSchedule::Explicit(vec![anchor]),
+            )
+        } else if bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id
+            || bucket_id == semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.id
+            || bucket_id == semantic::memory::ADDRESS_BOUNDARY_RANGE.id
+        {
+            let semantic_class = if bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id
+            {
+                semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.semantic_class
+            } else if bucket_id == semantic::memory::ADDRESS_BOUNDARY_RANGE.id {
+                semantic::memory::ADDRESS_BOUNDARY_RANGE.semantic_class
+            } else {
+                semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.semantic_class
+            };
+            (
+                semantic_class.to_string(),
+                vec![inject_kind_with_variant(MEMORY_ADDRESS_INJECT_KIND, "site=addr_word")],
+                MEMORY_ADDRESS_INJECT_KIND.to_string(),
+                InjectionSchedule::Explicit(vec![anchor]),
+            )
+        } else if bucket_id == semantic::memory::LOAD_VALUE_BINDING.id
+            || bucket_id == semantic::memory::WRITE_PAYLOAD_CONSISTENCY.id
+            || bucket_id == semantic::exec::PARTIAL_WORD_WRITE_CONSISTENCY.id
+        {
+            let semantic_class = if bucket_id == semantic::memory::LOAD_VALUE_BINDING.id {
+                semantic::memory::LOAD_VALUE_BINDING.semantic_class
+            } else {
+                semantic::memory::WRITE_PAYLOAD_CONSISTENCY.semantic_class
+            };
+            (
+                semantic_class.to_string(),
+                vec![inject_kind_with_variant(MEMORY_VALUE_INJECT_KIND, "site=access_value")],
+                MEMORY_VALUE_INJECT_KIND.to_string(),
+                InjectionSchedule::Explicit(vec![anchor]),
+            )
+        } else if bucket_id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id {
+            (
+                semantic::memory::KIND_SELECTOR_CONSISTENCY.semantic_class.to_string(),
+                vec![inject_kind_with_variant(
+                    MEMORY_KIND_SELECTOR_INJECT_KIND,
+                    "site=kind_selector",
+                )],
+                MEMORY_KIND_SELECTOR_INJECT_KIND.to_string(),
+                InjectionSchedule::Explicit(vec![anchor]),
+            )
         } else if bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id {
             (
-                semantic::memory::TIMESTAMPED_LOAD_PATH.semantic_class.to_string(),
-                vec![TIMESTAMPED_LOAD_INJECT_KIND.to_string()],
-                TIMESTAMPED_LOAD_INJECT_KIND.to_string(),
-                InjectionSchedule::AroundAnchor(anchor),
+                semantic::time::MONOTONIC_ACCESS_ORDERING.semantic_class.to_string(),
+                vec![inject_kind_with_variant(TIME_MONOTONIC_INJECT_KIND, "site=prev_clk")],
+                TIME_MONOTONIC_INJECT_KIND.to_string(),
+                InjectionSchedule::Explicit(vec![anchor]),
+            )
+        } else if bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id {
+            (
+                semantic::time::MONOTONIC_ACCESS_ORDERING.semantic_class.to_string(),
+                vec![inject_kind_with_variant(TIME_MONOTONIC_INJECT_KIND, "site=prev_clk")],
+                TIME_MONOTONIC_INJECT_KIND.to_string(),
+                InjectionSchedule::Explicit(vec![anchor]),
             )
         } else if bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id {
             (
                 semantic::lookup::BOOLEAN_MULTIPLICITY.semantic_class.to_string(),
                 vec![LOOKUP_BOOLEAN_INJECT_KIND.to_string()],
                 LOOKUP_BOOLEAN_INJECT_KIND.to_string(),
-                InjectionSchedule::AroundAnchor(anchor),
+                InjectionSchedule::Explicit(vec![anchor]),
             )
         } else if bucket_id == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id {
             (

@@ -20,14 +20,19 @@ use risc0_circuit_rv32im::{
         testutil::DEFAULT_SESSION_LIMIT,
         Executor, DEFAULT_SEGMENT_LIMIT_PO2,
     },
-    prove::beak::{prove_segment_with_injection, BeakInjectionPlan},
+    prove::beak::{
+        collect_preflight_trace_records, prove_segment_with_injection, BeakInjectionPlan,
+    },
     trace::{TraceCallback, TraceEvent},
     MAX_INSN_CYCLES,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::trace::{executed_instructions, Risc0Trace};
+use crate::trace::{
+    executed_instructions, Risc0ExecutedInsnRecord, Risc0PreflightMemoryTxn,
+    Risc0PreflightSegmentSummary, Risc0Trace,
+};
 
 const ZERO_REGISTER_INJECT_KIND: &str = "risc0.semantic.decode.zero_register_immutability";
 const OPERAND_ROUTE_INJECT_KIND: &str = "risc0.semantic.decode.operand_index_routing";
@@ -107,6 +112,47 @@ fn execute_session(
         })
         .map_err(|e| format!("risc0 execute failed: {e}"))?;
     Ok((segments, result))
+}
+
+fn collect_preflight_records_for_segments(
+    segments: &[risc0_circuit_rv32im::execute::Segment],
+) -> Result<(Vec<Risc0PreflightMemoryTxn>, Vec<Risc0PreflightSegmentSummary>), String> {
+    let mut txns = Vec::new();
+    let mut summaries = Vec::new();
+
+    for (segment_idx, segment) in segments.iter().enumerate() {
+        let records = collect_preflight_trace_records(segment)
+            .map_err(|e| format!("risc0 preflight record collection failed: {e}"))?;
+        let segment_idx = segment_idx as u64;
+        summaries.push(Risc0PreflightSegmentSummary {
+            segment_idx,
+            table_split_cycle: records.table_split_cycle,
+            padding_start_row: records.padding_start_row,
+            total_rows: records.total_rows,
+            lookup_table_rows: records.lookup_table_rows,
+        });
+        txns.extend(records.txns.into_iter().map(|txn| Risc0PreflightMemoryTxn {
+            segment_idx,
+            row_idx: txn.row_idx,
+            row_step_idx: txn.row_step_idx,
+            row_pc: txn.row_pc,
+            major: txn.major,
+            minor: txn.minor,
+            machine_mode: txn.machine_mode,
+            txn_idx: txn.txn_idx,
+            row_txn_start: txn.row_txn_start,
+            row_txn_end: txn.row_txn_end,
+            addr_word: txn.addr_word,
+            txn_cycle: txn.txn_cycle,
+            word: txn.word,
+            prev_cycle: txn.prev_cycle,
+            prev_word: txn.prev_word,
+            is_load: txn.is_load,
+            is_store: txn.is_store,
+        }));
+    }
+
+    Ok((txns, summaries))
 }
 
 #[derive(Default)]
@@ -354,12 +400,32 @@ pub fn run_backend_once(
         }
     }
 
-    let trace = Risc0Trace::from_words(words)?;
     let observed_injection_sites = observe_sites_for_words(words);
 
     let program = build_program(words);
     let image = risc0_binfmt::MemoryImage::new_kernel(program);
-    let (segments, _result) = execute_session(image, DEFAULT_SESSION_LIMIT, Vec::new())?;
+    let executed_records = Rc::new(RefCell::new(Vec::<Risc0ExecutedInsnRecord>::new()));
+    let records_cb = executed_records.clone();
+    let trace_cb: Rc<RefCell<dyn TraceCallback>> =
+        Rc::new(RefCell::new(move |event: TraceEvent| {
+            if let TraceEvent::InstructionStart { cycle, pc, insn } = event {
+                records_cb.borrow_mut().push(Risc0ExecutedInsnRecord {
+                    step_idx: cycle,
+                    pc,
+                    word: insn,
+                });
+            }
+            Ok(())
+        }));
+    let (segments, _result) = execute_session(image, DEFAULT_SESSION_LIMIT, vec![trace_cb])?;
+    let executed_records = executed_records.borrow().clone();
+    let (preflight_txns, preflight_summaries) = collect_preflight_records_for_segments(&segments)?;
+    let trace = Risc0Trace::from_words_with_preflight_and_executed(
+        words,
+        &executed_records,
+        &preflight_txns,
+        &preflight_summaries,
+    )?;
 
     let plan =
         inject_kind.map(|kind| BeakInjectionPlan { kind: kind.to_string(), step: inject_step });

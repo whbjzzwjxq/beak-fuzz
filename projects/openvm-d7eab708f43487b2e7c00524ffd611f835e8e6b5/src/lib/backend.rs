@@ -5,7 +5,7 @@ use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{semantic, Trace, TraceSignal};
 
 use crate::trace::OpenVMTrace;
-use openvm_instructions::exe::VmExe;
+use openvm_instructions::exe::{SparseMemoryImage, VmExe};
 use openvm_instructions::instruction::Instruction;
 use openvm_instructions::program::Program;
 use openvm_instructions::riscv::RV32_REGISTER_AS;
@@ -39,6 +39,49 @@ fn build_sdk() -> Sdk {
     Sdk::new(app_config).expect("sdk init")
 }
 
+fn parse_u32_literal(raw: &str) -> Result<u32, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("empty integer literal".to_string());
+    }
+    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).map_err(|e| format!("invalid hex literal {raw:?}: {e}"))
+    } else {
+        raw.parse::<u32>().map_err(|e| format!("invalid decimal literal {raw:?}: {e}"))
+    }
+}
+
+fn parse_init_memory_env() -> Result<Option<SparseMemoryImage>, String> {
+    let raw = match std::env::var("BEAK_OPENVM_INIT_MEMORY") {
+        Ok(raw) => raw,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(e) => return Err(format!("read BEAK_OPENVM_INIT_MEMORY failed: {e}")),
+    };
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let mut image = SparseMemoryImage::new();
+    for entry in raw.split(|c| c == ',' || c == ';').filter(|entry| !entry.trim().is_empty()) {
+        let parts = entry.split(':').collect::<Vec<_>>();
+        if parts.len() != 3 {
+            return Err(format!(
+                "BEAK_OPENVM_INIT_MEMORY entry {entry:?} must be address_space:pointer:value"
+            ));
+        }
+        let address_space = parse_u32_literal(parts[0])?;
+        let pointer = parse_u32_literal(parts[1])?;
+        let value = parse_u32_literal(parts[2])?;
+        if value > u8::MAX as u32 {
+            return Err(format!(
+                "BEAK_OPENVM_INIT_MEMORY value {value} for ({address_space},{pointer}) exceeds u8"
+            ));
+        }
+        image.insert((address_space, pointer), value as u8);
+    }
+    Ok(Some(image))
+}
+
 fn build_exe(words: &[u32]) -> Result<std::sync::Arc<VmExe<F>>, String> {
     let transpiler = Transpiler::<F>::default()
         .with_extension(Rv32ITranspilerExtension)
@@ -52,7 +95,11 @@ fn build_exe(words: &[u32]) -> Result<std::sync::Arc<VmExe<F>>, String> {
     instructions.push(Instruction::from_usize(SystemOpcode::TERMINATE.global_opcode(), [0, 0, 0]));
 
     let program = Program::from_instructions(&instructions);
-    Ok(std::sync::Arc::new(VmExe::new(program)))
+    let mut exe = VmExe::new(program);
+    if let Some(init_memory) = parse_init_memory_env()? {
+        exe = exe.with_init_memory(init_memory);
+    }
+    Ok(std::sync::Arc::new(exe))
 }
 
 fn is_openvm_supported_rv32_word(_word: u32) -> bool {
@@ -307,7 +354,14 @@ impl OpenVmBackend {
         hit: &beak_core::trace::BucketHit,
     ) -> Vec<SemanticInjectionCandidate> {
         let bucket_id = hit.bucket_id.as_str();
-        let anchor = Self::step_from_hit(hit);
+        let anchor = if bucket_id == semantic::memory::STORE_LOAD_PAYLOAD_FLOW.id {
+            hit.details
+                .get("store_step_idx")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_else(|| Self::step_from_hit(hit))
+        } else {
+            Self::step_from_hit(hit)
+        };
         let (semantic_class, inject_kind, fallback_schedule) =
             if bucket_id == semantic::control::ENTRYPOINT_BINDING.id {
                 (
@@ -326,6 +380,67 @@ impl OpenVmBackend {
                     semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.semantic_class,
                     "openvm.semantic.time.boundary_origin_consistency",
                     InjectionSchedule::Exact(0),
+                )
+            } else if bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id {
+                (
+                    semantic::time::MONOTONIC_ACCESS_ORDERING.semantic_class,
+                    "openvm.semantic.time.monotonic_access_ordering",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id {
+                (
+                    semantic::lookup::BOOLEAN_MULTIPLICITY.semantic_class,
+                    "openvm.semantic.lookup.boolean_multiplicity",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::memory::ADDRESS_SPACE_CONSISTENCY.id {
+                (
+                    semantic::memory::ADDRESS_SPACE_CONSISTENCY.semantic_class,
+                    "openvm.semantic.memory.address_space_consistency",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id
+                || bucket_id == semantic::memory::ADDRESS_BOUNDARY_RANGE.id
+                || bucket_id == semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.id
+            {
+                let semantic_class =
+                    if bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id {
+                        semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.semantic_class
+                    } else if bucket_id == semantic::memory::ADDRESS_BOUNDARY_RANGE.id {
+                        semantic::memory::ADDRESS_BOUNDARY_RANGE.semantic_class
+                    } else {
+                        semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.semantic_class
+                    };
+                (
+                    semantic_class,
+                    "openvm.semantic.memory.address_pointer_consistency",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::memory::LOAD_VALUE_BINDING.id
+                || bucket_id == semantic::memory::WRITE_PAYLOAD_CONSISTENCY.id
+            {
+                (
+                    semantic::memory::LOAD_VALUE_BINDING.semantic_class,
+                    "openvm.semantic.memory.value_payload_consistency",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::memory::STORE_LOAD_PAYLOAD_FLOW.id {
+                (
+                    semantic::memory::STORE_LOAD_PAYLOAD_FLOW.semantic_class,
+                    "openvm.semantic.memory.store_load_payload_flow",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::memory::KIND_SELECTOR_CONSISTENCY.id {
+                (
+                    semantic::memory::KIND_SELECTOR_CONSISTENCY.semantic_class,
+                    "openvm.semantic.memory.kind_selector_consistency",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::memory::FINALIZATION_CONSISTENCY.id {
+                (
+                    semantic::memory::FINALIZATION_CONSISTENCY.semantic_class,
+                    "openvm.semantic.memory.finalization_consistency",
+                    InjectionSchedule::AroundAnchor(anchor),
                 )
             } else if bucket_id == semantic::control::AUIPC_PC_LIMB_CONSISTENCY.id {
                 (

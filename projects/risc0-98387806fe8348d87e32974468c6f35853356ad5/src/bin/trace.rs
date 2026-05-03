@@ -56,7 +56,8 @@ fn main() {
         .map(|s| u32::from_str_radix(s, 16).unwrap_or_else(|_| panic!("invalid hex: {s}")))
         .collect();
 
-    let trace = Risc0Trace::from_words(&words).expect("build risc0 trace from input words");
+    let fallback_trace =
+        Risc0Trace::from_words(&words).expect("build risc0 trace from input words");
     let inject_kind = matches.get_one::<String>("inject_kind").map(|s| s.as_str());
     let inject_step: u64 =
         matches.get_one::<String>("inject_step").unwrap().parse().expect("inject-step");
@@ -69,13 +70,31 @@ fn main() {
     }
 
     println!("\n=== Derived Semantic Hits ===");
-    for sig in sorted_signatures_from_hits(trace.bucket_hits()) {
-        println!("  {sig}");
+    match &resp {
+        Ok(resp) => {
+            for sig in sorted_signatures_from_hits(&resp.bucket_hits) {
+                println!("  {sig}");
+            }
+        }
+        Err(_) => {
+            for sig in sorted_signatures_from_hits(fallback_trace.bucket_hits()) {
+                println!("  {sig}");
+            }
+        }
     }
 
     println!("\n=== Trace Signals ===");
-    for sig in sorted_signatures_from_signals(trace.trace_signals()) {
-        println!("  {sig}");
+    match &resp {
+        Ok(resp) => {
+            for sig in sorted_signatures_from_signals(&resp.trace_signals) {
+                println!("  {sig}");
+            }
+        }
+        Err(_) => {
+            for sig in sorted_signatures_from_signals(fallback_trace.trace_signals()) {
+                println!("  {sig}");
+            }
+        }
     }
 
     println!("\n=== Backend ===");
@@ -104,7 +123,7 @@ fn main() {
             }
         }
         Err(err) => {
-            println!("  micro_op_count = {}", trace.instruction_count());
+            println!("  micro_op_count = {}", fallback_trace.instruction_count());
             println!("  injection_applied = false");
             if let Some(kind) = inject_kind {
                 println!("  inject_kind = {kind}");

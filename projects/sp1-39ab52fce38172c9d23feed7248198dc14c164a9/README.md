@@ -55,6 +55,37 @@ The semantic injection kind for the real audit issue is:
 
 Additional installed SP1 hooks currently mapped by the target backend:
 
-- `sp1.semantic.memory.timestamped_load_path`
-- `sp1.semantic.lookup.boolean_multiplicity`
+- CPU-row decode/register hooks from `pass4_v4_is_memory.py`:
+  `sp1.semantic.decode.zero_register_immutability`,
+  `sp1.semantic.decode.operand_index_routing`,
+  `sp1.semantic.exec.dest_binding`,
+  `sp1.semantic.decode.field_range`,
+  `sp1.semantic.decode.immediate_sign_extension`,
+  `sp1.semantic.exec.op_selector_binding`, and
+  `sp1.semantic.decode.format_immediate_reassembly`
+- ALU/mul/div chip hooks from `pass4_v4_is_memory.py`:
+  `sp1.semantic.alu.immediate_limb_consistency`,
+  `sp1.semantic.alu.shift_mod32`,
+  `sp1.semantic.alu.comparison_booleanity`,
+  `sp1.semantic.alu.subtraction_borrow_chain`,
+  `sp1.semantic.alu.comparison_auxiliary_chain`,
+  `sp1.semantic.arithmetic.division_remainder_bound`,
+  `sp1.semantic.arithmetic.product_decomposition`, and
+  `sp1.semantic.arithmetic.signed_unsigned_product_correction`
 - `sp1.semantic.exec.control_flow_binding`
+
+The old timestamped-load and lookup-boolean install hooks in
+`pass3_collection.py` target an older runtime-module layout and are not present
+in this installed v4 executor. They are intentionally not advertised as central
+semantic injection candidates for this snapshot.
+
+Useful smoke commands:
+
+```bash
+./target/debug/beak-trace --bin "00012183" --print-buckets
+./target/debug/beak-trace --bin "00012183" --inject-kind sp1.semantic.exec.memory_effect_binding --inject-step 18446744073709551615 --print-buckets
+./target/debug/beak-trace --bin "00010033" --inject-kind "sp1.semantic.decode.zero_register_immutability::site=op_a_access" --inject-step 18446744073709551615 --print-buckets
+./target/debug/beak-trace --bin "00100093 00108463 00200113" --inject-kind sp1.semantic.alu.immediate_limb_consistency --inject-step 18446744073709551615 --print-buckets
+./target/debug/beak-trace --bin "020141b3" --inject-kind sp1.semantic.arithmetic.division_remainder_bound --inject-step 18446744073709551615 --print-buckets
+./target/debug/beak-trace --bin "00100093 00108463 00200113" --inject-kind sp1.semantic.exec.control_flow_binding --inject-step 18446744073709551615 --print-buckets
+```
