@@ -5,10 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Arg, Command};
 use serde_json::json;
 
-use beak_core::fuzz::benchmark::{run_benchmark_threaded, BenchmarkConfig, DEFAULT_RNG_SEED};
+use beak_core::fuzz::benchmark::{BenchmarkConfig, DEFAULT_RNG_SEED, run_benchmark_threaded};
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
-use beak_sp1_7f643da1::backend::{run_backend_once, Sp1Backend, WorkerRequest, WorkerResponse};
+use beak_sp1_7f643da1::backend::{Sp1Backend, WorkerRequest, WorkerResponse, run_backend_once};
 
 const ZKVM_COMMIT: &str = "7f643da16813af4c0fbaad4837cd7409386cf38c";
 const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
@@ -22,11 +22,7 @@ fn workspace_root() -> PathBuf {
 
 fn resolve_path(root: &Path, arg: &str) -> PathBuf {
     let p = PathBuf::from(arg);
-    if p.is_absolute() {
-        p
-    } else {
-        root.join(p)
-    }
+    if p.is_absolute() { p } else { root.join(p) }
 }
 
 fn parse_u32_arg(value: &str, name: &str) -> u32 {
@@ -99,6 +95,13 @@ fn main() {
                 .long("initial-limit")
                 .default_value("0")
                 .help("Limit number of initial seeds loaded (0 = no limit)."),
+        )
+        .arg(
+            Arg::new("mutation_iters")
+                .long("mutation-iters")
+                .alias("iters")
+                .default_value("0")
+                .help("Number of feedback-guided mutation iterations after initial corpus evaluation."),
         )
         .arg(
             Arg::new("max_instructions")
@@ -178,6 +181,8 @@ fn main() {
     };
     let requested_initial_limit: usize =
         matches.get_one::<String>("initial_limit").unwrap().parse().expect("initial-limit");
+    let requested_mutation_iterations: usize =
+        matches.get_one::<String>("mutation_iters").unwrap().parse().expect("mutation-iters");
     let requested_max_instructions: usize =
         matches.get_one::<String>("max_instructions").unwrap().parse().expect("max-instructions");
     let precheck_oracle_max_steps: u32 = matches
@@ -216,6 +221,8 @@ fn main() {
     );
 
     let initial_limit: usize = if inline_words.is_empty() { requested_initial_limit } else { 1 };
+    let mutation_iterations: usize =
+        if inline_words.is_empty() { requested_mutation_iterations } else { 0 };
     let max_instructions: usize = if inline_words.is_empty() {
         requested_max_instructions
     } else {
@@ -235,6 +242,7 @@ fn main() {
         out_dir: root.join("storage/fuzzing_seeds"),
         output_prefix: None,
         initial_limit,
+        mutation_iterations,
         max_instructions,
         precheck_oracle_max_steps,
         semantic_search_enabled: true,

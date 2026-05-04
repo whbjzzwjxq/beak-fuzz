@@ -5,11 +5,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Arg, Command};
 use serde_json::json;
 
-use beak_core::fuzz::benchmark::{run_benchmark_threaded, BenchmarkConfig, DEFAULT_RNG_SEED};
+use beak_core::fuzz::benchmark::{BenchmarkConfig, DEFAULT_RNG_SEED, run_benchmark_threaded};
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
 use beak_openvm_f038f61d::backend::{
-    run_backend_once, OpenVmBackend, WorkerRequest, WorkerResponse,
+    OpenVmBackend, WorkerRequest, WorkerResponse, run_backend_once,
 };
 
 const ZKVM_COMMIT: &str = "f038f61d21db3aecd3029e1a23ba1ba0bb314800";
@@ -24,11 +24,7 @@ fn workspace_root() -> PathBuf {
 
 fn resolve_path(root: &Path, arg: &str) -> PathBuf {
     let p = PathBuf::from(arg);
-    if p.is_absolute() {
-        p
-    } else {
-        root.join(p)
-    }
+    if p.is_absolute() { p } else { root.join(p) }
 }
 
 fn parse_u32_arg(value: &str, name: &str) -> u32 {
@@ -101,6 +97,13 @@ fn main() {
                 .long("initial-limit")
                 .default_value("0")
                 .help("Limit number of initial seeds loaded (0 = no limit)."),
+        )
+        .arg(
+            Arg::new("mutation_iters")
+                .long("mutation-iters")
+                .alias("iters")
+                .default_value("0")
+                .help("Number of feedback-guided mutation iterations after initial corpus evaluation."),
         )
         .arg(
             Arg::new("max_instructions")
@@ -179,6 +182,8 @@ fn main() {
     };
     let parsed_initial_limit: usize =
         matches.get_one::<String>("initial_limit").unwrap().parse().expect("initial-limit");
+    let parsed_mutation_iterations: usize =
+        matches.get_one::<String>("mutation_iters").unwrap().parse().expect("mutation-iters");
     let parsed_max_instructions: usize =
         matches.get_one::<String>("max_instructions").unwrap().parse().expect("max-instructions");
     let oracle_precheck_max_steps: u32 = matches
@@ -207,6 +212,8 @@ fn main() {
         .parse()
         .expect("semantic-max-trials-per-bucket");
     let initial_limit: usize = if inline_words.is_empty() { parsed_initial_limit } else { 1 };
+    let mutation_iterations: usize =
+        if inline_words.is_empty() { parsed_mutation_iterations } else { 0 };
     let max_instructions: usize =
         if inline_words.is_empty() { parsed_max_instructions } else { inline_words.len().max(1) };
     let oracle_memory_model =
@@ -232,6 +239,7 @@ fn main() {
         out_dir: root.join("storage/fuzzing_seeds"),
         output_prefix: None,
         initial_limit,
+        mutation_iterations,
         max_instructions,
         precheck_oracle_max_steps: oracle_precheck_max_steps,
         semantic_search_enabled: true,

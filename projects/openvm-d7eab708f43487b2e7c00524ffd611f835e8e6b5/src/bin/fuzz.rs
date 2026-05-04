@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 
 use clap::{Arg, Command};
 
-use beak_core::fuzz::benchmark::{run_benchmark_threaded, BenchmarkConfig, DEFAULT_RNG_SEED};
+use beak_core::fuzz::benchmark::{BenchmarkConfig, DEFAULT_RNG_SEED, run_benchmark_threaded};
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
 use beak_openvm_d7eab708::backend::{
-    run_backend_once, OpenVmBackend, WorkerRequest, WorkerResponse,
+    OpenVmBackend, WorkerRequest, WorkerResponse, run_backend_once,
 };
 
 const ZKVM_COMMIT: &str = "d7eab708f43487b2e7c00524ffd611f835e8e6b5";
@@ -22,11 +22,7 @@ fn workspace_root() -> PathBuf {
 
 fn resolve_path(root: &Path, arg: &str) -> PathBuf {
     let p = PathBuf::from(arg);
-    if p.is_absolute() {
-        p
-    } else {
-        root.join(p)
-    }
+    if p.is_absolute() { p } else { root.join(p) }
 }
 
 fn parse_u32_arg(value: &str, name: &str) -> u32 {
@@ -54,6 +50,13 @@ fn main() {
                 .long("initial-limit")
                 .default_value("0")
                 .help("Limit number of initial seeds loaded (0 = no limit)."),
+        )
+        .arg(
+            Arg::new("mutation_iters")
+                .long("mutation-iters")
+                .alias("iters")
+                .default_value("0")
+                .help("Number of feedback-guided mutation iterations after initial corpus evaluation."),
         )
         .arg(
             Arg::new("max_instructions")
@@ -122,6 +125,8 @@ fn main() {
     let seeds_path = resolve_path(&root, &seeds_arg);
     let initial_limit: usize =
         matches.get_one::<String>("initial_limit").unwrap().parse().expect("initial-limit");
+    let mutation_iterations: usize =
+        matches.get_one::<String>("mutation_iters").unwrap().parse().expect("mutation-iters");
     let max_instructions: usize =
         matches.get_one::<String>("max_instructions").unwrap().parse().expect("max-instructions");
     let semantic_window_before: u64 = matches
@@ -167,6 +172,7 @@ fn main() {
         out_dir: root.join("storage/fuzzing_seeds"),
         output_prefix: None,
         initial_limit,
+        mutation_iterations,
         max_instructions,
         precheck_oracle_max_steps: 0,
         semantic_search_enabled: true,

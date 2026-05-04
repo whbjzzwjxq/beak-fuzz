@@ -7,8 +7,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use libafl::inputs::BytesInput;
 use serde_json::json;
 
+use crate::fuzz::bug_filter::is_suppressed_exception;
 use crate::fuzz::jsonl::{BugRecord, CorpusRecord, JsonlWriter, RunRecord};
 use crate::fuzz::seed::FuzzingSeed;
+use crate::fuzz::seed_mutation::SeedMutationEngine;
 use crate::rv32im::instruction::RV32IMInstruction;
 use crate::rv32im::oracle::{OracleConfig, RISCVOracle};
 use crate::trace::{sorted_signatures_from_hits, sorted_signatures_from_signals, BucketHit};
@@ -27,6 +29,7 @@ pub struct BenchmarkConfig {
     pub output_prefix: Option<String>,
 
     pub initial_limit: usize,
+    pub mutation_iterations: usize,
     pub max_instructions: usize,
     pub precheck_oracle_max_steps: u32,
     pub semantic_search_enabled: bool,
@@ -105,6 +108,13 @@ struct EvalStats {
     underconstrained_candidate: bool,
     semantic_injection_applied: bool,
     eval_duration_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CorpusEntry {
+    words: Vec<u32>,
+    metadata: serde_json::Value,
+    seed_index: usize,
 }
 
 fn injection_kind_is_noop_prefix(kind: Option<&str>) -> bool {
@@ -214,6 +224,25 @@ fn canonical_bucket_sig(sigs: &[String]) -> String {
     out.join(";")
 }
 
+fn novelty_signature(stats: &EvalStats) -> String {
+    format!("buckets={}|signals={}", stats.bucket_hits_sig, stats.signal_sig)
+}
+
+fn record_novelty(
+    stats: &EvalStats,
+    seen_signatures: &mut HashSet<String>,
+    seen_individual_buckets: &mut HashSet<String>,
+) -> (bool, usize) {
+    let is_new_signature = seen_signatures.insert(novelty_signature(stats));
+    let mut new_individual = 0usize;
+    for sig in sorted_signatures_from_hits(&stats.bucket_hits) {
+        if seen_individual_buckets.insert(sig) {
+            new_individual = new_individual.saturating_add(1);
+        }
+    }
+    (is_new_signature, new_individual)
+}
+
 fn eval_once<B: BenchmarkBackend>(
     cfg: &BenchmarkConfig,
     backend: &mut B,
@@ -287,7 +316,13 @@ fn metadata_object(seed_meta: &serde_json::Value) -> serde_json::Map<String, ser
 
 fn bug_kind(stats: &EvalStats) -> Option<&'static str> {
     let baseline_mismatch = is_baseline_mismatch(stats);
-    if stats.phase == "semantic_search" && !stats.semantic_injection_applied {
+    if stats.phase == "semantic_search" {
+        if !stats.semantic_injection_applied {
+            return None;
+        }
+        if stats.underconstrained_candidate {
+            return Some("underconstrained_candidate");
+        }
         return None;
     }
     if stats.backend_error.is_some() || stats.oracle_error.is_some() {
@@ -299,6 +334,15 @@ fn bug_kind(stats: &EvalStats) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn is_reportable_exception(seed_meta: &serde_json::Value, stats: &EvalStats) -> bool {
+    (stats.backend_error.is_some() || stats.oracle_error.is_some())
+        && !is_suppressed_exception(
+            seed_meta,
+            stats.backend_error.as_deref(),
+            stats.oracle_error.as_deref(),
+        )
 }
 
 fn semantic_search_solved(stats: &EvalStats) -> bool {
@@ -337,7 +381,12 @@ fn write_run_record(
         .insert("semantic_injection_applied".to_string(), json!(stats.semantic_injection_applied));
     metadata.insert("attempt_index".to_string(), json!(attempt_index));
     metadata.insert("kind".to_string(), json!("run"));
-    metadata.insert("is_bug".to_string(), json!(bug_kind(stats).is_some()));
+    let reportable_bug = match bug_kind(stats) {
+        Some("exception") => is_reportable_exception(seed_meta, stats),
+        Some(_) => true,
+        None => false,
+    };
+    metadata.insert("is_bug".to_string(), json!(reportable_bug));
 
     let rec = RunRecord {
         zkvm_commit: cfg.zkvm_commit.clone(),
@@ -367,12 +416,19 @@ fn write_corpus_record(
     seed_index: usize,
     seed_meta: &serde_json::Value,
     stats: &EvalStats,
+    record_kind: &str,
+    extra_metadata: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<(), String> {
     let mut metadata = metadata_object(seed_meta);
     metadata.insert("mode".to_string(), json!("benchmark"));
     metadata.insert("phase".to_string(), json!(stats.phase));
     metadata.insert("seed_index".to_string(), json!(seed_index));
-    metadata.insert("kind".to_string(), json!("baseline_seed"));
+    metadata.insert("kind".to_string(), json!(record_kind));
+    if let Some(extra) = extra_metadata {
+        for (k, v) in extra {
+            metadata.insert(k, v);
+        }
+    }
 
     let rec = CorpusRecord {
         zkvm_commit: cfg.zkvm_commit.clone(),
@@ -403,6 +459,9 @@ fn write_bug_record(
     let Some(kind) = bug_kind(stats) else {
         return Ok(false);
     };
+    if kind == "exception" && !is_reportable_exception(seed_meta, stats) {
+        return Ok(false);
+    }
     let mut metadata = metadata_object(seed_meta);
     metadata.insert("mode".to_string(), json!("benchmark"));
     metadata.insert("phase".to_string(), json!(stats.phase));
@@ -582,6 +641,9 @@ pub fn run_benchmark<B: BenchmarkBackend>(
 
     let mut bug_count = 0usize;
     let mut eval_id: u64 = 0;
+    let mut mutation_corpus = Vec::<CorpusEntry>::new();
+    let mut seen_signatures = HashSet::<String>::new();
+    let mut seen_individual_buckets = HashSet::<String>::new();
 
     for (seed_index, (input, seed_meta)) in seeds.into_iter().take(take_n).enumerate() {
         let words = decode_words_from_input(&input, cfg.max_instructions);
@@ -630,7 +692,15 @@ pub fn run_benchmark<B: BenchmarkBackend>(
             seed_index,
             &seed_meta,
             &baseline,
+            "baseline_seed",
+            None,
         )?;
+        record_novelty(&baseline, &mut seen_signatures, &mut seen_individual_buckets);
+        mutation_corpus.push(CorpusEntry {
+            words: words.clone(),
+            metadata: seed_meta.clone(),
+            seed_index,
+        });
         write_run_record(
             &cfg,
             &run_writer,
@@ -657,7 +727,7 @@ pub fn run_benchmark<B: BenchmarkBackend>(
             bug_count = bug_count.saturating_add(1);
         }
 
-        if !cfg.semantic_search_enabled {
+        if !cfg.semantic_search_enabled || cfg.mutation_iterations > 0 {
             continue;
         }
 
@@ -737,6 +807,211 @@ pub fn run_benchmark<B: BenchmarkBackend>(
         backend.clear_semantic_injection();
     }
 
+    if cfg.mutation_iterations > 0 && mutation_corpus.is_empty() {
+        return Err("No usable corpus entries available for mutation".to_string());
+    }
+
+    let mut mutation_engine =
+        SeedMutationEngine::new(cfg.max_instructions, cfg.rng_seed ^ 0xbea0_f00d_cafe_babe);
+    for iter in 0..cfg.mutation_iterations {
+        let Some(parent_index) = mutation_engine.select_corpus_index(mutation_corpus.len()) else {
+            break;
+        };
+        let parent = mutation_corpus[parent_index].clone();
+        let corpus_words: Vec<Vec<u32>> =
+            mutation_corpus.iter().map(|entry| entry.words.clone()).collect();
+        let Some(mutation) = mutation_engine.mutate_from_corpus(&parent.words, &corpus_words)
+        else {
+            continue;
+        };
+        let words = mutation.words;
+        if words.is_empty() || !backend.is_usable_seed(&words) {
+            mutation_engine.record_reward(mutation.arm_index, 0.0);
+            continue;
+        }
+
+        let mut mutation_meta = metadata_object(&parent.metadata);
+        mutation_meta.insert("origin".to_string(), json!("mutation"));
+        mutation_meta.insert("mutation_iteration".to_string(), json!(iter));
+        mutation_meta.insert("parent_corpus_index".to_string(), json!(parent_index));
+        mutation_meta.insert("parent_seed_index".to_string(), json!(parent.seed_index));
+        mutation_meta.insert("mutation_arm".to_string(), json!(mutation.arm.as_str()));
+        mutation_meta.insert("mutation_arm_index".to_string(), json!(mutation.arm_index));
+        let seed_meta = serde_json::Value::Object(mutation_meta);
+
+        if cfg.precheck_oracle_max_steps > 0 {
+            let pre = RISCVOracle::execute_with_step_limit(
+                &words,
+                cfg.oracle,
+                cfg.precheck_oracle_max_steps,
+            );
+            if pre.hit_step_limit {
+                let mut skipped = EvalStats::default();
+                skipped.phase = "baseline".to_string();
+                skipped.oracle_error = Some("oracle_precheck_step_limit".to_string());
+                eval_id = eval_id.saturating_add(1);
+                let elapsed_ms = run_start.elapsed().as_millis() as u64;
+                write_run_record(
+                    &cfg,
+                    &run_writer,
+                    run_started_at_ms,
+                    elapsed_ms,
+                    eval_id,
+                    &words,
+                    parent.seed_index,
+                    &seed_meta,
+                    &skipped,
+                    None,
+                )?;
+                mutation_engine.record_reward(mutation.arm_index, 0.0);
+                continue;
+            }
+        }
+
+        backend.clear_semantic_injection();
+        let baseline = eval_once(&cfg, &mut backend, &words);
+        eval_id = eval_id.saturating_add(1);
+        let elapsed_ms = run_start.elapsed().as_millis() as u64;
+        write_run_record(
+            &cfg,
+            &run_writer,
+            run_started_at_ms,
+            elapsed_ms,
+            eval_id,
+            &words,
+            parent.seed_index,
+            &seed_meta,
+            &baseline,
+            None,
+        )?;
+        if write_bug_record(
+            &cfg,
+            &bug_writer,
+            run_started_at_ms,
+            elapsed_ms,
+            &words,
+            parent.seed_index,
+            &seed_meta,
+            &baseline,
+            None,
+        )? {
+            bug_count = bug_count.saturating_add(1);
+        }
+
+        let (is_new_signature, new_individual) =
+            record_novelty(&baseline, &mut seen_signatures, &mut seen_individual_buckets);
+        let mut reward = if is_new_signature { 1.0 } else { 0.0 };
+        reward += 0.25 * new_individual as f64;
+
+        if is_new_signature {
+            let mut extra = serde_json::Map::new();
+            extra.insert("mutation_iteration".to_string(), json!(iter));
+            extra.insert("parent_corpus_index".to_string(), json!(parent_index));
+            extra.insert("parent_seed_index".to_string(), json!(parent.seed_index));
+            extra.insert("mutation_arm".to_string(), json!(mutation.arm.as_str()));
+            extra.insert("mutation_arm_index".to_string(), json!(mutation.arm_index));
+            write_corpus_record(
+                &cfg,
+                &corpus_writer,
+                run_started_at_ms,
+                elapsed_ms,
+                &words,
+                parent.seed_index,
+                &seed_meta,
+                &baseline,
+                "mutated_seed",
+                Some(extra),
+            )?;
+            mutation_corpus.push(CorpusEntry {
+                words: words.clone(),
+                metadata: seed_meta.clone(),
+                seed_index: parent.seed_index,
+            });
+        }
+
+        mutation_engine.record_reward(mutation.arm_index, reward);
+
+        if !cfg.semantic_search_enabled {
+            backend.clear_semantic_injection();
+            continue;
+        }
+
+        let candidates = backend.semantic_injection_candidates(&baseline.bucket_hits);
+        let mut attempted = HashSet::<(String, u64)>::new();
+
+        for candidate in candidates {
+            let steps = candidate_steps(&cfg, &candidate);
+            if steps.is_empty() {
+                continue;
+            }
+            let mut consecutive_noops = 0usize;
+
+            for (attempt_index, step) in steps.into_iter().enumerate() {
+                let attempt_key = (candidate.inject_kind.clone(), step);
+                if !attempted.insert(attempt_key) {
+                    continue;
+                }
+
+                backend.clear_semantic_injection();
+                backend.arm_semantic_injection(&candidate.inject_kind, step)?;
+
+                let mut injected = eval_once(&cfg, &mut backend, &words);
+                injected.phase = "semantic_search".to_string();
+                injected.semantic_class = Some(candidate.semantic_class.clone());
+                injected.inject_kind = Some(candidate.inject_kind.clone());
+                injected.inject_step = Some(step);
+                injected.trigger_bucket_id = Some(candidate.bucket_id.clone());
+                injected.trigger_signal_id = candidate.trigger_signal_id.clone();
+                injected.baseline_bucket_hits_sig = Some(baseline.bucket_hits_sig.clone());
+                injected.underconstrained_candidate = injected.backend_error.is_none()
+                    && injected.oracle_error.is_none()
+                    && injected.semantic_injection_applied
+                    && !injection_kind_is_noop_prefix(injected.inject_kind.as_deref());
+
+                eval_id = eval_id.saturating_add(1);
+                let elapsed_ms = run_start.elapsed().as_millis() as u64;
+                write_run_record(
+                    &cfg,
+                    &run_writer,
+                    run_started_at_ms,
+                    elapsed_ms,
+                    eval_id,
+                    &words,
+                    parent.seed_index,
+                    &seed_meta,
+                    &injected,
+                    Some(attempt_index),
+                )?;
+                if write_bug_record(
+                    &cfg,
+                    &bug_writer,
+                    run_started_at_ms,
+                    elapsed_ms,
+                    &words,
+                    parent.seed_index,
+                    &seed_meta,
+                    &injected,
+                    Some(attempt_index),
+                )? {
+                    bug_count = bug_count.saturating_add(1);
+                    if semantic_search_solved(&injected) {
+                        break;
+                    }
+                }
+                if injected.semantic_injection_applied {
+                    consecutive_noops = 0;
+                } else {
+                    consecutive_noops = consecutive_noops.saturating_add(1);
+                    if consecutive_noops >= 4 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        backend.clear_semantic_injection();
+    }
+
     corpus_writer.flush()?;
     bug_writer.flush()?;
     run_writer.flush()?;
@@ -756,10 +1031,11 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        bug_kind, centered_steps, eval_once, sweep_steps, BackendEval, BenchmarkBackend,
-        BenchmarkConfig, EvalStats,
+        bug_kind, centered_steps, eval_once, is_reportable_exception, sweep_steps, BackendEval,
+        BenchmarkBackend, BenchmarkConfig, EvalStats,
     };
     use crate::rv32im::oracle::OracleConfig;
+    use serde_json::json;
 
     #[derive(Default)]
     struct SleepyBackend {
@@ -787,6 +1063,7 @@ mod tests {
             out_dir: Default::default(),
             output_prefix: None,
             initial_limit: 0,
+            mutation_iterations: 0,
             max_instructions: 0,
             precheck_oracle_max_steps: 0,
             semantic_search_enabled: false,
@@ -839,6 +1116,57 @@ mod tests {
 
         injected.mismatch_regs = vec![(1, 2, 3)];
         assert_eq!(bug_kind(&injected), Some("underconstrained_candidate"));
+    }
+
+    #[test]
+    fn baseline_errors_are_exceptions() {
+        let mut baseline = EvalStats::default();
+        baseline.phase = "baseline".to_string();
+        baseline.backend_error = Some("backend rejected input".to_string());
+        assert_eq!(bug_kind(&baseline), Some("exception"));
+
+        baseline.backend_error = None;
+        baseline.oracle_error = Some("oracle rejected input".to_string());
+        assert_eq!(bug_kind(&baseline), Some("exception"));
+    }
+
+    #[test]
+    fn unsupported_baseline_exceptions_are_not_reportable() {
+        let seed_meta = json!({"source": "storage/riscv-tests-artifacts/rv32ui-p-add.dump"});
+        let mut baseline = EvalStats::default();
+        baseline.phase = "baseline".to_string();
+        baseline.backend_error = Some(
+            "risc0 execute failed: Invalid trap address: 0x00000000, cause: IllegalInstruction(0x14002573, 1)"
+                .to_string(),
+        );
+
+        assert_eq!(bug_kind(&baseline), Some("exception"));
+        assert!(!is_reportable_exception(&seed_meta, &baseline));
+    }
+
+    #[test]
+    fn valid_rv32i_prove_failures_are_reportable_exceptions() {
+        let seed_meta = json!({"source": "storage/riscv-tests-artifacts/rv32ui-p-add.dump"});
+        let mut baseline = EvalStats::default();
+        baseline.phase = "baseline".to_string();
+        baseline.backend_error =
+            Some("sp1 prove/verify panicked: cumulative sums error".to_string());
+
+        assert_eq!(bug_kind(&baseline), Some("exception"));
+        assert!(is_reportable_exception(&seed_meta, &baseline));
+    }
+
+    #[test]
+    fn semantic_injection_rejections_are_not_bugs() {
+        let mut injected = EvalStats::default();
+        injected.phase = "semantic_search".to_string();
+        injected.semantic_injection_applied = true;
+        injected.backend_error = Some("constraints not satisfied".to_string());
+        assert_eq!(bug_kind(&injected), None);
+
+        injected.backend_error = None;
+        injected.oracle_error = Some("oracle rejected injected witness".to_string());
+        assert_eq!(bug_kind(&injected), None);
     }
 
     #[test]

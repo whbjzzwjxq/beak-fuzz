@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import csv
 import json
 import os
@@ -20,6 +21,79 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent
 BEAK_ROOT = SCRIPT_DIR.parent
 STORAGE_DIR = BEAK_ROOT / "storage" / "fuzzing_seeds"
+
+
+class ProcessReaper:
+    def __init__(self) -> None:
+        self.children: dict[int, subprocess.Popen[str]] = {}
+        self.shutting_down = False
+
+    def register(self, proc: subprocess.Popen[str]) -> None:
+        self.children[proc.pid] = proc
+
+    def unregister(self, proc: subprocess.Popen[str]) -> None:
+        self.children.pop(proc.pid, None)
+
+    def terminate_proc_group(
+        self,
+        proc: subprocess.Popen[str],
+        *,
+        grace_seconds: int,
+        log: Any | None = None,
+        reason: str,
+    ) -> None:
+        if proc.poll() is not None:
+            return
+        msg = f"[reaper] {reason}, sending SIGTERM to process group {proc.pid}\n"
+        print(msg, end="")
+        if log is not None:
+            log.write(msg)
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+        deadline = time.monotonic() + grace_seconds
+        while proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.2)
+        if proc.poll() is None:
+            msg = f"[reaper] grace period expired, sending SIGKILL to process group {proc.pid}\n"
+            print(msg, end="")
+            if log is not None:
+                log.write(msg)
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def cleanup_all(self, *, grace_seconds: int = 5, reason: str = "runner exiting") -> None:
+        if self.shutting_down:
+            return
+        self.shutting_down = True
+        for proc in list(self.children.values()):
+            self.terminate_proc_group(proc, grace_seconds=grace_seconds, reason=reason)
+            self.unregister(proc)
+        self.shutting_down = False
+
+
+REAPER = ProcessReaper()
+
+
+def install_signal_handlers(default_grace_seconds: int) -> None:
+    def handle_signal(signum: int, _frame: Any) -> None:
+        name = signal.Signals(signum).name
+        REAPER.cleanup_all(grace_seconds=default_grace_seconds, reason=f"received {name}")
+        raise SystemExit(128 + signum)
+
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, handle_signal)
+
+
+atexit.register(lambda: REAPER.cleanup_all(reason="atexit cleanup"))
 
 TARGETS: list[tuple[str, str]] = [
     ("openvm-336f1a47", "336f1a475e5aa3513c4c5a266399f4128c119bba"),
@@ -79,6 +153,7 @@ class Config:
             )
         )
         self.initial_limit = env_int("INITIAL_LIMIT", 0)
+        self.mutation_iters = env_int("MUTATION_ITERS", env_int("ITERS", 0))
         self.max_instructions = env_int("MAX_INSTRUCTIONS", 256)
         self.oracle_precheck_max_steps = env_int("ORACLE_PRECHECK_MAX_STEPS", 32)
         self.semantic_window_before = env_int("SEMANTIC_WINDOW_BEFORE", 16)
@@ -198,7 +273,7 @@ def build_run_cmd(target_id: str, config: Config) -> tuple[list[str], Path, dict
     if target_id == "sp1-3561f006":
         return (
             command_prefix(config)
-            + ["cargo", "run", "--release", "-q", "--bin", "beak-trace", "--", "--json"],
+            + ["cargo", "run", "--release", "-q", "--bin", "beak-fuzz", "--", "--json"],
             project_dir,
             env,
         )
@@ -211,24 +286,32 @@ def build_run_cmd(target_id: str, config: Config) -> tuple[list[str], Path, dict
         )
         return command_prefix(config) + ["bash", "-lc", script], project_dir, env
 
-    return (
-        command_prefix(config)
-        + [
-            "cargo",
-            "run",
-            "--release",
-            "-q",
-            "--bin",
-            "beak-fuzz",
-            "--",
-            "--seeds-jsonl",
-            str(config.seeds_jsonl),
-            "--initial-limit",
-            str(config.initial_limit),
-            "--max-instructions",
-            str(config.max_instructions),
-            "--oracle-precheck-max-steps",
-            str(config.oracle_precheck_max_steps),
+    run_args = [
+        "cargo",
+        "run",
+        "--release",
+        "-q",
+        "--bin",
+        "beak-fuzz",
+        "--",
+        "--seeds-jsonl",
+        str(config.seeds_jsonl),
+        "--initial-limit",
+        str(config.initial_limit),
+        "--mutation-iters",
+        str(config.mutation_iters),
+        "--max-instructions",
+        str(config.max_instructions),
+    ]
+    if target_id != "openvm-d7eab708":
+        run_args.extend(
+            [
+                "--oracle-precheck-max-steps",
+                str(config.oracle_precheck_max_steps),
+            ]
+        )
+    run_args.extend(
+        [
             "--semantic-window-before",
             str(config.semantic_window_before),
             "--semantic-window-after",
@@ -238,6 +321,10 @@ def build_run_cmd(target_id: str, config: Config) -> tuple[list[str], Path, dict
             "--semantic-max-trials-per-bucket",
             str(config.semantic_max_trials),
         ],
+    )
+
+    return (
+        command_prefix(config) + run_args,
         project_dir,
         env,
     )
@@ -277,50 +364,45 @@ def run_and_log(
             start_new_session=True,
             bufsize=1,
         )
+        REAPER.register(proc)
         start = time.monotonic()
         assert proc.stdout is not None
-        while True:
-            ready, _, _ = select.select([proc.stdout], [], [], 1.0)
-            if ready:
-                line = proc.stdout.readline()
-                if line:
-                    print(line, end="")
-                    log.write(line)
-            if proc.poll() is not None:
-                rest = proc.stdout.read()
-                if rest:
-                    print(rest, end="")
-                    log.write(rest)
-                return proc.returncode
-            if timeout_seconds is not None and time.monotonic() - start >= timeout_seconds:
-                msg = (
-                    f"[reaper] {timeout_seconds}s reached, sending SIGTERM "
-                    f"to process group {proc.pid}\n"
-                )
-                print(msg, end="")
-                log.write(msg)
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-
-                deadline = time.monotonic() + grace_seconds
-                while proc.poll() is None and time.monotonic() < deadline:
-                    time.sleep(1)
-                if proc.poll() is None:
-                    msg = "[reaper] grace period expired, sending SIGKILL to process group\n"
-                    print(msg, end="")
-                    log.write(msg)
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                proc.wait()
-                rest = proc.stdout.read()
-                if rest:
-                    print(rest, end="")
-                    log.write(rest)
-                return 124
+        try:
+            while True:
+                ready, _, _ = select.select([proc.stdout], [], [], 1.0)
+                if ready:
+                    line = proc.stdout.readline()
+                    if line:
+                        print(line, end="")
+                        log.write(line)
+                if proc.poll() is not None:
+                    rest = proc.stdout.read()
+                    if rest:
+                        print(rest, end="")
+                        log.write(rest)
+                    return proc.returncode
+                if timeout_seconds is not None and time.monotonic() - start >= timeout_seconds:
+                    REAPER.terminate_proc_group(
+                        proc,
+                        grace_seconds=grace_seconds,
+                        log=log,
+                        reason=f"{timeout_seconds}s reached",
+                    )
+                    rest = proc.stdout.read()
+                    if rest:
+                        print(rest, end="")
+                        log.write(rest)
+                    return 124
+        except BaseException:
+            REAPER.terminate_proc_group(
+                proc,
+                grace_seconds=grace_seconds,
+                log=log,
+                reason="runner exception",
+            )
+            raise
+        finally:
+            REAPER.unregister(proc)
 
 
 def snapshot_target_artifacts(target_id: str) -> set[Path]:
@@ -676,6 +758,7 @@ def print_header(config: Config, targets: list[str]) -> None:
     print(f"  timeout_s       : {config.soft_timeout_seconds}")
     print(f"  grace_s         : {config.kill_grace_seconds}")
     print(f"  initial_limit   : {config.initial_limit}")
+    print(f"  mutation_iters  : {config.mutation_iters}")
     print(f"  max_instructions: {config.max_instructions}")
     print(f"  oracle_precheck : {config.oracle_precheck_max_steps}")
     print(f"  sem_before      : {config.semantic_window_before}")
@@ -700,6 +783,7 @@ def print_target_commands(target_id: str, config: Config) -> None:
 def main() -> int:
     args = parse_args()
     config = Config()
+    install_signal_handlers(config.kill_grace_seconds)
 
     for cmd in ("bash", "cargo", "make", "prlimit"):
         require_cmd(cmd)

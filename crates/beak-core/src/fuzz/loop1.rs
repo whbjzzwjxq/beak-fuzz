@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::fuzz::bug_filter::is_suppressed_exception;
 use crate::fuzz::jsonl::{BugRecord, CorpusRecord, JsonlWriter, RunRecord};
 use crate::fuzz::seed::FuzzingSeed;
 use crate::rv32im::instruction::RV32IMInstruction;
@@ -56,6 +57,16 @@ pub struct Loop1Outputs {
 
 fn is_baseline_mismatch(stats: &RunStats) -> bool {
     !stats.injected_phase && !stats.mismatch_regs.is_empty()
+}
+
+fn is_reportable_exception(stats: &RunStats) -> bool {
+    !stats.injected_phase
+        && (stats.backend_error.is_some() || stats.oracle_error.is_some())
+        && !is_suppressed_exception(
+            &serde_json::Value::Null,
+            stats.backend_error.as_deref(),
+            stats.oracle_error.as_deref(),
+        )
 }
 
 fn injection_kind_is_noop_prefix(kind: Option<&str>) -> bool {
@@ -374,8 +385,7 @@ impl<EM, OT> Feedback<EM, BytesInput, OT, LoopState> for BucketNoveltyFeedback {
 
         let underconstrained_candidate = stats.underconstrained_candidate;
         let baseline_mismatch = is_baseline_mismatch(&stats);
-        let has_exception = !stats.injected_phase
-            && (stats.backend_error.is_some() || stats.oracle_error.is_some());
+        let has_exception = is_reportable_exception(&stats);
         let is_bug = baseline_mismatch || has_exception || underconstrained_candidate;
         let elapsed_ms = self.run_start.elapsed().as_millis() as u64;
         if is_bug {
@@ -732,7 +742,7 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
                             5
                         } else if !s.mismatch_regs.is_empty() {
                             4
-                        } else if s.backend_error.is_some() || s.oracle_error.is_some() {
+                        } else if is_reportable_exception(s) {
                             3
                         } else {
                             0
@@ -790,8 +800,10 @@ pub fn run_loop1<B: LoopBackend>(cfg: Loop1Config, mut backend: B) -> Result<Loo
             "mismatch"
         } else if s.injected_phase && !s.mismatch_regs.is_empty() {
             "injected_mismatch"
-        } else if s.backend_error.is_some() || s.oracle_error.is_some() {
+        } else if is_reportable_exception(&s) {
             "exception"
+        } else if s.injected_phase && (s.backend_error.is_some() || s.oracle_error.is_some()) {
+            "injected_rejection"
         } else if s.skip_reason.is_some() {
             "skip"
         } else {

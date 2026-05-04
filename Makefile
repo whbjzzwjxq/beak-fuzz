@@ -35,6 +35,8 @@ PYTHON ?= python3
 SEEDS_JSONL ?= storage/fuzzing_seeds/initial.jsonl
 TIMEOUT_MS ?= 500
 INITIAL_LIMIT ?= 500
+ITERS ?= 0
+MUTATION_ITERS ?= $(ITERS)
 MAX_INSTRUCTIONS ?= 32
 SEMANTIC_WINDOW_BEFORE ?= 16
 SEMANTIC_WINDOW_AFTER ?= 64
@@ -179,6 +181,7 @@ openvm-fuzz: openvm-fuzz-build
 		--seeds-jsonl "$(SEEDS_JSONL)" \
 		--timeout-ms "$(TIMEOUT_MS)" \
 		--initial-limit "$(INITIAL_LIMIT)" \
+		--mutation-iters "$(MUTATION_ITERS)" \
 		--max-instructions "$(MAX_INSTRUCTIONS)" \
 		--semantic-window-before "$(SEMANTIC_WINDOW_BEFORE)" \
 		--semantic-window-after "$(SEMANTIC_WINDOW_AFTER)" \
@@ -202,6 +205,7 @@ pico-run: pico-build
 	cd "$(PICO_PROJECT_DIR)" && UV_CACHE_DIR=$${UV_CACHE_DIR:-/tmp/uv-cache} cargo run --release -q --bin beak-fuzz -- \
 		--seeds-jsonl "$(PICO_SEEDS)" \
 		--initial-limit "$(PICO_INITIAL_LIMIT)" \
+		--mutation-iters "$(MUTATION_ITERS)" \
 		--semantic-window-before "$(SEMANTIC_WINDOW_BEFORE)" \
 		--semantic-window-after "$(SEMANTIC_WINDOW_AFTER)" \
 		--semantic-step-stride "$(SEMANTIC_STEP_STRIDE)" \
@@ -229,6 +233,7 @@ sp1-run: sp1-build
 	cd "$(SP1_PROJECT_DIR)" && UV_CACHE_DIR=$${UV_CACHE_DIR:-/tmp/uv-cache} cargo run --release -q --bin beak-fuzz -- \
 		--seeds-jsonl "$(SP1_SEEDS)" \
 		--initial-limit "$(SP1_INITIAL_LIMIT)" \
+		--mutation-iters "$(MUTATION_ITERS)" \
 		--semantic-window-before "$(SEMANTIC_WINDOW_BEFORE)" \
 		--semantic-window-after "$(SEMANTIC_WINDOW_AFTER)" \
 		--semantic-step-stride "$(SEMANTIC_STEP_STRIDE)" \
@@ -266,6 +271,7 @@ jolt-run: jolt-build
 		--seeds-jsonl "$(JOLT_SEEDS)" \
 		--timeout-ms "$(JOLT_TIMEOUT_MS)" \
 		--initial-limit "$(JOLT_INITIAL_LIMIT)" \
+		--mutation-iters "$(MUTATION_ITERS)" \
 		--semantic-window-before "$(SEMANTIC_WINDOW_BEFORE)" \
 		--semantic-window-after "$(SEMANTIC_WINDOW_AFTER)" \
 		--semantic-step-stride "$(SEMANTIC_STEP_STRIDE)" \
@@ -293,6 +299,7 @@ nexus-run: nexus-build
 		--seeds-jsonl "$(NEXUS_SEEDS)" \
 		--timeout-ms "$(NEXUS_TIMEOUT_MS)" \
 		--initial-limit "$(NEXUS_INITIAL_LIMIT)" \
+		--mutation-iters "$(MUTATION_ITERS)" \
 		--semantic-window-before "$(SEMANTIC_WINDOW_BEFORE)" \
 		--semantic-window-after "$(SEMANTIC_WINDOW_AFTER)" \
 		--semantic-step-stride "$(SEMANTIC_STEP_STRIDE)" \
@@ -320,6 +327,7 @@ risc0-run: risc0-build
 		--seeds-jsonl "$(RISC0_SEEDS)" \
 		--timeout-ms "$(RISC0_TIMEOUT_MS)" \
 		--initial-limit "$(RISC0_INITIAL_LIMIT)" \
+		--mutation-iters "$(MUTATION_ITERS)" \
 		--semantic-window-before "$(SEMANTIC_WINDOW_BEFORE)" \
 		--semantic-window-after "$(SEMANTIC_WINDOW_AFTER)" \
 		--semantic-step-stride "$(SEMANTIC_STEP_STRIDE)" \

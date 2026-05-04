@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use libafl::inputs::BytesInput;
 use serde_json::json;
 
+use crate::fuzz::bug_filter::is_suppressed_exception;
 use crate::fuzz::jsonl::{BugRecord, CorpusRecord, JsonlWriter};
 use crate::fuzz::loop1::{Loop1Config, Loop1Outputs, LoopBackend};
 use crate::fuzz::seed::FuzzingSeed;
@@ -343,8 +344,14 @@ pub fn run_direct_bucket_mutate<B: LoopBackend>(
                 && !injection_kind_is_noop_prefix(inject_kind.as_deref());
             let has_exception = !is_injected_phase
                 && (stats.backend_error.is_some() || stats.oracle_error.is_some());
-            if baseline_mismatch || has_exception || underconstrained_candidate {
-                let kind = if has_exception {
+            let has_reportable_exception = has_exception
+                && !is_suppressed_exception(
+                    &serde_json::Value::Object(metadata.clone()),
+                    stats.backend_error.as_deref(),
+                    stats.oracle_error.as_deref(),
+                );
+            if baseline_mismatch || has_reportable_exception || underconstrained_candidate {
+                let kind = if has_reportable_exception {
                     "exception"
                 } else if baseline_mismatch {
                     "mismatch"

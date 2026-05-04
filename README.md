@@ -96,9 +96,11 @@ Notes:
 
 - The fuzz target is run in release mode by default (`cargo run --release -q --bin beak-fuzz`).
 - `FAST_TEST=1` enables fast insecure parameters for local fuzz/debug.
+- `ITERS` maps to `--mutation-iters`: after evaluating the initial JSONL seeds, the runner selects retained corpus entries, applies ISA-aware mutation arms, executes the mutated input, and keeps it only when it discovers a new semantic signature.
 - Outputs are written to `storage/fuzzing_seeds/` as:
-  - `loop1-...-corpus.jsonl`
-  - `loop1-...-bugs.jsonl`
+  - `benchmark-...-corpus.jsonl`
+  - `benchmark-...-bugs.jsonl`
+  - `benchmark-...-runs.jsonl`
 
 ## 5) Full Serial Campaign
 

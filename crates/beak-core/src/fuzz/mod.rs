@@ -1,7 +1,9 @@
 pub mod bandit;
 pub mod benchmark;
+pub mod bug_filter;
 pub mod jsonl;
 pub mod loop1;
 pub mod loop2;
 pub mod mutators;
 pub mod seed;
+pub mod seed_mutation;
