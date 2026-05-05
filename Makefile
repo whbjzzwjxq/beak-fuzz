@@ -86,6 +86,8 @@ RISC0_SEEDS ?= storage/fuzzing_seeds/initial.jsonl
 RISC0_INITIAL_LIMIT ?= 1000
 RISC0_TIMEOUT_MS ?= 5000
 RISC0_ARGS ?=
+RISC0_ZKVM_SRC ?=
+RISC0_INSTALL_SRC_ARG = $(if $(strip $(RISC0_ZKVM_SRC)),--zkvm-src "$(abspath $(RISC0_ZKVM_SRC))",)
 
 define _require_pico_commit
 	@if [ -z "$(PICO_COMMIT)" ]; then \
@@ -313,7 +315,7 @@ risc0-install:
 	$(_require_risc0_commit)
 	@mkdir -p "$(RISC0_PROJECT_DIR)"
 	cd beak-py && UV_CACHE_DIR=$${UV_CACHE_DIR:-/tmp/uv-cache} make install
-	cd beak-py && UV_CACHE_DIR=$${UV_CACHE_DIR:-/tmp/uv-cache} uv run risc0-fuzzer install --commit-or-branch "$(RISC0_COMMIT)" --zkvm-src ./risc0-src
+	cd beak-py && UV_CACHE_DIR=$${UV_CACHE_DIR:-/tmp/uv-cache} uv run risc0-fuzzer install --commit-or-branch "$(RISC0_COMMIT)" $(RISC0_INSTALL_SRC_ARG)
 
 risc0-build:
 	$(_require_risc0_commit)

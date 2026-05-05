@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Serial install + injection campaign runner for Beak."""
+"""Install + injection campaign runner for Beak."""
 
 from __future__ import annotations
 
 import argparse
 import atexit
+import copy
 import csv
 import json
 import os
+import queue
 import select
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -21,6 +24,8 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent
 BEAK_ROOT = SCRIPT_DIR.parent
 STORAGE_DIR = BEAK_ROOT / "storage" / "fuzzing_seeds"
+IO_LOCK = threading.Lock()
+INSTALL_LOCK = threading.Lock()
 
 
 class ProcessReaper:
@@ -136,10 +141,94 @@ def env_path(name: str, default: Path) -> Path:
     return Path(os.environ.get(name, str(default))).expanduser().resolve()
 
 
+def parse_cpu_set(spec: str) -> list[int]:
+    cpus: list[int] = []
+    seen: set[int] = set()
+    for raw_part in spec.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_s, end_s = part.split("-", 1)
+            start = int(start_s)
+            end = int(end_s)
+            if end < start:
+                raise ValueError(f"invalid CPU range: {part}")
+            values = range(start, end + 1)
+        else:
+            values = [int(part)]
+        for cpu in values:
+            if cpu < 0:
+                raise ValueError(f"invalid negative CPU id: {cpu}")
+            if cpu not in seen:
+                cpus.append(cpu)
+                seen.add(cpu)
+    if not cpus:
+        raise ValueError("CPU_SET resolved to an empty CPU pool")
+    return cpus
+
+
+def format_cpu_set(cpus: list[int]) -> str:
+    if not cpus:
+        raise ValueError("cannot format empty CPU set")
+    ordered = sorted(cpus)
+    ranges: list[str] = []
+    start = prev = ordered[0]
+    for cpu in ordered[1:]:
+        if cpu == prev + 1:
+            prev = cpu
+            continue
+        ranges.append(f"{start}-{prev}" if start != prev else str(start))
+        start = prev = cpu
+    ranges.append(f"{start}-{prev}" if start != prev else str(start))
+    return ",".join(ranges)
+
+
+def default_cpu_set() -> str:
+    count = os.cpu_count() or 1
+    return format_cpu_set(list(range(count)))
+
+
+def default_parallel_vms(cpu_count: int, vm_cores: int) -> int:
+    return max(1, cpu_count // max(1, vm_cores))
+
+
+def build_worker_cpu_sets(cpu_pool: list[int], vm_cores: int, parallel_vms: int) -> list[list[int]]:
+    if vm_cores <= 0:
+        raise ValueError("VM_CORES must be positive")
+    if parallel_vms <= 0:
+        raise ValueError("PARALLEL_VMS must be positive")
+    if len(cpu_pool) < vm_cores:
+        if parallel_vms != 1:
+            raise ValueError(
+                f"CPU_SET has {len(cpu_pool)} CPUs, which is smaller than VM_CORES={vm_cores}; "
+                "set PARALLEL_VMS=1 or reduce VM_CORES"
+            )
+        return [cpu_pool]
+    required = parallel_vms * vm_cores
+    if required > len(cpu_pool):
+        raise ValueError(
+            f"PARALLEL_VMS={parallel_vms} with VM_CORES={vm_cores} requires {required} CPUs, "
+            f"but CPU_SET only contains {len(cpu_pool)} CPUs"
+        )
+    return [cpu_pool[i * vm_cores : (i + 1) * vm_cores] for i in range(parallel_vms)]
+
+
 class Config:
     def __init__(self) -> None:
-        self.threads = env_int("THREADS", 8)
-        self.cpu_set = os.environ.get("CPU_SET", "0-7")
+        self.cpu_set = os.environ.get("CPU_SET", default_cpu_set())
+        self.cpu_pool = parse_cpu_set(self.cpu_set)
+        legacy_threads = env_int("THREADS", 32)
+        self.vm_cores = env_int("VM_CORES", legacy_threads)
+        self.parallel_vms = env_int(
+            "PARALLEL_VMS", default_parallel_vms(len(self.cpu_pool), self.vm_cores)
+        )
+        self.worker_cpu_sets = build_worker_cpu_sets(
+            self.cpu_pool,
+            self.vm_cores,
+            self.parallel_vms,
+        )
+        self.threads = min(self.vm_cores, len(self.worker_cpu_sets[0]))
         self.soft_timeout_seconds = env_int("SOFT_TIMEOUT_SECONDS", 14400)
         self.kill_grace_seconds = env_int("KILL_GRACE_SECONDS", 30)
         self.uv_cache_dir = os.environ.get("UV_CACHE_DIR", "/tmp/uv-cache")
@@ -167,6 +256,16 @@ class Config:
         self.artifacts_path = env_path("ARTIFACTS_PATH", self.run_root / "artifacts.tsv")
         self.summary_json_path = env_path("SUMMARY_JSON_PATH", self.run_root / "summary.json")
 
+    def for_worker_slot(self, slot_index: int) -> "Config":
+        worker = copy.copy(self)
+        cpus = self.worker_cpu_sets[slot_index]
+        worker.cpu_set = format_cpu_set(cpus)
+        worker.cpu_pool = cpus
+        worker.worker_cpu_sets = [cpus]
+        worker.parallel_vms = 1
+        worker.threads = min(self.vm_cores, len(cpus))
+        return worker
+
     def command_env(self) -> dict[str, str]:
         env = dict(os.environ)
         home_local_bin = Path.home() / ".local" / "bin"
@@ -191,7 +290,7 @@ class Config:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="run_serial_install_injection.py",
-        description="Run the serial Beak install + injection campaign.",
+        description="Run the Beak install + injection campaign.",
     )
     parser.add_argument("--print-commands", action="store_true")
     parser.add_argument("--skip-install", action="store_true")
@@ -433,15 +532,17 @@ def append_artifacts(
     new_paths = sorted(after - before)
     if not new_paths:
         return
-    with artifacts_path.open("a", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f, delimiter="\t")
-        for path in new_paths:
-            writer.writerow([target_id, commit, artifact_kind(path), str(path)])
+    with IO_LOCK:
+        with artifacts_path.open("a", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f, delimiter="\t")
+            for path in new_paths:
+                writer.writerow([target_id, commit, artifact_kind(path), str(path)])
 
 
 def append_summary(summary_path: Path, target_id: str, commit: str, status: str, detail: Path) -> None:
-    with summary_path.open("a", encoding="utf-8", newline="") as f:
-        csv.writer(f, delimiter="\t").writerow([target_id, commit, status, str(detail)])
+    with IO_LOCK:
+        with summary_path.open("a", encoding="utf-8", newline="") as f:
+            csv.writer(f, delimiter="\t").writerow([target_id, commit, status, str(detail)])
 
 
 def run_target(target_id: str, config: Config, skip_install: bool) -> bool:
@@ -459,7 +560,8 @@ def run_target(target_id: str, config: Config, skip_install: bool) -> bool:
 
     if not skip_install:
         install_cmd, install_cwd = build_install_cmd(target_id, config)
-        rc = run_and_log(install_cmd, install_log, cwd=install_cwd, env=env)
+        with INSTALL_LOCK:
+            rc = run_and_log(install_cmd, install_log, cwd=install_cwd, env=env)
         if rc != 0:
             append_summary(config.summary_path, target_id, commit, "install_failed", install_log)
             print(f"== [{target_id}] install failed ==")
@@ -751,10 +853,15 @@ def write_structured_summary(config: Config) -> None:
 
 
 def print_header(config: Config, targets: list[str]) -> None:
-    print("Beak serial install+injection")
+    print("Beak install+injection campaign")
     print(f"  targets         : {len(targets)}")
-    print(f"  threads         : {config.threads}")
-    print(f"  cpu_set         : {config.cpu_set}")
+    print(f"  cpu_pool        : {config.cpu_set}")
+    print(f"  vm_cores        : {config.vm_cores}")
+    print(f"  parallel_vms    : {config.parallel_vms}")
+    print(
+        "  worker_cpu_sets : "
+        + ", ".join(format_cpu_set(cpus) for cpus in config.worker_cpu_sets)
+    )
     print(f"  timeout_s       : {config.soft_timeout_seconds}")
     print(f"  grace_s         : {config.kill_grace_seconds}")
     print(f"  initial_limit   : {config.initial_limit}")
@@ -772,17 +879,79 @@ def print_header(config: Config, targets: list[str]) -> None:
 
 
 def print_target_commands(target_id: str, config: Config) -> None:
-    install_cmd, _ = build_install_cmd(target_id, config)
-    run_cmd, _, _ = build_run_cmd(target_id, config)
+    worker_config = config.for_worker_slot(0)
+    install_cmd, _ = build_install_cmd(target_id, worker_config)
+    run_cmd, _, _ = build_run_cmd(target_id, worker_config)
     print(f"[{target_id}] install")
     print(quote_cmd(install_cmd))
     print(f"[{target_id}] run")
     print(quote_cmd(run_cmd))
 
 
+def run_filtered_targets(filtered: list[str], config: Config, skip_install: bool) -> bool:
+    if not filtered:
+        return True
+
+    worker_count = min(config.parallel_vms, len(filtered))
+    if worker_count <= 1:
+        worker_config = config.for_worker_slot(0)
+        overall_ok = True
+        for target_id in filtered:
+            if not run_target(target_id, worker_config, skip_install):
+                overall_ok = False
+        return overall_ok
+
+    tasks: queue.Queue[tuple[int, str] | None] = queue.Queue()
+    for index, target_id in enumerate(filtered):
+        tasks.put((index, target_id))
+    for _ in range(worker_count):
+        tasks.put(None)
+
+    results = [False] * len(filtered)
+    errors: list[BaseException] = []
+    errors_lock = threading.Lock()
+
+    def worker(slot_index: int) -> None:
+        worker_config = config.for_worker_slot(slot_index)
+        print(
+            f"[worker {slot_index}] cpu_set={worker_config.cpu_set} "
+            f"threads={worker_config.threads}"
+        )
+        while True:
+            item = tasks.get()
+            try:
+                if item is None:
+                    return
+                index, target_id = item
+                results[index] = run_target(target_id, worker_config, skip_install)
+            except BaseException as exc:
+                with errors_lock:
+                    errors.append(exc)
+                return
+            finally:
+                tasks.task_done()
+
+    threads = [
+        threading.Thread(target=worker, args=(slot_index,), name=f"beak-campaign-{slot_index}")
+        for slot_index in range(worker_count)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    if errors:
+        raise errors[0]
+    return all(results)
+
+
 def main() -> int:
     args = parse_args()
-    config = Config()
+    try:
+        config = Config()
+    except ValueError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
+        return 2
     install_signal_handlers(config.kill_grace_seconds)
 
     for cmd in ("bash", "cargo", "make", "prlimit"):
@@ -813,10 +982,7 @@ def main() -> int:
     with config.artifacts_path.open("w", encoding="utf-8", newline="") as f:
         csv.writer(f, delimiter="\t").writerow(["target", "commit", "kind", "path"])
 
-    overall_ok = True
-    for target_id in filtered:
-        if not run_target(target_id, config, args.skip_install):
-            overall_ok = False
+    overall_ok = run_filtered_targets(filtered, config, args.skip_install)
 
     print(f"Summary written to {config.summary_path}")
     try:
