@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from jolt_fuzzer.settings import JOLT_READWRITE_SIZING_COMMIT
+from jolt_fuzzer.settings import JOLT_DORY_SHORT_TRACE_COMMIT, JOLT_READWRITE_SIZING_COMMIT
 
 
 def apply(*, jolt_install_path: Path, commit_or_branch: str) -> None:
-    if commit_or_branch == JOLT_READWRITE_SIZING_COMMIT:
-        # The 6c read/write-memory snapshot is intentionally kept vulnerable.
-        # Its Beak project verifies baseline prover exceptions and derives a
-        # PD4 bytecode-boundary bucket without installing witness mutations into
-        # the upstream Jolt source.
+    if commit_or_branch in {JOLT_READWRITE_SIZING_COMMIT, JOLT_DORY_SHORT_TRACE_COMMIT}:
+        # These vulnerable snapshots are verified through baseline prover
+        # exceptions. Keep upstream source shape intact instead of applying the
+        # e9caa witness-mutation hooks, whose host/tracer anchors do not exist
+        # uniformly across the older Dory-era tree.
         return
 
     _ = commit_or_branch
