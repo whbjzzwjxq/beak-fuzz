@@ -13,7 +13,7 @@ use crate::fuzz::seed::FuzzingSeed;
 use crate::fuzz::seed_mutation::SeedMutationEngine;
 use crate::rv32im::instruction::RV32IMInstruction;
 use crate::rv32im::oracle::{OracleConfig, RISCVOracle};
-use crate::trace::{sorted_signatures_from_hits, sorted_signatures_from_signals, BucketHit};
+use crate::trace::{BucketHit, sorted_signatures_from_hits, sorted_signatures_from_signals};
 
 pub use crate::fuzz::loop1::{BackendEval, DEFAULT_RNG_SEED};
 
@@ -638,6 +638,7 @@ pub fn run_benchmark<B: BenchmarkBackend>(
 
     let take_n =
         if cfg.initial_limit == 0 { seeds.len() } else { cfg.initial_limit.min(seeds.len()) };
+    let only_bucket = std::env::var("BEAK_ONLY_BUCKET").ok().filter(|s| !s.is_empty());
 
     let mut bug_count = 0usize;
     let mut eval_id: u64 = 0;
@@ -736,6 +737,9 @@ pub fn run_benchmark<B: BenchmarkBackend>(
         let mut seed_semantic_solved = false;
 
         for candidate in candidates {
+            if only_bucket.as_deref().is_some_and(|bucket| candidate.bucket_id != bucket) {
+                continue;
+            }
             if seed_semantic_solved {
                 break;
             }
@@ -946,6 +950,9 @@ pub fn run_benchmark<B: BenchmarkBackend>(
         let mut seed_semantic_solved = false;
 
         for candidate in candidates {
+            if only_bucket.as_deref().is_some_and(|bucket| candidate.bucket_id != bucket) {
+                continue;
+            }
             if seed_semantic_solved {
                 break;
             }
@@ -1041,8 +1048,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        bug_kind, centered_steps, eval_once, is_reportable_exception, sweep_steps, BackendEval,
-        BenchmarkBackend, BenchmarkConfig, EvalStats,
+        BackendEval, BenchmarkBackend, BenchmarkConfig, EvalStats, bug_kind, centered_steps,
+        eval_once, is_reportable_exception, sweep_steps,
     };
     use crate::rv32im::oracle::OracleConfig;
     use serde_json::json;
