@@ -21,6 +21,6 @@ beak-core = { path = "../../crates/beak-core" }
 clap = "4.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-nexus-common = { path = "nexus-src/common" }
-nexus-vm = { path = "nexus-src/vm" }
-nexus-vm-prover2 = { path = "nexus-src/prover2/machine" }
+nexus-common = { path = "../../beak-py/out/nexus-f2ad12652c39dc516a116447a53f8557f64a7f7d/nexus-src/common" }
+nexus-vm = { path = "../../beak-py/out/nexus-f2ad12652c39dc516a116447a53f8557f64a7f7d/nexus-src/vm" }
+nexus-vm-prover2 = { path = "../../beak-py/out/nexus-f2ad12652c39dc516a116447a53f8557f64a7f7d/nexus-src/prover2/machine" }
