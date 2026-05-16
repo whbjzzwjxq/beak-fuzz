@@ -219,6 +219,39 @@ fn beak_nexus_mutate_load_store_trace(
             }
             let cur_value: Word = memory_record.get_value().to_le_bytes();
 """
+    flow_value_anchor_pretty = """            if is_load {
+                let cur_value_extended = vm_step
+                    .step
+                    .result
+                    .expect("load operation should have a result");
+                match memory_record.get_size() {
+                    MemAccessSize::Byte => {
+                        assert_eq!(cur_value_extended & 0xff, memory_record.get_value() & 0xff);
+                        traces.fill_columns(
+                            row_idx,
+                            (cur_value_extended & 0x7f) as u8,
+                            Column::QtAux,
+                        );
+                    }
+                    MemAccessSize::HalfWord => {
+                        assert_eq!(
+                            cur_value_extended & 0xffff,
+                            memory_record.get_value() & 0xffff
+                        );
+                        traces.fill_columns(
+                            row_idx,
+                            ((cur_value_extended >> 8) & 0x7f) as u8,
+                            Column::QtAux,
+                        );
+                    }
+                    MemAccessSize::Word => {
+                        assert_eq!(cur_value_extended, memory_record.get_value());
+                    }
+                }
+                traces.fill_columns(row_idx, cur_value_extended, Column::ValueA);
+            }
+            let cur_value: Word = memory_record.get_value().to_le_bytes();
+"""
     flow_value_patch = """            let injected_load_raw_value =
                 beak_nexus_store_load_flow_raw_load_value(memory_record, side_note);
             if is_load {
@@ -275,7 +308,10 @@ fn beak_nexus_mutate_load_store_trace(
             }
 """
     if flow_value_guard not in contents:
-        _replace_once(path, flow_value_anchor, flow_value_patch)
+        if flow_value_anchor in contents:
+            _replace_once(path, flow_value_anchor, flow_value_patch)
+        else:
+            _replace_once(path, flow_value_anchor_pretty, flow_value_patch)
 
 
 def _patch_load_store_extended_semantic_injection(nexus_install_path: Path) -> None:
