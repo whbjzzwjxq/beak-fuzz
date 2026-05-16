@@ -503,6 +503,7 @@ pub fn run_backend_once(
         words,
         &exec.rows,
         &exec.trace,
+        &exec.bytecode,
         &exec.memory_init,
         &exec.io_device,
     )?;
@@ -695,6 +696,10 @@ impl JoltBackend {
             }
             (id, "pd1") if id == semantic::row::PADDING_INTERACTION_SEND.id => {
                 (semantic::row::PADDING_INTERACTION_SEND.semantic_class, PADDING_INJECT_KIND)
+            }
+            (id, "pd4") if id == semantic::row::BYTECODE_TABLE_BOUNDARY.id => {
+                // Bucket-only for now: PD4 needs a dedicated bytecode-boundary hook, not PD1 padding.
+                return None;
             }
             _ => return None,
         };

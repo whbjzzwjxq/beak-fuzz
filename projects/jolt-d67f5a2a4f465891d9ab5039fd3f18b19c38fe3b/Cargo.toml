@@ -1,0 +1,33 @@
+[package]
+name = "beak-jolt-d67f5a2a"
+version = "0.1.0"
+edition = "2021"
+description = "Jolt d67 RV64/Dory-specific Beak binaries"
+publish = false
+
+[lib]
+path = "src/lib/mod.rs"
+
+[[bin]]
+name = "beak-fuzz"
+path = "src/bin/fuzz.rs"
+
+[[bin]]
+name = "beak-trace"
+path = "src/bin/trace.rs"
+
+[dependencies]
+beak-core = { path = "../../crates/beak-core" }
+clap = "4.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+common = { path = "../../beak-py/out/jolt-d67f5a2a4f465891d9ab5039fd3f18b19c38fe3b/jolt-src/common" }
+tracer = { path = "../../beak-py/out/jolt-d67f5a2a4f465891d9ab5039fd3f18b19c38fe3b/jolt-src/tracer" }
+jolt = { path = "../../beak-py/out/jolt-d67f5a2a4f465891d9ab5039fd3f18b19c38fe3b/jolt-src", features = ["host"] }
+
+[patch.crates-io]
+ark-ff = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+ark-ec = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+ark-serialize = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+allocative = { git = "https://github.com/facebookexperimental/allocative", rev = "85b773d85d526d068ce94724ff7a7b81203fc95e" }
+dory = { git = "https://github.com/markosg04/dory", branch = "dev/twist-shout" }

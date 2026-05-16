@@ -9,9 +9,10 @@ use openvm_circuit::arch::VmExecutor;
 use openvm_instructions::exe::VmExe;
 use openvm_instructions::instruction::Instruction;
 use openvm_instructions::program::Program;
-use openvm_instructions::riscv::RV32_REGISTER_AS;
+use openvm_instructions::riscv::{RV32_MEMORY_AS, RV32_REGISTER_AS, RV32_REGISTER_NUM_LIMBS};
 use openvm_instructions::LocalOpcode;
 use openvm_instructions::SystemOpcode;
+use openvm_instructions::VmOpcode;
 use openvm_rv32im_transpiler::{Rv32ITranspilerExtension, Rv32MTranspilerExtension};
 use openvm_sdk::config::{AppConfig, SdkVmConfig};
 use openvm_sdk::prover::AppProver;
@@ -26,13 +27,48 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-fn build_vm_config() -> SdkVmConfig {
-    let mut vm_config = SdkVmConfig::builder()
-        .system(Default::default())
-        .rv32i(Default::default())
-        .rv32m(Default::default())
-        .io(Default::default())
-        .build();
+// Valid RV32 ADDI x0,x0 marker words that keep the shared beak-fuzz seed loader ordinary
+// while selecting a project-local OpenVM direct BigInt BLT256 frontend in this backend.
+pub const BIGINT_BLT256_FRONTEND_WORDS: [u32; 4] =
+    [0x3360_0013, 0x0f10_0013, 0x4250_0013, 0x0010_0013];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenVmFrontend {
+    Rv32,
+    BigIntBranchLessThan256,
+}
+
+impl OpenVmFrontend {
+    fn detect(words: &[u32]) -> Self {
+        if words == BIGINT_BLT256_FRONTEND_WORDS {
+            Self::BigIntBranchLessThan256
+        } else {
+            Self::Rv32
+        }
+    }
+
+    fn needs_bigint(self) -> bool {
+        matches!(self, Self::BigIntBranchLessThan256)
+    }
+}
+
+fn build_vm_config(frontend: OpenVmFrontend) -> SdkVmConfig {
+    let mut vm_config = if frontend.needs_bigint() {
+        SdkVmConfig::builder()
+            .system(Default::default())
+            .rv32i(Default::default())
+            .rv32m(Default::default())
+            .io(Default::default())
+            .bigint(Default::default())
+            .build()
+    } else {
+        SdkVmConfig::builder()
+            .system(Default::default())
+            .rv32i(Default::default())
+            .rv32m(Default::default())
+            .io(Default::default())
+            .build()
+    };
     let force_volatile = std::env::var("BEAK_OPENVM_FORCE_VOLATILE")
         .ok()
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -76,7 +112,68 @@ fn parse_init_memory_env() -> Result<BTreeMap<(u32, u32), F>, String> {
     Ok(init_memory)
 }
 
-fn build_exe(words: &[u32]) -> Result<std::sync::Arc<VmExe<F>>, String> {
+fn write_init_u32(
+    init_memory: &mut BTreeMap<(u32, u32), F>,
+    address_space: u32,
+    ptr: u32,
+    value: u32,
+) {
+    for (idx, byte) in value.to_le_bytes().into_iter().enumerate() {
+        init_memory.insert((address_space, ptr + idx as u32), F::from_canonical_u8(byte));
+    }
+}
+
+fn write_init_bytes(
+    init_memory: &mut BTreeMap<(u32, u32), F>,
+    address_space: u32,
+    ptr: u32,
+    bytes: &[u8],
+) {
+    for (idx, byte) in bytes.iter().copied().enumerate() {
+        init_memory.insert((address_space, ptr + idx as u32), F::from_canonical_u8(byte));
+    }
+}
+
+fn build_bigint_branch_less_than_256_exe() -> Result<std::sync::Arc<VmExe<F>>, String> {
+    const RV32_BRANCH_LESS_THAN_256_CLASS_OFFSET: usize = 0x425;
+    const BLT_LOCAL_OPCODE: usize = 0;
+
+    let mut instructions = vec![Instruction::new(
+        VmOpcode::from_usize(RV32_BRANCH_LESS_THAN_256_CLASS_OFFSET + BLT_LOCAL_OPCODE),
+        F::from_canonical_usize(RV32_REGISTER_NUM_LIMBS),
+        F::from_canonical_usize(2 * RV32_REGISTER_NUM_LIMBS),
+        F::from_canonical_u32(4),
+        F::from_canonical_u32(RV32_REGISTER_AS),
+        F::from_canonical_u32(RV32_MEMORY_AS),
+        F::ZERO,
+        F::ZERO,
+    )];
+    instructions.push(Instruction::from_usize(SystemOpcode::TERMINATE.global_opcode(), [0, 0, 0]));
+
+    let lhs_ptr = 128u32;
+    let rhs_ptr = 160u32;
+    let mut lhs = [0u8; 32];
+    lhs[0] = 1;
+    let mut rhs = [0u8; 32];
+    rhs[0] = 2;
+
+    let mut init_memory = BTreeMap::new();
+    write_init_u32(&mut init_memory, RV32_REGISTER_AS, RV32_REGISTER_NUM_LIMBS as u32, lhs_ptr);
+    write_init_u32(
+        &mut init_memory,
+        RV32_REGISTER_AS,
+        (2 * RV32_REGISTER_NUM_LIMBS) as u32,
+        rhs_ptr,
+    );
+    write_init_bytes(&mut init_memory, RV32_MEMORY_AS, lhs_ptr, &lhs);
+    write_init_bytes(&mut init_memory, RV32_MEMORY_AS, rhs_ptr, &rhs);
+
+    let program = Program::from_instructions(&instructions);
+    let exe = VmExe::new(program).with_init_memory(init_memory);
+    Ok(std::sync::Arc::new(exe))
+}
+
+fn build_rv32_exe(words: &[u32]) -> Result<std::sync::Arc<VmExe<F>>, String> {
     let transpiler = Transpiler::<F>::default()
         .with_extension(Rv32ITranspilerExtension)
         .with_extension(Rv32MTranspilerExtension);
@@ -95,6 +192,13 @@ fn build_exe(words: &[u32]) -> Result<std::sync::Arc<VmExe<F>>, String> {
         exe = exe.with_init_memory(init_memory);
     }
     Ok(std::sync::Arc::new(exe))
+}
+
+fn build_exe(words: &[u32], frontend: OpenVmFrontend) -> Result<std::sync::Arc<VmExe<F>>, String> {
+    match frontend {
+        OpenVmFrontend::Rv32 => build_rv32_exe(words),
+        OpenVmFrontend::BigIntBranchLessThan256 => build_bigint_branch_less_than_256_exe(),
+    }
 }
 
 fn is_openvm_supported_rv32_word(_word: u32) -> bool {
@@ -137,15 +241,6 @@ fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
     }
 }
 
-fn inject_variant_param_usize(kind: &str, key: &str) -> Option<usize> {
-    kind.split_once("::").and_then(|(_, variant)| {
-        variant.split(',').find_map(|part| {
-            let (k, v) = part.split_once('=')?;
-            (k == key).then(|| v.parse::<usize>().ok()).flatten()
-        })
-    })
-}
-
 pub fn run_backend_once(
     request_id: u64,
     words: &[u32],
@@ -177,8 +272,9 @@ pub fn run_backend_once(
     fuzzer_utils::configure_witness_injection(inject_kind, inject_step);
     let _ = fuzzer_utils::take_json_logs();
 
+    let frontend = OpenVmFrontend::detect(words);
     let t0 = Instant::now();
-    let exe = build_exe(words).map_err(|e| {
+    let exe = build_exe(words, frontend).map_err(|e| {
         eval.backend_error = Some(e.clone());
         e
     })?;
@@ -186,7 +282,7 @@ pub fn run_backend_once(
 
     let t1 = Instant::now();
     let sdk = Sdk;
-    let vm_config = build_vm_config();
+    let vm_config = build_vm_config(frontend);
     let continuation_enabled = vm_config.system.config.continuation_enabled;
     let app_config = AppConfig {
         app_fri_params: Default::default(),
@@ -279,34 +375,17 @@ pub fn run_backend_once(
         steps.sort_unstable();
         steps.dedup();
     }
-    let injection_applied = inject_kind
-        .and_then(|kind| applied_injection_sites.get(base_inject_kind(kind)))
-        .map(
-            |steps| {
+    let injection_applied =
+        inject_kind
+            .and_then(|kind| applied_injection_sites.get(base_inject_kind(kind)))
+            .map(|steps| {
                 if inject_step == u64::MAX {
                     !steps.is_empty()
                 } else {
                     steps.contains(&inject_step)
                 }
-            },
-        )
-        .or_else(|| {
-            inject_kind.and_then(|kind| {
-                (base_inject_kind(kind) == "openvm.semantic.lookup.xor_multiplicity_consistency")
-                    .then(|| {
-                        let rank = inject_variant_param_usize(kind, "rank").unwrap_or(0);
-                        let xor_hits = eval
-                            .bucket_hits
-                            .iter()
-                            .filter(|hit| {
-                                hit.bucket_id == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id
-                            })
-                            .count();
-                        rank < xor_hits
-                    })
             })
-        })
-        .unwrap_or(false);
+            .unwrap_or(false);
 
     Ok(WorkerResponse {
         request_id,
@@ -576,11 +655,18 @@ impl OpenVmBackend {
                     InjectionSchedule::AroundAnchor(anchor),
                     true,
                 )
-            } else if bucket_id == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id {
+            } else if bucket_id == semantic::row::PADDING_INTERACTION_SEND.id {
                 (
-                    semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.semantic_class,
-                    "openvm.semantic.lookup.xor_multiplicity_consistency",
-                    InjectionSchedule::Exact(0),
+                    semantic::row::PADDING_INTERACTION_SEND.semantic_class,
+                    "openvm.semantic.row.padding_interaction_send",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    false,
+                )
+            } else if bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id {
+                (
+                    semantic::lookup::BOOLEAN_MULTIPLICITY.semantic_class,
+                    "openvm.semantic.lookup.boolean_multiplicity",
+                    InjectionSchedule::AroundAnchor(anchor),
                     false,
                 )
             } else if bucket_id == semantic::control::AUIPC_PC_LIMB_CONSISTENCY.id {
@@ -738,12 +824,13 @@ impl OpenVmBackend {
             } else {
                 return Vec::new();
             };
-        let schedule = self
+        let observed_steps = self
             .last_observed_injection_sites
             .get(base_inject_kind(inject_kind))
-            .map(|steps| {
-                InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor))
-            })
+            .map(|steps| Self::ordered_steps_around_anchor(steps, anchor));
+        let schedule = observed_steps
+            .as_ref()
+            .map(|steps| InjectionSchedule::Explicit(steps.clone()))
             .unwrap_or(fallback_schedule);
         let inject_kinds = if inject_kind == "openvm.semantic.memory.immediate_sign_consistency" {
             Self::o8_variant_specs_for_hit(hit)
@@ -763,7 +850,11 @@ impl OpenVmBackend {
                 schedule: if inject_kind == "openvm.semantic.arithmetic.special_case_consistency"
                     && kind.contains("search=wildcard")
                 {
-                    InjectionSchedule::Exact(u64::MAX)
+                    observed_steps
+                        .as_ref()
+                        .and_then(|steps| steps.first().copied())
+                        .map(|step| InjectionSchedule::Explicit(vec![step]))
+                        .unwrap_or_else(|| schedule.clone())
                 } else {
                     schedule.clone()
                 },
@@ -814,13 +905,15 @@ impl OpenVmBackend {
 
     fn semantic_candidate_priority(candidate: &SemanticInjectionCandidate) -> u8 {
         let bucket_id = candidate.bucket_id.as_str();
-        if bucket_id == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id {
+        if bucket_id == semantic::row::PADDING_INTERACTION_SEND.id {
             0
+        } else if bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id {
+            1
         } else if bucket_id == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id
             || bucket_id == semantic::decode::OPERAND_INDEX_ROUTING.id
             || bucket_id == semantic::decode::FORMAT_IMMEDIATE_REASSEMBLY.id
         {
-            1
+            2
         } else if bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id
             || bucket_id == semantic::memory::ADDRESS_BOUNDARY_RANGE.id
             || bucket_id == semantic::memory::ADDRESS_PROGRESSION_CONSISTENCY.id
@@ -832,12 +925,12 @@ impl OpenVmBackend {
             || bucket_id == semantic::memory::STORE_LOAD_PAYLOAD_FLOW.id
             || bucket_id == semantic::memory::FINALIZATION_CONSISTENCY.id
         {
-            2
+            3
         } else if bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id
             || bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id
             || bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id
         {
-            3
+            4
         } else if bucket_id == semantic::alu::SHIFT_MOD32.id
             || bucket_id == semantic::alu::COMPARISON_BOOLEANITY.id
             || bucket_id == semantic::alu::SUBTRACTION_BORROW_CHAIN.id
@@ -846,14 +939,12 @@ impl OpenVmBackend {
             || bucket_id == semantic::arithmetic::PRODUCT_DECOMPOSITION.id
             || bucket_id == semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION.id
         {
-            4
-        } else if bucket_id == semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.id {
             5
+        } else if bucket_id == semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.id {
+            6
         } else if bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id
             || bucket_id == semantic::control::ECALL_WORD_VALIDITY.id
         {
-            6
-        } else if bucket_id == semantic::row::PADDING_INTERACTION_SEND.id {
             7
         } else if bucket_id == semantic::control::AUIPC_PC_LIMB_CONSISTENCY.id {
             8
@@ -1043,6 +1134,8 @@ impl BenchmarkBackend for OpenVmBackend {
         &self,
         hits: &[beak_core::trace::BucketHit],
     ) -> Vec<SemanticInjectionCandidate> {
+        let has_boolean_multiplicity =
+            hits.iter().any(|hit| hit.bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id);
         let has_more_specific_semantic_target = hits.iter().any(|hit| {
             let bucket_id = hit.bucket_id.as_str();
             bucket_id == semantic::memory::IMMEDIATE_SIGN_CONSISTENCY.id
@@ -1052,7 +1145,7 @@ impl BenchmarkBackend for OpenVmBackend {
         let mut candidates: Vec<_> = hits
             .iter()
             .filter(|hit| {
-                !(has_more_specific_semantic_target
+                !((has_more_specific_semantic_target || has_boolean_multiplicity)
                     && hit.bucket_id == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id)
             })
             .flat_map(|hit| self.semantic_candidate_from_hit(hit))

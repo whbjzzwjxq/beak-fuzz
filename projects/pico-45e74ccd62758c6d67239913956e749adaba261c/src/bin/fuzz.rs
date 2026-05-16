@@ -5,10 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Arg, Command};
 use serde_json::json;
 
-use beak_core::fuzz::benchmark::{BenchmarkConfig, DEFAULT_RNG_SEED, run_benchmark_threaded};
+use beak_core::fuzz::benchmark::{run_benchmark_threaded, BenchmarkConfig, DEFAULT_RNG_SEED};
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
-use beak_pico_45e74ccd::backend::{PicoBackend, WorkerRequest, WorkerResponse, run_backend_once};
+use beak_pico_45e74ccd::backend::{run_backend_once, PicoBackend, WorkerRequest, WorkerResponse};
 
 const ZKVM_COMMIT: &str = "45e74ccd62758c6d67239913956e749adaba261c";
 const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
@@ -22,7 +22,11 @@ fn workspace_root() -> PathBuf {
 
 fn resolve_path(root: &Path, arg: &str) -> PathBuf {
     let p = PathBuf::from(arg);
-    if p.is_absolute() { p } else { root.join(p) }
+    if p.is_absolute() {
+        p
+    } else {
+        root.join(p)
+    }
 }
 
 fn parse_u32_arg(value: &str, name: &str) -> u32 {

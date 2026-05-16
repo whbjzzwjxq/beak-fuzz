@@ -48,6 +48,107 @@ fn injection_variant(kind: &str) -> Option<&str> {
     kind.split_once("::").map(|(_, variant)| variant)
 }
 
+fn parse_time_origin_shift_delta(kind: &str) -> Option<u32> {
+    let mut mode = "shift_origin";
+    let mut delta = 1u32;
+
+    if let Some(variant) = injection_variant(kind) {
+        for part in variant.split(',') {
+            if let Some((key, value)) = part.split_once('=') {
+                match key.trim() {
+                    "mode" => mode = value.trim(),
+                    "delta" => {
+                        if let Ok(parsed) = value.trim().parse::<u32>() {
+                            delta = parsed;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    (mode == "shift_origin").then_some(delta)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VolatileBoundaryRemap {
+    pub row_idx: u64,
+    pub address_space: u32,
+    pub base_pointer: u32,
+    pub width: u32,
+    pub forged_address_space: u32,
+    pub forged_base_pointer: u32,
+}
+
+impl VolatileBoundaryRemap {
+    pub fn map(self, address_space: u32, pointer: u32) -> Option<(u32, u32)> {
+        if address_space != self.address_space {
+            return None;
+        }
+        let end = self.base_pointer.checked_add(self.width)?;
+        if pointer < self.base_pointer || pointer >= end {
+            return None;
+        }
+        let offset = pointer - self.base_pointer;
+        Some((self.forged_address_space, self.forged_base_pointer + offset))
+    }
+}
+
+fn parse_volatile_boundary_remap(kind: &str) -> Option<VolatileBoundaryRemap> {
+    let mut mode = "";
+    let mut row_idx = None;
+    let mut address_space = None;
+    let mut pointer = None;
+    let mut width = 4u32;
+    let mut forged_address_space = None;
+    let mut forged_base_pointer = 1u32 << 29;
+
+    let variant = injection_variant(kind)?;
+    for part in variant.split(',') {
+        if let Some((key, value)) = part.split_once('=') {
+            match key.trim() {
+                "mode" => mode = value.trim(),
+                "row_idx" | "step" => row_idx = value.trim().parse::<u64>().ok(),
+                "address_space" | "addr_space" => {
+                    address_space = value.trim().parse::<u32>().ok()
+                }
+                "pointer" => pointer = value.trim().parse::<u32>().ok(),
+                "width" => {
+                    if let Ok(parsed) = value.trim().parse::<u32>() {
+                        width = parsed.max(1);
+                    }
+                }
+                "forged_address_space" | "new_address_space" => {
+                    forged_address_space = value.trim().parse::<u32>().ok()
+                }
+                "forged_pointer" | "new_pointer" => {
+                    if let Ok(parsed) = value.trim().parse::<u32>() {
+                        forged_base_pointer = parsed;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if mode != "remap_boundary_cell" {
+        return None;
+    }
+    let row_idx = row_idx?;
+    let address_space = address_space?;
+    let pointer = pointer?;
+    let base_pointer = pointer - (pointer % width);
+    Some(VolatileBoundaryRemap {
+        row_idx,
+        address_space,
+        base_pointer,
+        width,
+        forged_address_space: forged_address_space.unwrap_or(address_space),
+        forged_base_pointer,
+    })
+}
+
 ////////////////
 // GLOBAL STATE
 /////////
@@ -211,6 +312,23 @@ impl GlobalState {
             .filter(|matched| *matched)
             .and_then(|_| injection_variant(self.injection_kind.as_str()))
             .map(str::to_string)
+    }
+
+    pub fn active_time_origin_shift_delta_at(&self, kind: &str, step: u64) -> Option<u32> {
+        self.should_inject_witness(kind, step)
+            .then(|| parse_time_origin_shift_delta(self.injection_kind.as_str()))
+            .flatten()
+    }
+
+    pub fn active_volatile_boundary_remap(
+        &self,
+        kind: &str,
+    ) -> Option<VolatileBoundaryRemap> {
+        if !self.injection_enabled || base_injection_kind(self.injection_kind.as_str()) != kind {
+            return None;
+        }
+        let remap = parse_volatile_boundary_remap(self.injection_kind.as_str())?;
+        self.should_inject_witness(kind, remap.row_idx).then_some(remap)
     }
 
     pub fn take_observed_witness_sites(&mut self) -> BTreeMap<String, Vec<u64>> {
@@ -1031,6 +1149,27 @@ impl GlobalState {
         self.emit_micro_op(micro_op);
     }
 
+    pub fn emit_volatile_boundary(
+        &mut self,
+        row_idx: u64,
+        address_space: u32,
+        pointer: u32,
+        is_valid: bool,
+    ) {
+        let micro_op = json!({
+            "type": "volatile_boundary",
+            "data": {
+                "seq": self.seq,
+                "step_idx": row_idx,
+                "row_idx": row_idx,
+                "address_space": address_space,
+                "pointer": pointer,
+                "is_valid": is_valid,
+            }
+        });
+        self.emit_micro_op(micro_op);
+    }
+
     pub fn emit_lookup_multiplicity(
         &mut self,
         table_name: &str,
@@ -1146,6 +1285,32 @@ pub fn matching_injection_kind(kind: &str, step: u64) -> Option<String> {
 pub fn active_witness_variant(kind: &str) -> Option<String> {
     let state = GLOBAL_STATE.lock().unwrap();
     state.active_witness_variant(kind)
+}
+
+pub fn active_time_origin_shift_delta_at(kind: &str, step: u64) -> Option<u32> {
+    let state = GLOBAL_STATE.lock().unwrap();
+    state.active_time_origin_shift_delta_at(kind, step)
+}
+
+pub fn should_shift_time_origin_at(kind: &str, step: u64) -> Option<u32> {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.note_witness_site(kind, step);
+    let delta = state.active_time_origin_shift_delta_at(kind, step)?;
+    state.note_applied_witness_site(kind, step);
+    Some(delta)
+}
+
+pub fn active_volatile_boundary_remap(kind: &str) -> Option<VolatileBoundaryRemap> {
+    let state = GLOBAL_STATE.lock().unwrap();
+    state.active_volatile_boundary_remap(kind)
+}
+
+pub fn should_apply_volatile_boundary_remap(kind: &str) -> Option<VolatileBoundaryRemap> {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    let remap = state.active_volatile_boundary_remap(kind)?;
+    state.note_witness_site(kind, remap.row_idx);
+    state.note_applied_witness_site(kind, remap.row_idx);
+    Some(remap)
 }
 
 pub fn configure_witness_injection(kind: Option<&str>, step: u64) {
@@ -1611,6 +1776,11 @@ pub fn emit_memory_finalization(
         was_initial,
         changed_from_initial,
     );
+}
+
+pub fn emit_volatile_boundary(row_idx: u64, address_space: u32, pointer: u32, is_valid: bool) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_volatile_boundary(row_idx, address_space, pointer, is_valid);
 }
 
 pub fn emit_lookup_multiplicity(

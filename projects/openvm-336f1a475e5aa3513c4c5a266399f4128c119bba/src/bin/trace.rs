@@ -2,7 +2,7 @@ use clap::{Arg, Command};
 
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel, RISCVOracle};
 use beak_core::trace::sorted_signatures_from_hits;
-use beak_openvm_336f1a47::backend::run_backend_once;
+use beak_openvm_336f1a47::backend::{run_backend_once, BIGINT_BLT256_FRONTEND_WORDS};
 
 fn main() {
     let matches = Command::new("beak-trace")
@@ -13,6 +13,12 @@ fn main() {
                 .help("Hex encoded RISC-V instruction word. Can be specified multiple times, or pass a space/comma separated list.")
                 .num_args(1..)
                 .action(clap::ArgAction::Append),
+        )
+        .arg(
+            Arg::new("openvm_bigint_blt256")
+                .long("openvm-bigint-blt256")
+                .help("Run the project-local OpenVM-direct BigInt BLT256 frontend seed.")
+                .action(clap::ArgAction::SetTrue),
         )
         .arg(
             Arg::new("print_micro_ops")
@@ -62,7 +68,9 @@ fn main() {
 
     let mut input_words = Vec::new();
 
-    if let Some(values) = matches.get_many::<String>("bin") {
+    if matches.get_flag("openvm_bigint_blt256") {
+        input_words.extend(BIGINT_BLT256_FRONTEND_WORDS.iter().map(|word| format!("{word:08x}")));
+    } else if let Some(values) = matches.get_many::<String>("bin") {
         for value in values {
             // Split by spaces and commas, accept both delimiters
             for token in value.split(|c: char| c.is_whitespace() || c == ',') {

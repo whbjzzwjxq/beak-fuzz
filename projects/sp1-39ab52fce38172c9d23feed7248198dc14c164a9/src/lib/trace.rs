@@ -2,11 +2,12 @@ use std::collections::HashMap;
 
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::observations::{SequenceInsnObservation, SequenceSemanticMatcherProfile};
-use beak_core::trace::{semantic, semantic_matchers, BucketHit, Trace, TraceSignal};
-use serde_json::{json, Value};
+use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic, semantic_matchers};
+use serde_json::{Value, json};
 use sp1_core_executor::{
     ByteOpcode, ExecutionRecord, Executor, ExecutorMode, Instruction as SP1Instruction, Opcode,
     Program,
+    events::{MemoryInitializeFinalizeEvent, PrecompileEvent, SyscallEvent},
 };
 use sp1_stark::SP1CoreOpts;
 
@@ -17,6 +18,8 @@ use crate::interaction::Sp1Interaction;
 const SP1_CODE_BASE: u32 = 0x1000;
 const BACKEND: &str = "sp1";
 const COMMIT: &str = "39ab52fce38172c9d23feed7248198dc14c164a9";
+const SP1_WORD_WIDTH: u32 = 4;
+const BABYBEAR_FIELD_MODULUS: u32 = 2_013_265_921;
 
 #[derive(Debug, Clone)]
 pub struct Sp1Trace {
@@ -755,6 +758,550 @@ fn boundary_cell(mnemonic: &str, effective_ptr: u32) -> Option<&'static str> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PrecompileSliceObservation {
+    phase: &'static str,
+    effective_ptr: u32,
+    len_words: usize,
+    is_read: bool,
+    is_write: bool,
+}
+
+impl PrecompileSliceObservation {
+    fn width(&self) -> u32 {
+        SP1_WORD_WIDTH
+    }
+
+    fn byte_offset(&self) -> u32 {
+        self.effective_ptr % SP1_WORD_WIDTH
+    }
+
+    fn aligned_ptr(&self) -> u32 {
+        self.effective_ptr.wrapping_sub(self.byte_offset())
+    }
+
+    fn span_bytes(&self) -> u64 {
+        (self.len_words as u64).saturating_mul(SP1_WORD_WIDTH as u64)
+    }
+
+    fn field_end_exclusive(&self) -> u64 {
+        (self.effective_ptr as u64).saturating_add(self.span_bytes())
+    }
+
+    fn crosses_babybear_field_boundary(&self) -> bool {
+        self.len_words > 0 && self.field_end_exclusive() > BABYBEAR_FIELD_MODULUS as u64
+    }
+
+    fn wrapped_field_ptr(&self) -> u32 {
+        if self.len_words == 0 {
+            self.effective_ptr
+        } else {
+            ((self.field_end_exclusive() - 1) % BABYBEAR_FIELD_MODULUS as u64) as u32
+        }
+    }
+}
+
+fn push_precompile_slice(
+    slices: &mut Vec<PrecompileSliceObservation>,
+    phase: &'static str,
+    effective_ptr: u32,
+    len_words: usize,
+    is_read: bool,
+    is_write: bool,
+) {
+    if len_words > 0 {
+        slices.push(PrecompileSliceObservation {
+            phase,
+            effective_ptr,
+            len_words,
+            is_read,
+            is_write,
+        });
+    }
+}
+
+fn precompile_name(event: &PrecompileEvent) -> &'static str {
+    match event {
+        PrecompileEvent::ShaExtend(_) => "sha_extend",
+        PrecompileEvent::ShaCompress(_) => "sha_compress",
+        PrecompileEvent::KeccakPermute(_) => "keccak_permute",
+        PrecompileEvent::EdAdd(_) => "ed_add",
+        PrecompileEvent::EdDecompress(_) => "ed_decompress",
+        PrecompileEvent::Secp256k1Add(_) => "secp256k1_add",
+        PrecompileEvent::Secp256k1Double(_) => "secp256k1_double",
+        PrecompileEvent::Secp256k1Decompress(_) => "secp256k1_decompress",
+        PrecompileEvent::Secp256r1Add(_) => "secp256r1_add",
+        PrecompileEvent::Secp256r1Double(_) => "secp256r1_double",
+        PrecompileEvent::Secp256r1Decompress(_) => "secp256r1_decompress",
+        PrecompileEvent::K256Decompress(_) => "k256_decompress",
+        PrecompileEvent::Bn254Add(_) => "bn254_add",
+        PrecompileEvent::Bn254Double(_) => "bn254_double",
+        PrecompileEvent::Bn254Fp(_) => "bn254_fp",
+        PrecompileEvent::Bn254Fp2AddSub(_) => "bn254_fp2_add_sub",
+        PrecompileEvent::Bn254Fp2Mul(_) => "bn254_fp2_mul",
+        PrecompileEvent::Bls12381Add(_) => "bls12381_add",
+        PrecompileEvent::Bls12381Double(_) => "bls12381_double",
+        PrecompileEvent::Bls12381Decompress(_) => "bls12381_decompress",
+        PrecompileEvent::Bls12381Fp(_) => "bls12381_fp",
+        PrecompileEvent::Bls12381Fp2AddSub(_) => "bls12381_fp2_add_sub",
+        PrecompileEvent::Bls12381Fp2Mul(_) => "bls12381_fp2_mul",
+        PrecompileEvent::Uint256Mul(_) => "uint256_mul",
+        PrecompileEvent::U256xU2048Mul(_) => "u256x_u2048_mul",
+    }
+}
+
+fn precompile_slice_observations(event: &PrecompileEvent) -> Vec<PrecompileSliceObservation> {
+    let mut slices = Vec::new();
+    match event {
+        PrecompileEvent::ShaExtend(e) => {
+            push_precompile_slice(
+                &mut slices,
+                "sha_extend.w_i_minus_15_read",
+                e.w_ptr.wrapping_add(1 * SP1_WORD_WIDTH),
+                e.w_i_minus_15_reads.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "sha_extend.w_i_minus_2_read",
+                e.w_ptr.wrapping_add(14 * SP1_WORD_WIDTH),
+                e.w_i_minus_2_reads.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "sha_extend.w_i_minus_16_read",
+                e.w_ptr,
+                e.w_i_minus_16_reads.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "sha_extend.w_i_minus_7_read",
+                e.w_ptr.wrapping_add(9 * SP1_WORD_WIDTH),
+                e.w_i_minus_7_reads.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "sha_extend.w_i_write",
+                e.w_ptr.wrapping_add(16 * SP1_WORD_WIDTH),
+                e.w_i_writes.len(),
+                false,
+                true,
+            );
+        }
+        PrecompileEvent::ShaCompress(e) => {
+            push_precompile_slice(
+                &mut slices,
+                "sha_compress.w_read",
+                e.w_ptr,
+                e.w_i_read_records.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "sha_compress.h_read",
+                e.h_ptr,
+                e.h_read_records.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "sha_compress.h_write",
+                e.h_ptr,
+                e.h_write_records.len(),
+                false,
+                true,
+            );
+        }
+        PrecompileEvent::KeccakPermute(e) => {
+            push_precompile_slice(
+                &mut slices,
+                "keccak_permute.state_read",
+                e.state_addr,
+                e.state_read_records.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "keccak_permute.state_write",
+                e.state_addr,
+                e.state_write_records.len(),
+                false,
+                true,
+            );
+        }
+        PrecompileEvent::EdDecompress(e) => {
+            push_precompile_slice(
+                &mut slices,
+                "ed_decompress.y_read",
+                e.ptr,
+                e.y_memory_records.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "ed_decompress.x_write",
+                e.ptr,
+                e.x_memory_records.len(),
+                false,
+                true,
+            );
+        }
+        PrecompileEvent::Secp256k1Add(e)
+        | PrecompileEvent::Secp256r1Add(e)
+        | PrecompileEvent::EdAdd(e)
+        | PrecompileEvent::Bn254Add(e)
+        | PrecompileEvent::Bls12381Add(e) => {
+            push_precompile_slice(
+                &mut slices,
+                "ec_add.q_read",
+                e.q_ptr,
+                e.q_memory_records.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "ec_add.p_write",
+                e.p_ptr,
+                e.p_memory_records.len(),
+                false,
+                true,
+            );
+        }
+        PrecompileEvent::Secp256k1Double(e)
+        | PrecompileEvent::Secp256r1Double(e)
+        | PrecompileEvent::Bn254Double(e)
+        | PrecompileEvent::Bls12381Double(e) => {
+            push_precompile_slice(
+                &mut slices,
+                "ec_double.p_write",
+                e.p_ptr,
+                e.p_memory_records.len(),
+                false,
+                true,
+            );
+        }
+        PrecompileEvent::Secp256k1Decompress(e)
+        | PrecompileEvent::Secp256r1Decompress(e)
+        | PrecompileEvent::K256Decompress(e)
+        | PrecompileEvent::Bls12381Decompress(e) => {
+            push_precompile_slice(
+                &mut slices,
+                "ec_decompress.x_read",
+                e.ptr,
+                e.x_memory_records.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "ec_decompress.y_write",
+                e.ptr,
+                e.y_memory_records.len(),
+                false,
+                true,
+            );
+        }
+        PrecompileEvent::Bn254Fp(e) | PrecompileEvent::Bls12381Fp(e) => {
+            push_precompile_slice(
+                &mut slices,
+                "fp_op.y_read",
+                e.y_ptr,
+                e.y_memory_records.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "fp_op.x_write",
+                e.x_ptr,
+                e.x_memory_records.len(),
+                false,
+                true,
+            );
+        }
+        PrecompileEvent::Bn254Fp2AddSub(e) | PrecompileEvent::Bls12381Fp2AddSub(e) => {
+            push_precompile_slice(
+                &mut slices,
+                "fp2_add_sub.y_read",
+                e.y_ptr,
+                e.y_memory_records.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "fp2_add_sub.x_write",
+                e.x_ptr,
+                e.x_memory_records.len(),
+                false,
+                true,
+            );
+        }
+        PrecompileEvent::Bn254Fp2Mul(e) | PrecompileEvent::Bls12381Fp2Mul(e) => {
+            push_precompile_slice(
+                &mut slices,
+                "fp2_mul.y_read",
+                e.y_ptr,
+                e.y_memory_records.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "fp2_mul.x_write",
+                e.x_ptr,
+                e.x_memory_records.len(),
+                false,
+                true,
+            );
+        }
+        PrecompileEvent::Uint256Mul(e) => {
+            push_precompile_slice(
+                &mut slices,
+                "uint256_mul.y_read",
+                e.y_ptr,
+                e.y_memory_records.len(),
+                true,
+                false,
+            );
+            let modulus_ptr = e
+                .y_ptr
+                .wrapping_add((e.y_memory_records.len() as u32).saturating_mul(SP1_WORD_WIDTH));
+            push_precompile_slice(
+                &mut slices,
+                "uint256_mul.modulus_read",
+                modulus_ptr,
+                e.modulus_memory_records.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "uint256_mul.x_write",
+                e.x_ptr,
+                e.x_memory_records.len(),
+                false,
+                true,
+            );
+        }
+        PrecompileEvent::U256xU2048Mul(e) => {
+            push_precompile_slice(
+                &mut slices,
+                "u256x_u2048_mul.a_read",
+                e.a_ptr,
+                e.a_memory_records.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "u256x_u2048_mul.b_read",
+                e.b_ptr,
+                e.b_memory_records.len(),
+                true,
+                false,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "u256x_u2048_mul.lo_write",
+                e.lo_ptr,
+                e.lo_memory_records.len(),
+                false,
+                true,
+            );
+            push_precompile_slice(
+                &mut slices,
+                "u256x_u2048_mul.hi_write",
+                e.hi_ptr,
+                e.hi_memory_records.len(),
+                false,
+                true,
+            );
+        }
+    }
+    slices
+}
+
+fn precompile_slice_details(
+    syscall_event: &SyscallEvent,
+    precompile: &str,
+    event_idx: u64,
+    slice_idx: u64,
+    obligation_id: &str,
+    cell_id: &str,
+    obs: &PrecompileSliceObservation,
+) -> HashMap<String, Value> {
+    let mut details = HashMap::new();
+    details.insert("obligation_id".to_string(), json!(obligation_id));
+    details.insert("cell_id".to_string(), json!(cell_id));
+    details.insert("backend".to_string(), json!(BACKEND));
+    details.insert("commit".to_string(), json!(COMMIT));
+    details.insert("trace_source".to_string(), json!("precompile_events"));
+    details.insert("trace_source_detail".to_string(), json!("precompile_slice"));
+    details.insert("op_idx".to_string(), json!(syscall_event.clk));
+    details.insert("step_idx".to_string(), json!(syscall_event.clk));
+    details.insert("pc".to_string(), json!(syscall_event.pc));
+    details.insert("next_pc".to_string(), json!(syscall_event.next_pc));
+    details.insert("syscall_clk".to_string(), json!(syscall_event.clk));
+    details.insert("syscall_shard".to_string(), json!(syscall_event.shard));
+    details.insert("syscall_code".to_string(), json!(format!("{:?}", syscall_event.syscall_code)));
+    details.insert("syscall_id".to_string(), json!(syscall_event.syscall_id));
+    details.insert("syscall_arg1".to_string(), json!(syscall_event.arg1));
+    details.insert("syscall_arg2".to_string(), json!(syscall_event.arg2));
+    details.insert("syscall_nonce".to_string(), json!(syscall_event.nonce));
+    details.insert("precompile".to_string(), json!(precompile));
+    details.insert("precompile_event_idx".to_string(), json!(event_idx));
+    details.insert("precompile_slice_idx".to_string(), json!(slice_idx));
+    details.insert("precompile_phase".to_string(), json!(obs.phase));
+    details.insert("effective_ptr".to_string(), json!(obs.effective_ptr));
+    details.insert("aligned_ptr".to_string(), json!(obs.aligned_ptr()));
+    details.insert("byte_offset".to_string(), json!(obs.byte_offset()));
+    details.insert("width".to_string(), json!(obs.width()));
+    details.insert("address_space".to_string(), json!("memory"));
+    details.insert("slice_len_words".to_string(), json!(obs.len_words));
+    details.insert("slice_span_bytes".to_string(), json!(obs.span_bytes()));
+    details.insert("is_read".to_string(), json!(obs.is_read));
+    details.insert("is_write".to_string(), json!(obs.is_write));
+    details
+}
+
+fn emit_precompile_memory_obligation_hits(records: &[ExecutionRecord]) -> Vec<BucketHit> {
+    let mut hits = Vec::new();
+    let mut event_idx = 0u64;
+    for record in records {
+        for (syscall_event, event) in record.precompile_events.all_events() {
+            let precompile = precompile_name(event);
+            for (slice_idx, obs) in precompile_slice_observations(event).iter().enumerate() {
+                if let Some(cell) = alignment_cell(obs.width(), obs.byte_offset()) {
+                    hits.push(BucketHit::semantic(
+                        semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY,
+                        precompile_slice_details(
+                            syscall_event,
+                            precompile,
+                            event_idx,
+                            slice_idx as u64,
+                            "me2",
+                            cell,
+                            obs,
+                        ),
+                    ));
+                }
+
+                if obs.crosses_babybear_field_boundary() {
+                    let mut details = precompile_slice_details(
+                        syscall_event,
+                        precompile,
+                        event_idx,
+                        slice_idx as u64,
+                        "me6",
+                        "me6.precompile_slice_field_wrap",
+                        obs,
+                    );
+                    details.insert("field_modulus".to_string(), json!(BABYBEAR_FIELD_MODULUS));
+                    details.insert(
+                        "field_end_exclusive".to_string(),
+                        json!(obs.field_end_exclusive()),
+                    );
+                    details.insert("wrapped_field_ptr".to_string(), json!(obs.wrapped_field_ptr()));
+                    hits.push(BucketHit::semantic(
+                        semantic::memory::ADDRESS_BOUNDARY_RANGE,
+                        details,
+                    ));
+                }
+            }
+            event_idx = event_idx.saturating_add(1);
+        }
+    }
+    hits
+}
+
+fn global_memory_alignment_details(
+    event: &MemoryInitializeFinalizeEvent,
+    event_idx: u64,
+    trace_source: &'static str,
+    phase: &'static str,
+    cell_id: &str,
+) -> HashMap<String, Value> {
+    let byte_offset = event.addr % SP1_WORD_WIDTH;
+    let mut details = HashMap::new();
+    details.insert("obligation_id".to_string(), json!("me2"));
+    details.insert("cell_id".to_string(), json!(cell_id));
+    details.insert("backend".to_string(), json!(BACKEND));
+    details.insert("commit".to_string(), json!(COMMIT));
+    details.insert("trace_source".to_string(), json!(trace_source));
+    details.insert("phase".to_string(), json!(phase));
+    details.insert("op_idx".to_string(), json!(event.timestamp));
+    details.insert("global_memory_event_idx".to_string(), json!(event_idx));
+    details.insert("effective_ptr".to_string(), json!(event.addr));
+    details.insert("aligned_ptr".to_string(), json!(event.addr.wrapping_sub(byte_offset)));
+    details.insert("byte_offset".to_string(), json!(byte_offset));
+    details.insert("width".to_string(), json!(SP1_WORD_WIDTH));
+    details.insert("address_space".to_string(), json!("memory"));
+    details.insert("timestamp".to_string(), json!(event.timestamp));
+    details.insert("shard".to_string(), json!(event.shard));
+    details.insert("value".to_string(), json!(event.value));
+    details.insert("used".to_string(), json!(event.used));
+    details
+}
+
+fn emit_global_memory_alignment_hits(records: &[ExecutionRecord]) -> Vec<BucketHit> {
+    let mut hits = Vec::new();
+    let mut event_idx = 0u64;
+    for record in records {
+        for event in &record.global_memory_initialize_events {
+            if event.used != 0 {
+                if let Some(cell) = alignment_cell(SP1_WORD_WIDTH, event.addr % SP1_WORD_WIDTH) {
+                    hits.push(BucketHit::semantic(
+                        semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY,
+                        global_memory_alignment_details(
+                            event,
+                            event_idx,
+                            "global_memory_initialize_event",
+                            "initialize",
+                            cell,
+                        ),
+                    ));
+                }
+            }
+            event_idx = event_idx.saturating_add(1);
+        }
+    }
+
+    event_idx = 0;
+    for record in records {
+        for event in &record.global_memory_finalize_events {
+            if event.used != 0 {
+                if let Some(cell) = alignment_cell(SP1_WORD_WIDTH, event.addr % SP1_WORD_WIDTH) {
+                    hits.push(BucketHit::semantic(
+                        semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY,
+                        global_memory_alignment_details(
+                            event,
+                            event_idx,
+                            "global_memory_finalize_event",
+                            "finalize",
+                            cell,
+                        ),
+                    ));
+                }
+            }
+            event_idx = event_idx.saturating_add(1);
+        }
+    }
+    hits
+}
+
 fn ranges_overlap(a: &MemoryAccessObservation, b: &MemoryAccessObservation) -> bool {
     a.start() < b.end() && b.start() < a.end()
 }
@@ -987,6 +1534,9 @@ fn emit_memory_event_obligation_hits(
             hits.push(BucketHit::semantic(semantic::lookup::BOOLEAN_MULTIPLICITY, details));
         }
     }
+
+    hits.extend(emit_precompile_memory_obligation_hits(records));
+    hits.extend(emit_global_memory_alignment_hits(records));
 
     let mut initial_values = HashMap::<u32, u32>::new();
     let mut init_conflict = false;
@@ -1363,11 +1913,7 @@ fn emit_instruction_obligation_hits(instructions: &[Sp1Insn]) -> Vec<BucketHit> 
             }
             "jal" | "jalr" => {
                 let cell = if mnemonic == "jal" {
-                    if rd == Some(0) {
-                        "cf2.jal_x0"
-                    } else {
-                        "cf2.jal_rd"
-                    }
+                    if rd == Some(0) { "cf2.jal_x0" } else { "cf2.jal_rd" }
                 } else if rd == Some(0) {
                     "cf2.jalr_x0"
                 } else {
@@ -1695,5 +2241,155 @@ impl Trace for Sp1Trace {
 
     fn trace_signals(&self) -> &[TraceSignal] {
         &self.trace_signals
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use sp1_core_executor::{
+        events::{MemoryReadRecord, ShaCompressEvent},
+        syscalls::SyscallCode,
+    };
+
+    fn syscall_event(syscall_code: SyscallCode, arg1: u32, arg2: u32) -> SyscallEvent {
+        SyscallEvent {
+            pc: SP1_CODE_BASE,
+            next_pc: SP1_CODE_BASE + 4,
+            shard: 1,
+            clk: 7,
+            a_record: Default::default(),
+            a_record_is_real: false,
+            syscall_code,
+            syscall_id: 3,
+            arg1,
+            arg2,
+            nonce: 11,
+        }
+    }
+
+    #[test]
+    fn precompile_slice_field_wrap_emits_me6_without_rv32_cell() {
+        let mut event = ShaCompressEvent::default();
+        event.w_ptr = BABYBEAR_FIELD_MODULUS - 1;
+        event.w_i_read_records = vec![MemoryReadRecord::default(); 2];
+
+        let mut record = ExecutionRecord::default();
+        record.precompile_events.add_event(
+            SyscallCode::SHA_COMPRESS,
+            syscall_event(SyscallCode::SHA_COMPRESS, event.w_ptr, 128),
+            PrecompileEvent::ShaCompress(event),
+        );
+
+        let hits = emit_precompile_memory_obligation_hits(&[record]);
+        let hit = hits
+            .iter()
+            .find(|hit| {
+                hit.bucket_id == semantic::memory::ADDRESS_BOUNDARY_RANGE.id
+                    && hit.details.get("cell_id") == Some(&json!("me6.precompile_slice_field_wrap"))
+            })
+            .expect("missing precompile slice field-wrap bucket");
+
+        assert_ne!(hit.details.get("cell_id"), Some(&json!("me6.near_max_lw")));
+        assert_eq!(hit.details.get("trace_source"), Some(&json!("precompile_events")));
+        assert_eq!(hit.details.get("precompile_phase"), Some(&json!("sha_compress.w_read")));
+        assert_eq!(hit.details.get("effective_ptr"), Some(&json!(BABYBEAR_FIELD_MODULUS - 1)));
+    }
+
+    #[test]
+    fn precompile_alignment_preserves_me2_address_fields() {
+        let mut event = ShaCompressEvent::default();
+        event.w_ptr = 65;
+        event.w_i_read_records = vec![MemoryReadRecord::default(); 1];
+
+        let mut record = ExecutionRecord::default();
+        record.precompile_events.add_event(
+            SyscallCode::SHA_COMPRESS,
+            syscall_event(SyscallCode::SHA_COMPRESS, event.w_ptr, 128),
+            PrecompileEvent::ShaCompress(event),
+        );
+
+        let hits = emit_precompile_memory_obligation_hits(&[record]);
+        let hit = hits
+            .iter()
+            .find(|hit| {
+                hit.bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id
+                    && hit.details.get("cell_id") == Some(&json!("me2.word_off1"))
+            })
+            .expect("missing precompile alignment bucket");
+
+        assert_eq!(hit.details.get("effective_ptr"), Some(&json!(65)));
+        assert_eq!(hit.details.get("aligned_ptr"), Some(&json!(64)));
+        assert_eq!(hit.details.get("byte_offset"), Some(&json!(1)));
+        assert_eq!(hit.details.get("width"), Some(&json!(4)));
+        assert_eq!(hit.details.get("trace_source"), Some(&json!("precompile_events")));
+    }
+
+    #[test]
+    fn global_memory_alignment_preserves_provenance() {
+        let mut record = ExecutionRecord::default();
+        record.global_memory_initialize_events.push(MemoryInitializeFinalizeEvent {
+            addr: 9,
+            value: 42,
+            shard: 1,
+            timestamp: 5,
+            used: 1,
+        });
+
+        let hits = emit_global_memory_alignment_hits(&[record]);
+        let hit = hits.first().expect("missing global alignment bucket");
+
+        assert_eq!(hit.bucket_id, semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id);
+        assert_eq!(hit.details.get("cell_id"), Some(&json!("me2.word_off1")));
+        assert_eq!(hit.details.get("effective_ptr"), Some(&json!(9)));
+        assert_eq!(hit.details.get("aligned_ptr"), Some(&json!(8)));
+        assert_eq!(hit.details.get("byte_offset"), Some(&json!(1)));
+        assert_eq!(hit.details.get("width"), Some(&json!(4)));
+        assert_eq!(hit.details.get("trace_source"), Some(&json!("global_memory_initialize_event")));
+        assert_eq!(hit.details.get("phase"), Some(&json!("initialize")));
+    }
+
+    #[test]
+    fn exact_sha_extend_boundary_seed_emits_precompile_me6() {
+        let words = [
+            0x000102b7, // lui x5, 0x10
+            0x12628293, // addi x5, x5, 0x126 (SHA_EXTEND)
+            0x78000537, // lui x10, 0x78000
+            0x00000073, // ecall
+        ];
+        let trace = Sp1Trace::from_words(&words).expect("trace exact SHA_EXTEND seed");
+
+        assert!(trace.bucket_hits.iter().any(|hit| {
+            hit.bucket_id == semantic::memory::ADDRESS_BOUNDARY_RANGE.id
+                && hit.details.get("cell_id") == Some(&json!("me6.precompile_slice_field_wrap"))
+                && hit.details.get("trace_source") == Some(&json!("precompile_events"))
+        }));
+    }
+
+    #[test]
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "the legacy SP1 debug executor trips MemoryReadRecord::new debug_asserts on this intentionally unaligned precompile seed"
+    )]
+    fn exact_sha_compress_unaligned_seed_emits_precompile_me2() {
+        let words = [
+            0x000102b7, // lui x5, 0x10
+            0x10628293, // addi x5, x5, 0x106 (SHA_COMPRESS)
+            0x04100513, // addi x10, x0, 65
+            0x08000593, // addi x11, x0, 128
+            0x00000073, // ecall
+        ];
+        let trace = Sp1Trace::from_words(&words).expect("trace exact SHA_COMPRESS seed");
+
+        assert!(trace.bucket_hits.iter().any(|hit| {
+            hit.bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id
+                && hit.details.get("cell_id") == Some(&json!("me2.word_off1"))
+                && hit.details.get("trace_source") == Some(&json!("precompile_events"))
+                && hit.details.get("effective_ptr") == Some(&json!(65))
+                && hit.details.get("aligned_ptr") == Some(&json!(64))
+                && hit.details.get("byte_offset") == Some(&json!(1))
+                && hit.details.get("width") == Some(&json!(4))
+        }));
     }
 }

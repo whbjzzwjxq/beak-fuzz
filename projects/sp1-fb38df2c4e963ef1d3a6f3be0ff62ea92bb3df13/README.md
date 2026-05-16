@@ -15,12 +15,10 @@ What this project does provide:
 - baseline vs injected execution
 - proof generation and verification on the patched historical snapshot
 
-Central `docs/OBLIGATIONS.md` RV32 buckets are not emitted for this target.
 This snapshot executes SP1 recursion-core programs, not RV32IM instruction
-words, and it has no `trace.rs`/`BucketHit`/`BenchmarkBackend` semantic
-candidate path. The legacy hooks below are real regression smokes, but they are
-not central `sem.*` obligation mappings and should not be marked
-`semantic_injection_mapped`.
+words, so it is outside the generic RV32 benchmark loop. The runner must not be
+counted as a beak-fuzz e2e discovery path; it does not emit central semantic
+bucket hits or `underconstrained_candidate` results.
 
 The injected runs use the legacy recursion injection kinds added by
 `sp1-fuzzer install`:
@@ -59,3 +57,15 @@ cargo run --bin beak-trace -- --scenario bneinc
 
 Use `--json` if you want the baseline/injected comparison in machine-readable
 form.
+
+For phase2 scaffold work, the runner also accepts a typed recursion seed:
+
+```bash
+cargo run --bin beak-fuzz -- --seed-json path/to/seed.json --json
+```
+
+This mode executes the seed through the same legacy recursion proof path and
+prints projected `sem.recursion.*` evidence derived from executed runtime rows.
+Those projected hits are intentionally marked `central_semantic_registered=false`
+and `strict_countable=false` until the shared REC obligation registry,
+non-RV32 seed frontend, and `BenchmarkBackend` semantic candidate mapping land.

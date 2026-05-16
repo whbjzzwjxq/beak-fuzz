@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,7 @@ use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
 use clap::{ArgAction, Parser};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sp1_core::runtime::Runtime;
 use sp1_core::utils::{run_test, SP1CoreOpts};
 use sp1_sdk::{ProverClient, SP1Proof, SP1ProvingKey, SP1Stdin, SP1VerifyingKey};
@@ -22,6 +23,8 @@ use crate::trace::{build_sp1_program, Sp1Trace};
 pub const DIV_REM_BOUND_INJECT_KIND: &str =
     "sp1.semantic.arithmetic.division_remainder_bound::mode=decrement_quotient_increment_remainder";
 const DIV_REM_BOUND_BASE_KIND: &str = "sp1.semantic.arithmetic.division_remainder_bound";
+const UINT256_DIV_QUOTIENT_HINT_IDX: u64 = 2;
+const UINT256_DIV_REMAINDER_HINT_IDX: u64 = 3;
 const TIMESTAMPED_LOAD_INJECT_KIND: &str = "sp1.semantic.memory.timestamped_load_path";
 const LOOKUP_BOOLEAN_INJECT_KIND: &str = "sp1.semantic.lookup.boolean_multiplicity";
 const RF1_INJECT_KIND: &str = "sp1.semantic.decode.zero_register_immutability";
@@ -77,6 +80,7 @@ pub struct ScenarioRun {
     pub inject_step: u64,
     pub quotient_bytes: Vec<u8>,
     pub proof_verified: bool,
+    pub injection_applied: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,7 +101,7 @@ struct Args {
     divisor: u64,
     #[arg(long)]
     inject_kind: Option<String>,
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 2)]
     inject_step: u64,
     #[arg(long, action = ArgAction::SetTrue)]
     print_buckets: bool,
@@ -118,6 +122,12 @@ struct EnvGuard {
 struct WitnessInjectionPlan {
     kind: String,
     step: u64,
+}
+
+#[derive(Debug, Clone)]
+enum BackendMode {
+    Rv32im,
+    Uint256Div { dividend: u64, divisor: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -374,12 +384,59 @@ pub fn run_backend_once(
     })
 }
 
+fn run_uint256_benchmark_once(
+    request_id: u64,
+    dividend: u64,
+    divisor: u64,
+    inject_kind: Option<&str>,
+    inject_step: u64,
+) -> Result<WorkerResponse, String> {
+    let divisor = divisor.max(1);
+    let mut backend_error = None;
+    let mut injection_applied = false;
+    let elf = ensure_program_elf()?;
+    let client = ProverClient::local();
+    let dividend_bytes = bytes32_from_u64(dividend);
+    let divisor_bytes = bytes32_from_u64(divisor);
+
+    if let Some(kind) = inject_kind {
+        let (pk, vk) = client.setup(&elf);
+        let (result, applied) = prove_once_with_status(
+            &client,
+            &pk,
+            &vk,
+            dividend_bytes,
+            divisor_bytes,
+            Some(kind),
+            inject_step,
+        );
+        injection_applied = applied;
+        if let Err(err) = result {
+            backend_error = Some(err);
+        }
+    } else if let Err(err) = execute_once(&client, &elf, dividend_bytes, divisor_bytes) {
+        backend_error = Some(err);
+    }
+
+    Ok(WorkerResponse {
+        request_id,
+        final_regs: Some([0u32; 32]),
+        micro_op_count: 1,
+        bucket_hits: vec![uint256_div_bucket_hit(dividend, divisor)],
+        trace_signals: Vec::new(),
+        backend_error,
+        observed_injection_sites: uint256_observed_sites(),
+        injection_applied,
+    })
+}
+
 pub struct Sp1Backend {
     max_instructions: usize,
     eval: BackendEval,
     last_observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pending_injection: Option<WitnessInjectionPlan>,
     current_iteration: u64,
+    mode: BackendMode,
 }
 
 impl Sp1Backend {
@@ -390,6 +447,18 @@ impl Sp1Backend {
             last_observed_injection_sites: BTreeMap::new(),
             pending_injection: None,
             current_iteration: 0,
+            mode: BackendMode::Rv32im,
+        }
+    }
+
+    pub fn new_uint256_div(max_instructions: usize, dividend: u64, divisor: u64) -> Self {
+        Self {
+            max_instructions,
+            eval: BackendEval::default(),
+            last_observed_injection_sites: BTreeMap::new(),
+            pending_injection: None,
+            current_iteration: 0,
+            mode: BackendMode::Uint256Div { dividend, divisor: divisor.max(1) },
         }
     }
 
@@ -420,6 +489,26 @@ impl Sp1Backend {
     }
 
     fn semantic_candidate_from_hit(&self, hit: &BucketHit) -> Vec<SemanticInjectionCandidate> {
+        if matches!(self.mode, BackendMode::Uint256Div { .. }) {
+            if hit.bucket_id == semantic::arithmetic::DIVISION_REMAINDER_BOUND.id {
+                let quotient_step = hit
+                    .details
+                    .get("quotient_hint_idx")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(UINT256_DIV_QUOTIENT_HINT_IDX);
+                return vec![SemanticInjectionCandidate {
+                    bucket_id: hit.bucket_id.clone(),
+                    trigger_signal_id: None,
+                    semantic_class: semantic::arithmetic::DIVISION_REMAINDER_BOUND
+                        .semantic_class
+                        .to_string(),
+                    inject_kind: uint256_div_inject_kind(),
+                    schedule: InjectionSchedule::Exact(quotient_step),
+                }];
+            }
+            return Vec::new();
+        }
+
         let anchor = Self::step_from_hit(hit);
         let bucket_id = hit.bucket_id.as_str();
         let (semantic_class, inject_kind, schedule_lookup_key) = if bucket_id
@@ -557,9 +646,18 @@ impl Sp1Backend {
 
 impl BenchmarkBackend for Sp1Backend {
     fn is_usable_seed(&self, words: &[u32]) -> bool {
-        !words.is_empty()
-            && words.len() <= self.max_instructions
-            && words.iter().all(|w| RV32IMInstruction::decode(*w).is_some())
+        match self.mode {
+            BackendMode::Rv32im => {
+                !words.is_empty()
+                    && words.len() <= self.max_instructions
+                    && words.iter().all(|w| RV32IMInstruction::decode(*w).is_some())
+            }
+            BackendMode::Uint256Div { .. } => {
+                !words.is_empty()
+                    && words.len() <= self.max_instructions
+                    && words.iter().all(|w| RV32IMInstruction::decode(*w).is_some())
+            }
+        }
     }
 
     fn prepare_for_run(&mut self, _rng_seed: u64) {
@@ -568,13 +666,22 @@ impl BenchmarkBackend for Sp1Backend {
     }
 
     fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
-        let resp = run_backend_once(
-            1,
-            words,
-            self.current_iteration,
-            self.pending_injection.as_ref().map(|p| p.kind.as_str()),
-            self.pending_injection.as_ref().map(|p| p.step).unwrap_or(0),
-        )?;
+        let resp = match self.mode {
+            BackendMode::Rv32im => run_backend_once(
+                1,
+                words,
+                self.current_iteration,
+                self.pending_injection.as_ref().map(|p| p.kind.as_str()),
+                self.pending_injection.as_ref().map(|p| p.step).unwrap_or(0),
+            )?,
+            BackendMode::Uint256Div { dividend, divisor } => run_uint256_benchmark_once(
+                1,
+                dividend,
+                divisor,
+                self.pending_injection.as_ref().map(|p| p.kind.as_str()),
+                self.pending_injection.as_ref().map(|p| p.step).unwrap_or(0),
+            )?,
+        };
         self.eval = BackendEval {
             micro_op_count: resp.micro_op_count,
             bucket_hits: resp.bucket_hits,
@@ -620,11 +727,13 @@ impl EnvGuard {
                 env::set_var("BEAK_SP1_WITNESS_INJECT_KIND", kind);
                 env::set_var("BEAK_SP1_WITNESS_INJECT_STEP", inject_step.to_string());
                 env::set_var("BEAK_SP1_WITNESS_RUN_ID", format!("sp1-u256div-{inject_step}"));
+                fuzzer_utils::configure_witness_injection(Some(kind), inject_step);
             }
             _ => {
                 env::remove_var("BEAK_SP1_WITNESS_INJECT_KIND");
                 env::remove_var("BEAK_SP1_WITNESS_INJECT_STEP");
                 env::remove_var("BEAK_SP1_WITNESS_RUN_ID");
+                fuzzer_utils::configure_witness_injection(None, 0);
             }
         }
         Self { saved_kind, saved_step, saved_run_id, saved_prover }
@@ -649,6 +758,9 @@ impl Drop for EnvGuard {
             Some(value) => env::set_var("SP1_PROVER", value),
             None => env::remove_var("SP1_PROVER"),
         }
+        let restored_step =
+            self.saved_step.as_deref().and_then(|raw| raw.parse::<u64>().ok()).unwrap_or(0);
+        fuzzer_utils::configure_witness_injection(self.saved_kind.as_deref(), restored_step);
     }
 }
 
@@ -723,8 +835,8 @@ fn supported_bucket() -> SupportedBucket {
     SupportedBucket {
         bucket_id: semantic::arithmetic::DIVISION_REMAINDER_BOUND.id,
         semantic_class: semantic::arithmetic::DIVISION_REMAINDER_BOUND.semantic_class,
-        inject_kind: DIV_REM_BOUND_BASE_KIND,
-        default_step: 0,
+        inject_kind: DIV_REM_BOUND_INJECT_KIND,
+        default_step: UINT256_DIV_QUOTIENT_HINT_IDX,
     }
 }
 
@@ -771,6 +883,58 @@ fn bytes32_from_u64(value: u64) -> [u8; 32] {
     out
 }
 
+fn bytes_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn uint256_div_inject_kind() -> String {
+    format!(
+        "{DIV_REM_BOUND_INJECT_KIND},site=quotient_hint_read,quotient_hint_idx={UINT256_DIV_QUOTIENT_HINT_IDX},remainder_hint_idx={UINT256_DIV_REMAINDER_HINT_IDX}"
+    )
+}
+
+fn uint256_div_bucket_hit(dividend: u64, divisor: u64) -> BucketHit {
+    let divisor = divisor.max(1);
+    let quotient = dividend / divisor;
+    let remainder = dividend % divisor;
+    let dividend_bytes = bytes32_from_u64(dividend);
+    let divisor_bytes = bytes32_from_u64(divisor);
+    let quotient_bytes = bytes32_from_u64(quotient);
+    let remainder_bytes = bytes32_from_u64(remainder);
+    let mut details = HashMap::new();
+    details.insert("obligation_id".to_string(), json!("md3"));
+    details.insert("cell_id".to_string(), json!("md3.uint256_precompile_remainder_bound"));
+    details.insert("backend".to_string(), json!("sp1"));
+    details.insert("commit".to_string(), json!(crate::SP1_COMMIT));
+    details.insert("trace_source".to_string(), json!("sp1.uint256_div.hint_read"));
+    details.insert("op_idx".to_string(), json!(UINT256_DIV_QUOTIENT_HINT_IDX));
+    details.insert("step_idx".to_string(), json!(UINT256_DIV_QUOTIENT_HINT_IDX));
+    details.insert("dividend_hint_idx".to_string(), json!(0));
+    details.insert("divisor_hint_idx".to_string(), json!(1));
+    details.insert("quotient_hint_idx".to_string(), json!(UINT256_DIV_QUOTIENT_HINT_IDX));
+    details.insert("remainder_hint_idx".to_string(), json!(UINT256_DIV_REMAINDER_HINT_IDX));
+    details.insert("dividend_u64".to_string(), json!(dividend));
+    details.insert("divisor_u64".to_string(), json!(divisor));
+    details.insert("quotient_u64".to_string(), json!(quotient));
+    details.insert("remainder_u64".to_string(), json!(remainder));
+    details.insert("dividend_le_hex".to_string(), json!(bytes_hex(&dividend_bytes)));
+    details.insert("divisor_le_hex".to_string(), json!(bytes_hex(&divisor_bytes)));
+    details.insert("quotient_le_hex".to_string(), json!(bytes_hex(&quotient_bytes)));
+    details.insert("remainder_le_hex".to_string(), json!(bytes_hex(&remainder_bytes)));
+    details.insert("hook_kind".to_string(), json!(uint256_div_inject_kind()));
+    BucketHit::semantic(semantic::arithmetic::DIVISION_REMAINDER_BOUND, details)
+}
+
+fn uint256_observed_sites() -> BTreeMap<String, Vec<u64>> {
+    let mut sites = BTreeMap::new();
+    record_site(&mut sites, DIV_REM_BOUND_BASE_KIND, UINT256_DIV_QUOTIENT_HINT_IDX);
+    sites
+}
+
 fn prove_once(
     client: &ProverClient,
     pk: &SP1ProvingKey,
@@ -780,21 +944,45 @@ fn prove_once(
     inject_kind: Option<&str>,
     inject_step: u64,
 ) -> Result<ScenarioRun, String> {
+    prove_once_with_status(client, pk, vk, dividend, divisor, inject_kind, inject_step).0
+}
+
+fn prove_once_with_status(
+    client: &ProverClient,
+    pk: &SP1ProvingKey,
+    vk: &SP1VerifyingKey,
+    dividend: [u8; 32],
+    divisor: [u8; 32],
+    inject_kind: Option<&str>,
+    inject_step: u64,
+) -> (Result<ScenarioRun, String>, bool) {
     let _guard = EnvGuard::arm(inject_kind, inject_step);
     let mut stdin = SP1Stdin::new();
     stdin.write(&dividend);
     stdin.write(&divisor);
 
-    let mut proof: SP1Proof = client.prove(pk, stdin).map_err(|e| format!("prove failed: {e}"))?;
-    let quotient = proof.public_values.read::<[u8; 32]>();
-    client.verify(&proof, vk).map_err(|e| format!("verify failed: {e}"))?;
+    let result = (|| -> Result<ScenarioRun, String> {
+        let mut proof: SP1Proof =
+            client.prove(pk, stdin).map_err(|e| format!("prove failed: {e}"))?;
+        let quotient = proof.public_values.read::<[u8; 32]>();
+        client.verify(&proof, vk).map_err(|e| format!("verify failed: {e}"))?;
 
-    Ok(ScenarioRun {
-        inject_kind: inject_kind.map(str::to_string),
-        inject_step,
-        quotient_bytes: quotient.to_vec(),
-        proof_verified: true,
-    })
+        Ok(ScenarioRun {
+            inject_kind: inject_kind.map(str::to_string),
+            inject_step,
+            quotient_bytes: quotient.to_vec(),
+            proof_verified: true,
+            injection_applied: false,
+        })
+    })();
+    let injection_applied = fuzzer_utils::injection_was_applied();
+    (
+        result.map(|mut run| {
+            run.injection_applied = injection_applied;
+            run
+        }),
+        injection_applied,
+    )
 }
 
 fn execute_once(
@@ -826,6 +1014,7 @@ fn execute_once_with_injection(
         inject_step,
         quotient_bytes: quotient.to_vec(),
         proof_verified: false,
+        injection_applied: fuzzer_utils::injection_was_applied(),
     })
 }
 

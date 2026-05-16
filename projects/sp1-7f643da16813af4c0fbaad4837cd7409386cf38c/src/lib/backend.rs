@@ -9,13 +9,13 @@ use beak_core::fuzz::benchmark::{
     BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
+use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic};
 use serde::{Deserialize, Serialize};
 use sp1_core_executor::{ByteOpcode, ExecutionRecord, Executor, ExecutorMode, Opcode, Register};
 use sp1_core_machine::utils::run_test;
 use sp1_stark::{CpuProver, SP1CoreOpts};
 
-use crate::trace::{build_sp1_program, Sp1Trace};
+use crate::trace::{Sp1Trace, build_sp1_program};
 
 #[derive(Debug, Clone)]
 struct WitnessInjectionPlan {
@@ -69,6 +69,7 @@ const MEMORY_STORE_LOAD_INJECT_KIND: &str = "sp1.semantic.memory.store_load_payl
 const MEMORY_KIND_SELECTOR_INJECT_KIND: &str = "sp1.semantic.memory.kind_selector_consistency";
 const TIME_MONOTONIC_INJECT_KIND: &str = "sp1.semantic.time.monotonic_access_ordering";
 const LOOKUP_BOOLEAN_INJECT_KIND: &str = "sp1.semantic.lookup.boolean_multiplicity";
+const PADDING_INTERACTION_SEND_INJECT_KIND: &str = "sp1.semantic.row.padding_interaction_send";
 const RF1_INJECT_KIND: &str = "sp1.semantic.decode.zero_register_immutability";
 const RF2_INJECT_KIND: &str = "sp1.semantic.decode.operand_index_routing";
 const RF3_INJECT_KIND: &str = "sp1.semantic.exec.dest_binding";
@@ -92,11 +93,7 @@ fn base_inject_kind(kind: &str) -> &str {
 }
 
 fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
-    if variant.is_empty() {
-        kind.to_string()
-    } else {
-        format!("{kind}::{variant}")
-    }
+    if variant.is_empty() { kind.to_string() } else { format!("{kind}::{variant}") }
 }
 
 fn supports_official_injection_kind(kind: &str) -> bool {
@@ -110,6 +107,7 @@ fn supports_official_injection_kind(kind: &str) -> bool {
             | MEMORY_KIND_SELECTOR_INJECT_KIND
             | TIME_MONOTONIC_INJECT_KIND
             | LOOKUP_BOOLEAN_INJECT_KIND
+            | PADDING_INTERACTION_SEND_INJECT_KIND
             | RF1_INJECT_KIND
             | RF2_INJECT_KIND
             | RF3_INJECT_KIND
@@ -129,7 +127,6 @@ fn supports_official_injection_kind(kind: &str) -> bool {
     )
 }
 
-#[cfg(test)]
 fn inject_variant_value<'a>(kind: &'a str, key: &str) -> Option<&'a str> {
     let (_, variant) = kind.split_once("::")?;
     for field in variant.split(',') {
@@ -146,9 +143,26 @@ fn inject_variant_mode(kind: &str) -> Option<&str> {
     inject_variant_value(kind, "mode")
 }
 
-#[cfg(test)]
 fn inject_variant_family(kind: &str) -> Option<&str> {
     inject_variant_value(kind, "family")
+}
+
+fn control_flow_family_for_mnemonic(mnemonic: &str) -> Option<&'static str> {
+    match mnemonic {
+        "beq" | "bne" | "blt" | "bge" | "bltu" | "bgeu" => Some("branch"),
+        "jal" | "jalr" => Some("jump"),
+        "ecall" => Some("ecall"),
+        _ => None,
+    }
+}
+
+fn normalize_control_flow_family(family: &str) -> Option<&'static str> {
+    match family {
+        "branch" => Some("branch"),
+        "jump" => Some("jump"),
+        "ecall" => Some("ecall"),
+        _ => None,
+    }
 }
 
 fn control_flow_family_for_opcode(opcode: Opcode) -> Option<&'static str> {
@@ -322,6 +336,10 @@ fn byte_lookup_step(opcode: ByteOpcode, a1: u16, b: u8, c: u8) -> u64 {
     row.saturating_mul(9).saturating_add(opcode as u64)
 }
 
+fn syscall_instr_padded_rows(real_rows: usize) -> usize {
+    if real_rows == 0 { 0 } else { real_rows.next_power_of_two().max(16) }
+}
+
 fn panic_payload_to_string(p: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = p.downcast_ref::<&str>() {
         (*s).to_string()
@@ -375,6 +393,11 @@ fn collect_observed_injection_sites(records: &[ExecutionRecord]) -> BTreeMap<Str
             record_memory_instr_sites(&mut sites, event.opcode, memory_hook_step);
             memory_hook_step = memory_hook_step.saturating_add(1);
         }
+        let real_syscall_rows = record.syscall_events.len();
+        let padded_syscall_rows = syscall_instr_padded_rows(real_syscall_rows);
+        for row_idx in real_syscall_rows..padded_syscall_rows {
+            record_site(&mut sites, PADDING_INTERACTION_SEND_INJECT_KIND, row_idx as u64);
+        }
         for (lookup, mult) in &record.byte_lookups {
             if *mult == 0 {
                 continue;
@@ -398,7 +421,14 @@ fn resolve_runtime_injection_step(
     if !supports_official_injection_kind(kind) {
         return None;
     }
-    let steps = observed_injection_sites.get(base_inject_kind(kind))?;
+    let lookup_kind = if base_inject_kind(kind) == S28_INJECT_KIND {
+        inject_variant_family(kind)
+            .map(control_flow_site_key)
+            .unwrap_or_else(|| S28_INJECT_KIND.to_string())
+    } else {
+        base_inject_kind(kind).to_string()
+    };
+    let steps = observed_injection_sites.get(lookup_kind.as_str())?;
     if inject_step == u64::MAX {
         steps.first().copied()
     } else if steps.contains(&inject_step) {
@@ -491,7 +521,7 @@ fn run_sp1_real_backend(
             prove_ok: false,
             verify_ok: false,
             error: Some(format!(
-                "sp1 official prove path has no installed hook/applied signal for requested kind {}; mapped hooks include CPU-row decode/register/control hooks, {IS_MEMORY_INJECT_KIND}, v4 memory-instruction hooks, and byte-table multiplicity hooks",
+                "sp1 official prove path has no installed hook/applied signal for requested kind {}; mapped hooks include CPU-row decode/register/control hooks, {IS_MEMORY_INJECT_KIND}, v4 memory-instruction hooks, byte-table multiplicity hooks, and SyscallInstrs padding hooks",
                 inject_kind.unwrap_or_default()
             )),
             observed_injection_sites,
@@ -683,8 +713,24 @@ impl Sp1Backend {
             .unwrap_or_else(|| Self::step_from_hit(hit))
     }
 
+    fn is_syscall_instr_padding_hit(hit: &BucketHit) -> bool {
+        hit.details.get("trace_source").and_then(|value| value.as_str())
+            == Some("syscall_instruction_padding")
+            && hit.details.get("table_name").and_then(|value| value.as_str())
+                == Some("SyscallInstrs")
+            && hit.details.get("is_padding").and_then(|value| value.as_bool()) == Some(true)
+    }
+
     fn mnemonic_from_hit(hit: &BucketHit) -> Option<&str> {
         hit.details.get("mnemonic").and_then(|value| value.as_str())
+    }
+
+    fn control_flow_family_from_hit(hit: &BucketHit) -> Option<&'static str> {
+        hit.details
+            .get("control_flow_family")
+            .and_then(|value| value.as_str())
+            .and_then(normalize_control_flow_family)
+            .or_else(|| Self::mnemonic_from_hit(hit).and_then(control_flow_family_for_mnemonic))
     }
 
     fn is_chip_scheduled_bucket(bucket_id: &str) -> bool {
@@ -714,9 +760,6 @@ impl Sp1Backend {
 
     fn s28_variant_specs_for_family(family: &str) -> Vec<String> {
         let mut specs = Vec::new();
-        for rank in 0..768u32 {
-            specs.push(format!("family={family},mode=noop_prefix,rank={rank}"));
-        }
         match family {
             "branch" => {
                 specs.push("family=branch,mode=force_fallthrough".to_string());
@@ -734,12 +777,17 @@ impl Sp1Backend {
                 specs.push("family=ecall,mode=legacy_far_jump".to_string());
             }
         }
+        for rank in 0..768u32 {
+            specs.push(format!("family={family},mode=noop_prefix,rank={rank}"));
+        }
         specs
     }
 
     fn semantic_candidate_priority(candidate: &SemanticInjectionCandidate) -> u8 {
         let bucket_id = candidate.bucket_id.as_str();
-        if bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id {
+        if bucket_id == semantic::row::PADDING_INTERACTION_SEND.id {
+            0
+        } else if bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id {
             1
         } else if matches!(
             bucket_id,
@@ -774,15 +822,17 @@ impl Sp1Backend {
         } else {
             Self::step_from_hit(hit)
         };
-        let control_flow_family =
-            hit.details.get("control_flow_family").and_then(|value| value.as_str());
+        let control_flow_family = Self::control_flow_family_from_hit(hit);
         let control_flow_site_key = control_flow_family.map(control_flow_site_key);
         let (semantic_class, inject_kinds, schedule_lookup_key, fallback_schedule) = if bucket_id
             == semantic::exec::CONTROL_FLOW_BINDING.id
         {
+            let Some(control_flow_family) = control_flow_family else {
+                return Vec::new();
+            };
             (
-                control_flow_semantic_class(control_flow_family),
-                Self::s28_variant_specs_for_family(control_flow_family.unwrap_or("ecall"))
+                control_flow_semantic_class(Some(control_flow_family)),
+                Self::s28_variant_specs_for_family(control_flow_family)
                     .into_iter()
                     .map(|variant| inject_kind_with_variant(S28_INJECT_KIND, &variant))
                     .collect::<Vec<_>>(),
@@ -865,6 +915,19 @@ impl Sp1Backend {
                 semantic::lookup::BOOLEAN_MULTIPLICITY.semantic_class.to_string(),
                 vec![LOOKUP_BOOLEAN_INJECT_KIND.to_string()],
                 LOOKUP_BOOLEAN_INJECT_KIND.to_string(),
+                InjectionSchedule::Explicit(vec![anchor]),
+            )
+        } else if bucket_id == semantic::row::PADDING_INTERACTION_SEND.id {
+            if !Self::is_syscall_instr_padding_hit(hit) {
+                return Vec::new();
+            }
+            (
+                semantic::row::PADDING_INTERACTION_SEND.semantic_class.to_string(),
+                vec![inject_kind_with_variant(
+                    PADDING_INTERACTION_SEND_INJECT_KIND,
+                    "site=syscall_instr_padding_send_table",
+                )],
+                PADDING_INTERACTION_SEND_INJECT_KIND.to_string(),
                 InjectionSchedule::Explicit(vec![anchor]),
             )
         } else if bucket_id == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id {
@@ -1208,13 +1271,13 @@ impl Drop for Sp1Backend {
 #[cfg(test)]
 mod tests {
     use super::{
-        control_flow_semantic_class, control_flow_site_key, inject_kind_with_variant,
-        mutated_control_flow_next_pc, run_backend_once, InjectionSchedule, Opcode, Sp1Backend,
-        S28_INJECT_KIND,
+        InjectionSchedule, Opcode, S28_INJECT_KIND, Sp1Backend, control_flow_semantic_class,
+        control_flow_site_key, inject_kind_with_variant, mutated_control_flow_next_pc,
+        resolve_runtime_injection_step, run_backend_once,
     };
-    use beak_core::trace::{semantic, BucketHit};
+    use beak_core::trace::{BucketHit, semantic};
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     #[test]
     fn s28_mutation_is_family_scoped() {
@@ -1257,6 +1320,59 @@ mod tests {
             InjectionSchedule::Explicit(steps) => assert_eq!(steps, &vec![9, 4, 12]),
             other => panic!("expected explicit branch schedule, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn control_flow_hit_derives_family_from_mnemonic_without_defaulting_to_ecall() {
+        let backend = Sp1Backend::new(16);
+        let mut details = HashMap::new();
+        details.insert("step_idx".to_string(), json!(3));
+        details.insert("mnemonic".to_string(), json!("beq"));
+        let hit = BucketHit::semantic(semantic::exec::CONTROL_FLOW_BINDING, details);
+
+        let candidates = backend.semantic_candidate_from_hit(&hit);
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().all(|candidate| candidate.inject_kind.contains("family=branch")));
+        assert!(candidates.iter().all(|candidate| !candidate.inject_kind.contains("family=ecall")));
+    }
+
+    #[test]
+    fn familyless_non_control_flow_hit_does_not_produce_ecall_candidate() {
+        let backend = Sp1Backend::new(16);
+        let mut details = HashMap::new();
+        details.insert("step_idx".to_string(), json!(3));
+        details.insert("mnemonic".to_string(), json!("addi"));
+        let hit = BucketHit::semantic(semantic::exec::CONTROL_FLOW_BINDING, details);
+
+        let candidates = backend.semantic_candidate_from_hit(&hit);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn s28_real_mutations_are_tried_before_noop_prefixes() {
+        let specs = Sp1Backend::s28_variant_specs_for_family("ecall");
+        assert_eq!(specs[0], "family=ecall,mode=near_jump");
+        assert_eq!(specs[1], "family=ecall,mode=mid_jump");
+        assert_eq!(specs[2], "family=ecall,mode=legacy_far_jump");
+        assert!(specs[3].starts_with("family=ecall,mode=noop_prefix"));
+    }
+
+    #[test]
+    fn family_qualified_control_flow_steps_are_family_scoped() {
+        let mut sites = BTreeMap::new();
+        sites.insert(S28_INJECT_KIND.to_string(), vec![4, 9]);
+        sites.insert(control_flow_site_key("branch"), vec![4]);
+        sites.insert(control_flow_site_key("ecall"), vec![9]);
+
+        let ecall_kind = inject_kind_with_variant(S28_INJECT_KIND, "family=ecall,mode=near_jump");
+        let branch_kind =
+            inject_kind_with_variant(S28_INJECT_KIND, "family=branch,mode=force_fallthrough");
+
+        assert_eq!(resolve_runtime_injection_step(Some(&ecall_kind), 9, &sites), Some(9));
+        assert_eq!(resolve_runtime_injection_step(Some(&ecall_kind), 4, &sites), None);
+        assert_eq!(resolve_runtime_injection_step(Some(&ecall_kind), u64::MAX, &sites), Some(9));
+        assert_eq!(resolve_runtime_injection_step(Some(&branch_kind), 4, &sites), Some(4));
+        assert_eq!(resolve_runtime_injection_step(Some(&branch_kind), 9, &sites), None);
     }
 
     #[test]

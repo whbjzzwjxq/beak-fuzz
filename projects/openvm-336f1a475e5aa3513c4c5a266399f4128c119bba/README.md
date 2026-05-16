@@ -43,7 +43,12 @@ This commit has 8 relevant `o..` targets:
 
 Current semantic bucket -> injected bug family mapping supports:
 
-- `o1` via `sem.lookup.xor_multiplicity_consistency -> openvm.semantic.lookup.xor_multiplicity_consistency`
+- `bu1/o1` via canonical
+  `sem.lookup.boolean_multiplicity -> openvm.semantic.lookup.boolean_multiplicity`
+  for lookup multiplicity rows. The older
+  `sem.lookup.xor_multiplicity_consistency` path is retained only as a legacy
+  audit smoke because its witness mutation currently rejects with
+  `ChallengePhaseError`, not an underconstrained proof.
 - `o5` via `sem.alu.immediate_limb_consistency -> openvm.semantic.alu.immediate_limb_consistency`
 - `o7` via `sem.control.auipc_pc_limb_consistency -> openvm.semantic.control.auipc_pc_limb_consistency`
 - `o8` via `sem.memory.immediate_sign_consistency -> openvm.semantic.memory.immediate_sign_consistency`
@@ -111,13 +116,18 @@ verifier exception or `UNDERCONSTRAINED CANDIDATE DETECTED`.
 | `id5` | `00100113 00200193 00208463 00300193` | `openvm.semantic.decode.format_immediate_reassembly`, step `2` | Baseline emitted `sem.decode.format_immediate_reassembly`; injected replay printed `pc=8`, reported `semantic_injection_applied = true`, and failed proof with `ChallengePhaseError`. |
 | `cf7` | `00000073` | `openvm.semantic.control.ecall_word_validity`, step `0` | Hook smoke applied and failed proof with `ChallengePhaseError`, but baseline emitted 0 buckets because the RV system word transpiled to `unimp`; this remains `install_patch_available`, not `verified`. |
 
-### Verified legacy/original semantic smoke
+### Canonical BU1 and legacy o1 smoke
 
 ```bash
-# o1 baseline: emits sem.lookup.xor_multiplicity_consistency
+# canonical BU1 baseline: emits sem.lookup.boolean_multiplicity when lookup
+# multiplicity rows are present
 ./target/release/beak-trace --bin "01400313 01400393 00734533" --print-buckets
 
-# o1 injected: semantic_injection_applied=true; verify_app_proof failed: ChallengePhaseError
+# legacy o1 baseline: may also emit sem.lookup.xor_multiplicity_consistency
+./target/release/beak-trace --bin "01400313 01400393 00734533" --print-buckets
+
+# legacy o1 injected: semantic_injection_applied=true, but verifier rejects with
+# ChallengePhaseError. This is legacy_rejected, not canonical BU1 verified.
 ./target/release/beak-trace --bin "01400313 01400393 00734533" \
   --inject-kind "openvm.semantic.lookup.xor_multiplicity_consistency::mode=p_plus_mask,rank=0,strength=0" \
   --inject-step 0 \

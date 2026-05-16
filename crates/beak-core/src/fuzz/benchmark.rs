@@ -733,8 +733,12 @@ pub fn run_benchmark<B: BenchmarkBackend>(
 
         let candidates = backend.semantic_injection_candidates(&baseline.bucket_hits);
         let mut attempted = HashSet::<(String, u64)>::new();
+        let mut seed_semantic_solved = false;
 
         for candidate in candidates {
+            if seed_semantic_solved {
+                break;
+            }
             let steps = candidate_steps(&cfg, &candidate);
             if steps.is_empty() {
                 continue;
@@ -790,6 +794,7 @@ pub fn run_benchmark<B: BenchmarkBackend>(
                 )? {
                     bug_count = bug_count.saturating_add(1);
                     if semantic_search_solved(&injected) {
+                        seed_semantic_solved = true;
                         break;
                     }
                 }
@@ -938,8 +943,12 @@ pub fn run_benchmark<B: BenchmarkBackend>(
 
         let candidates = backend.semantic_injection_candidates(&baseline.bucket_hits);
         let mut attempted = HashSet::<(String, u64)>::new();
+        let mut seed_semantic_solved = false;
 
         for candidate in candidates {
+            if seed_semantic_solved {
+                break;
+            }
             let steps = candidate_steps(&cfg, &candidate);
             if steps.is_empty() {
                 continue;
@@ -995,6 +1004,7 @@ pub fn run_benchmark<B: BenchmarkBackend>(
                 )? {
                     bug_count = bug_count.saturating_add(1);
                     if semantic_search_solved(&injected) {
+                        seed_semantic_solved = true;
                         break;
                     }
                 }

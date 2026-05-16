@@ -1,13 +1,17 @@
 JOLT_BENCHMARK_ALIAS = "bmk-jolt"
 JOLT_BENCHMARK_COMMIT = "e9caa23565dbb13019afe61a2c95f51d1999e286"
+JOLT_READWRITE_SIZING_COMMIT = "6c3b0b49db0afceb967b33656176fa7a27e557b9"
+JOLT_BINIUS_COMMIT = "e587efcaed9fedf47966cfc51e4bd3c91bf04a69"
 
 JOLT_AVAILABLE_COMMITS_OR_BRANCHES = [
     JOLT_BENCHMARK_ALIAS,
     JOLT_BENCHMARK_COMMIT,
+    JOLT_READWRITE_SIZING_COMMIT,
     "main",
 ]
 
 JOLT_ZKVM_GIT_REPOSITORY = "https://github.com/a16z/jolt.git"
+JOLT_BINIUS_GIT_REPOSITORY = "https://gitlab.com/UlvetannaOSS/binius"
 
 
 def resolve_jolt_commit(commit_or_branch: str) -> str:

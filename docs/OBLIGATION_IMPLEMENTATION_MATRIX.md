@@ -8,7 +8,7 @@ Status values:
 
 `not_started`, `trace_missing`, `trace_observable`, `bucket_emitted`,
 `semantic_injection_mapped`, `install_patch_available`, `verified`,
-`unsupported`.
+`unsupported`, `legacy_rejected`.
 
 ## Pilot Scope
 
@@ -79,7 +79,9 @@ but use the same bucket id and explain the limitation in `notes`.
 | cf6 | cf6.near_segment_end | sem.exec.control_flow_binding | segment boundary metadata | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | unsupported | trace_missing | trace_missing | trace_missing | trace_missing |  |  | Current trace lacks segment-boundary position metadata; d7eab708 and Pico likewise have no segment-boundary position metadata in the emitted instruction/chip-row trace. |
 | cf7 | cf7.standard | sem.control.ecall_word_validity | op_idx, pc, opcode, mnemonic, raw instruction word | install_patch_available | trace_missing | trace_missing | bucket_emitted | bucket_emitted | bucket_emitted | semantic_injection_mapped | bucket_emitted | unsupported | trace_missing | semantic_injection_mapped | bucket_emitted | bucket_emitted | `openvm.semantic.control.ecall_word_validity` | Hook smoke: `cargo run -q --bin beak-trace -- --bin "00000073" --inject-kind openvm.semantic.control.ecall_word_validity --inject-step 0` printed the program-table mutation and reported `semantic_injection_applied = true` / `verify_app_proof failed: ChallengePhaseError`; baseline `00000073 --print-buckets` emitted 0 buckets because the RV system word transpiled to `unimp`. | OpenVM-f038 has no mapped program-table ECALL hook and no baseline raw-RV ECALL bucket; status remains trace_missing. Pico emits the executed ECALL word bucket when observable, but no real Pico install mutation hook exists for `pico.semantic.control.ecall_word_validity`, so it is bucket-only. |
 | bu1 | bu1.real_row | sem.lookup.boolean_multiplicity | step_idx, table_name, multiplicity, is_real | not_started | semantic_injection_mapped | trace_missing | verified | install_patch_available | install_patch_available | trace_missing | install_patch_available | trace_missing | semantic_injection_mapped | trace_missing | trace_missing | trace_missing | `<vm>.semantic.lookup.boolean_multiplicity` | d7 bitwise lookup smoke emitted `sem.lookup.boolean_multiplicity`; injected `openvm.semantic.lookup.boolean_multiplicity` replay reported `semantic_injection_applied = true`. Pico base-kind injected smoke reported `injection_applied=true` and failed with `Constraint verification failed`. | d7 pass emits nonzero bitwise lookup multiplicity rows from `BitwiseOperationLookupChip::generate_trace` and mutates `mult_range`/`mult_xor`; f038 does not expose boolean lookup multiplicity rows in the current trace. SP1 v4 byte-record/byte-table install patches exist for 39/7/811, but injected lookup replays still reported `semantic_injection_applied = false`; only 39/7 are install-patch-available and 811 remains trace-missing without a durable baseline bucket. |
-| pd1 | pd1.short_trace | sem.row.padding_interaction_send | step_idx, table_name, is_padding, interaction_kind | not_started | bucket_emitted | bucket_emitted | trace_missing | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | trace_missing | semantic_injection_mapped | trace_missing | bucket_emitted | bucket_emitted | `<vm>.semantic.row.padding_interaction_send` |  | f038 baseline smokes emit padding interaction-send buckets; no mutation hook is mapped. |
+| pd1 | pd1.short_trace | sem.row.padding_interaction_send | step_idx, table_name, is_padding, interaction_kind | verified | bucket_emitted | bucket_emitted | trace_missing | bucket_emitted | bucket_emitted | bucket_emitted | bucket_emitted | trace_missing | semantic_injection_mapped | trace_missing | bucket_emitted | bucket_emitted | `<vm>.semantic.row.padding_interaction_send` | OpenVM-336 strict e2e: `FAST_TEST=1 ./target/debug/beak-fuzz --seeds-jsonl .../seed_three_base_alu_xor_padding.jsonl --initial-limit 1 --mutation-iters 0 --semantic-window-before 2 --semantic-window-after 8 --semantic-max-trials-per-bucket 8` reported `trigger_bucket_id=sem.row.padding_interaction_send`, `semantic_injection_applied=true`, and `underconstrained_candidate=true`. | OpenVM-336 maps BaseAlu padding interaction sends to a real padding-row hook and balances the injected ghost read through the memory final-merge/access-adapter path. f038 baseline smokes emit padding interaction-send buckets; no mutation hook is mapped. |
+| pd3 | pd3.mem_table/pd3.range_table/pd3.lookup_accum/pd3.commit_vector | sem.row.table_power2_boundary | step_idx, table_name, real_rows, log_size, padded_rows, padding_rows, boundary_k | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_observable | trace_missing | trace_missing | `<vm>.semantic.row.table_power2_boundary` | Nexus-MemorySize-01 fixability pass selected `pd3.mem_table` as the first implementable cell. | This is intentionally separate from PD1 `sem.row.padding_interaction_send`: PD3 is table-size boundary coverage, not padding-row inertness. |
+| pd4 | pd4.just_over/pd4.just_under/pd4.large_program/pd4.small_program | sem.row.bytecode_table_boundary | step_idx, table_name, bytecode_len, virtualized_bytecode_len, padded_bytecode_len, crossed_k | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_missing | trace_observable | trace_missing | trace_missing | trace_missing | `<vm>.semantic.row.bytecode_table_boundary` | Jolt-HighBytecode-01 fixability pass selected Jolt bytecode table metadata as the first implementable source. | This is intentionally separate from PD1 `sem.row.padding_interaction_send`: PD4 is bytecode table expansion, not generic padding interaction. |
 
 ## Per-VM Notes
 
@@ -207,7 +209,7 @@ Add short notes here as pilots progress.
 
 | obligation_id | status | semantic_bucket | smoke | result |
 |---|---|---|---|---|
-| o1 | verified | sem.lookup.xor_multiplicity_consistency | Baseline: `./target/release/beak-trace --bin "01400313 01400393 00734533" --print-buckets`; injected: `./target/release/beak-trace --bin "01400313 01400393 00734533" --inject-kind "openvm.semantic.lookup.xor_multiplicity_consistency::mode=p_plus_mask,rank=0,strength=0" --inject-step 0 --print-buckets` | Baseline emitted `sem.lookup.xor_multiplicity_consistency`; injected replay reported `semantic_injection_applied = true` and `backend_error = verify_app_proof failed: ChallengePhaseError`. |
+| o1 | legacy_rejected | sem.lookup.xor_multiplicity_consistency | Baseline: `./target/release/beak-trace --bin "01400313 01400393 00734533" --print-buckets`; injected: `./target/release/beak-trace --bin "01400313 01400393 00734533" --inject-kind "openvm.semantic.lookup.xor_multiplicity_consistency::mode=p_plus_mask,rank=0,strength=0" --inject-step 0 --print-buckets` | Baseline emitted legacy `sem.lookup.xor_multiplicity_consistency`; injected replay reported `semantic_injection_applied = true` but failed with `ChallengePhaseError`. This is not canonical BU1 coverage; migrate verification to `sem.lookup.boolean_multiplicity`. |
 | o5 | verified | sem.alu.immediate_limb_consistency | Baseline: `./target/release/beak-trace --bin "00100093 02800113 002091b3" --print-buckets`; injected: `./target/release/beak-trace --bin "00100093 02800113 002091b3" --inject-kind "openvm.semantic.alu.immediate_limb_consistency::mode=byte_bias,slot=0,strength=0" --inject-step 2 --print-buckets` | Baseline emitted `sem.alu.immediate_limb_consistency`; injected replay printed the o5 witness mutation, reported `semantic_injection_applied = true`, and printed `UNDERCONSTRAINED CANDIDATE DETECTED`. |
 | o7 | verified | sem.control.auipc_pc_limb_consistency | Baseline: `./target/release/beak-trace --bin "00200313 0ff00793 00002297 e6c28293 0002c703 0ff00393 00774533" --print-buckets`; injected: `./target/release/beak-trace --bin "00200313 0ff00793 00002297 e6c28293 0002c703 0ff00393 00774533" --inject-kind "openvm.semantic.control.auipc_pc_limb_consistency::mode=from_pc_high_single_mod_p,slot=1,strength=0,mult=1" --inject-step 3 --print-buckets` | Baseline emitted `sem.control.auipc_pc_limb_consistency`; injected replay printed the o7 witness mutation, reported `semantic_injection_applied = true`, and printed `UNDERCONSTRAINED CANDIDATE DETECTED`. |
 | o8 | verified | sem.memory.immediate_sign_consistency | Baseline: `./target/release/beak-trace --bin "000010b7 ffc0a103" --print-buckets`; injected: `./target/release/beak-trace --bin "000010b7 ffc0a103" --inject-kind "openvm.semantic.memory.immediate_sign_consistency::mode=flip_sign,domain=load,guard=none" --inject-step 1 --print-buckets` | Baseline emitted `sem.memory.immediate_sign_consistency`; injected replay printed a real sign-flip mutation with `orig_ptr=4092`, `flipped_ptr=69628`, `flipped_sign=0`, reported `semantic_injection_applied = true`, and printed `UNDERCONSTRAINED CANDIDATE DETECTED`. |
@@ -395,8 +397,12 @@ OpenVM-336 Control verifier smoke:
   `alu/mul`, and `alu/divrem` trace generation; memory hooks are in
   `riscv_memory/read_write/traces.rs::MemoryReadWriteChip::generate_main`; the
   boolean lookup hook mutates `is_real_shadow` in local memory trace rows.
-  Injected smokes reported source-site `semantic_injection_applied=true` and
-  verifier rejection.
+  Most injected smokes reported source-site `semantic_injection_applied=true`
+  and verifier rejection. The read/write-memory `id4.load` hook is the current
+  accepted underconstrained exception: it leaves opcode and operand lookup
+  values unchanged while setting the row-local load destination selector
+  `op_a_0` and dependent load-value flags so the load-value binding gate is
+  disabled.
 - Mapped but not verified: `me6` / `sem.memory.address_boundary_range` maps to
   `pico.semantic.memory.address_boundary_range` at the same read/write memory
   row `addr_word` mutation point. The direct hook smoke applied and failed
@@ -421,7 +427,14 @@ OpenVM-336 Control verifier smoke:
   `sem.exec.op_selector_binding`; injected selector smoke with
   `--inject-kind pico.semantic.exec.op_selector_binding --inject-step 0`
   reported `semantic_injection_applied=true` and failed with
-  `Regional cumulative sum is not zero`. Unsupported variants now return
+  `Regional cumulative sum is not zero`. The older read/write selector-family
+  flip for `pico.semantic.memory.kind_selector_consistency` still rejects with
+  `Constraint verification failed`; the distinct read/write `id4.load`
+  injection
+  `--inject-kind pico.semantic.exec.op_selector_binding.read_write --inject-step 1`
+  on `[0x04000293,0x07b00513,0x00a2a023,0x0002a603]` now proves and verifies,
+  and normal `beak-fuzz` semantic search reports
+  `underconstrained_candidate=true`. Unsupported variants now return
   `injection_applied=false` with an unsupported variant error.
 - Trace-missing / unsupported gaps: `me7`, `me8`, and `me11` were inspected in
   `vm/src/chips/chips/riscv_memory/initialize_finalize/traces.rs`,

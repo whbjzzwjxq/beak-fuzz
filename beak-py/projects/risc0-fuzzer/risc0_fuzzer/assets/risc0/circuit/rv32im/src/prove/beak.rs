@@ -11,27 +11,27 @@ use risc0_zkp::{
 };
 
 use super::{
+    hal::{cpu::CpuCircuitHal, MetaBuffer, StepMode},
+    witgen::{preflight::PreflightTrace, WitnessGenerator},
     Seal,
-    hal::{MetaBuffer, StepMode, cpu::CpuCircuitHal},
-    witgen::{WitnessGenerator, preflight::PreflightTrace},
 };
 use crate::{
-    RV32IM_SEAL_VERSION,
     execute::{
-        platform::{LOOKUP_TABLE_CYCLES, MACHINE_REGS_ADDR, RESERVED_CYCLES, ecall_minor, major},
+        platform::{ecall_minor, major, LOOKUP_TABLE_CYCLES, MACHINE_REGS_ADDR, RESERVED_CYCLES},
         segment::Segment,
     },
     zirgen::{
-        CircuitImpl,
         circuit::{
             AddrDecomposeBitsLayout, AddrDecomposeLayout, CircuitField, DecoderLayout,
-            DecomposeLow2Layout, DoDivLayout, ExtVal, IsForwardLayout, LAYOUT_TOP, MemoryArgLayout,
+            DecomposeLow2Layout, DoDivLayout, ExtVal, IsForwardLayout, MemoryArgLayout,
             MemoryReadLayout, MemoryWriteLayout, NondetRegLayout, NondetU16RegLayout,
-            NormalizeU32Layout, REGCOUNT_MIX, REGISTER_GROUP_ACCUM, REGISTER_GROUP_CODE,
-            REGISTER_GROUP_DATA, ReadRegLayout, Val, WriteRdLayout,
+            NormalizeU32Layout, ReadRegLayout, Val, WriteRdLayout, LAYOUT_TOP, REGCOUNT_MIX,
+            REGISTER_GROUP_ACCUM, REGISTER_GROUP_CODE, REGISTER_GROUP_DATA,
         },
         taps::TAPSET,
+        CircuitImpl,
     },
+    RV32IM_SEAL_VERSION,
 };
 
 type CpuHal = risc0_zkp::hal::cpu::CpuHal<CircuitField>;
@@ -202,6 +202,17 @@ fn read_memory_arg(data: &[Val], rows: usize, row: usize, layout: &MemoryArgLayo
     get_reg(data, rows, row, layout.data_low) | (get_reg(data, rows, row, layout.data_high) << 16)
 }
 
+fn set_memory_arg_u32(
+    data: &mut [Val],
+    rows: usize,
+    row: usize,
+    layout: &MemoryArgLayout,
+    value: u32,
+) {
+    set_reg(data, rows, row, layout.data_low, value & 0xffff);
+    set_reg(data, rows, row, layout.data_high, value >> 16);
+}
+
 fn copy_memory_arg(
     data: &mut [Val],
     rows: usize,
@@ -254,6 +265,11 @@ fn copy_is_forward(
 
 fn read_reg_u32(data: &[Val], rows: usize, row: usize, layout: &ReadRegLayout) -> u32 {
     read_memory_arg(data, rows, row, layout._super.io.old_txn)
+}
+
+fn set_read_reg_u32(data: &mut [Val], rows: usize, row: usize, layout: &ReadRegLayout, value: u32) {
+    set_memory_arg_u32(data, rows, row, layout._super.io.old_txn, value);
+    set_memory_arg_u32(data, rows, row, layout._super.io.new_txn, value);
 }
 
 fn copy_read_reg(
@@ -415,24 +431,14 @@ fn perturb_addr_decompose_bits(
     set_reg(data, rows, row, layout.low0, low0 ^ 0x1);
 }
 
-fn set_decompose_low2(
+fn set_decompose_low2_high_one(
     data: &mut [Val],
     rows: usize,
     row: usize,
     layout: &DecomposeLow2Layout,
-    high: u32,
-    low2: u32,
 ) {
-    set_u16_reg(data, rows, row, layout.high, high);
-    set_reg(data, rows, row, layout.low2, low2 & 0x3);
-    for (idx, bit) in layout.low2_hot._super.iter().enumerate() {
-        set_reg(data, rows, row, bit, u32::from(idx as u32 == (low2 & 0x3)));
-    }
-    let high_is_zero = u32::from(high == 0);
-    set_reg(data, rows, row, layout.high_zero._super, high_is_zero);
-    set_reg(data, rows, row, layout.high_zero.inv, if high == 0 { 0 } else { 1 });
-    let is_zero = u32::from(high == 0 && (low2 & 0x3) == 0);
-    set_reg(data, rows, row, layout.is_zero, is_zero);
+    set_u16_reg(data, rows, row, layout.high, 1);
+    set_reg(data, rows, row, layout.high_zero.inv, 1);
 }
 
 fn active_div_do_div(cycle: &RawPreflightCycle) -> Option<&'static DoDivLayout> {
@@ -651,17 +657,15 @@ fn apply_operand_route_injection(
     else {
         return false;
     };
-    copy_decoded_reg(
-        data,
-        rows,
-        row,
-        decoded._rs2_34,
-        decoded._rs2_12,
-        decoded._rs2_0,
-        decoded._rs1_34,
-        decoded._rs1_12,
-        decoded._rs1_0,
-    );
+    let rs1_idx =
+        get_decoded_reg(data, rows, row, decoded._rs1_34, decoded._rs1_12, decoded._rs1_0);
+    let rs2_idx =
+        get_decoded_reg(data, rows, row, decoded._rs2_34, decoded._rs2_12, decoded._rs2_0);
+    if rs1_idx == rs2_idx
+        || read_reg_u32(data, rows, row, rs1) == read_reg_u32(data, rows, row, rs2)
+    {
+        return false;
+    }
     copy_read_reg(data, rows, row, rs2, rs1);
     true
 }
@@ -672,6 +676,18 @@ fn apply_exec_source_binding_injection(
     row: usize,
     cycle: &RawPreflightCycle,
 ) -> bool {
+    let (Some(decoded), Some(rs2)) = (active_decoder(cycle), active_rs2(cycle)) else {
+        return false;
+    };
+    let rs1_idx =
+        get_decoded_reg(data, rows, row, decoded._rs1_34, decoded._rs1_12, decoded._rs1_0);
+    let rs2_idx =
+        get_decoded_reg(data, rows, row, decoded._rs2_34, decoded._rs2_12, decoded._rs2_0);
+    if rs1_idx == rs2_idx && rs1_idx != 0 {
+        let value = read_reg_u32(data, rows, row, rs2);
+        set_read_reg_u32(data, rows, row, rs2, value.wrapping_add(1));
+        return true;
+    }
     apply_operand_route_injection(data, rows, row, cycle)
 }
 
@@ -697,7 +713,14 @@ fn apply_rd_bit_injection(
     let Some(decoder) = active_decoder(cycle) else {
         return false;
     };
-    bump_decoded_rd(data, rows, row, decoder)
+    let rd12 = get_reg(data, rows, row, decoder._rd_12);
+    let rd0 = get_reg(data, rows, row, decoder._rd_0);
+    if rd12 == 0 || rd0 > 1 {
+        return false;
+    }
+    set_reg(data, rows, row, decoder._rd_12, rd12 - 1);
+    set_reg(data, rows, row, decoder._rd_0, rd0 + 2);
+    true
 }
 
 fn apply_decode_field_range_injection(
@@ -1128,13 +1151,28 @@ fn apply_div_rem_bound_injection(
     true
 }
 
-fn apply_ecall_decomposition_injection(data: &mut [Val], rows: usize, row: usize) {
+fn apply_ecall_decomposition_injection(
+    data: &mut [Val],
+    rows: usize,
+    row: usize,
+    cycle: &RawPreflightCycle,
+) -> bool {
+    if cycle.major != major::ECALL0 || cycle.minor != ecall_minor::HOST_READ_SETUP {
+        return false;
+    }
     let out = LAYOUT_TOP.inst_result.arm8.output;
-    set_decompose_low2(data, rows, row, out.arm2._super.ptr_decomp, 0, 1);
-    set_decompose_low2(data, rows, row, out.arm2._super.len_decomp, 0, 1);
-    set_decompose_low2(data, rows, row, out.arm4._super.len_decomp, 0, 1);
-    set_decompose_low2(data, rows, row, out.arm5._super.len_decomp, 0, 1);
-    set_decompose_low2(data, rows, row, out.arm5._super.words_decomp, 0, 1);
+    let layout = out.arm2._super.len_decomp;
+    let high = get_u16_reg(data, rows, row, layout.high);
+    if high <= 1 {
+        return false;
+    }
+    if get_reg(data, rows, row, layout.high_zero._super) != 0
+        || get_reg(data, rows, row, layout.is_zero) != 0
+    {
+        return false;
+    }
+    set_decompose_low2_high_one(data, rows, row, layout);
+    true
 }
 
 fn is_normal_insn_row(cycle: &RawPreflightCycle) -> bool {
@@ -1142,13 +1180,7 @@ fn is_normal_insn_row(cycle: &RawPreflightCycle) -> bool {
 }
 
 fn is_ecall_decomp_row(cycle: &RawPreflightCycle) -> bool {
-    cycle.major == major::ECALL0
-        && matches!(
-            cycle.minor,
-            ecall_minor::HOST_READ_SETUP
-                | ecall_minor::HOST_READ_BYTES
-                | ecall_minor::HOST_READ_WORDS
-        )
+    cycle.major == major::ECALL0 && cycle.minor == ecall_minor::HOST_READ_SETUP
 }
 
 fn is_ecall_register_write_row(cycle: &RawPreflightCycle) -> bool {
@@ -1274,9 +1306,10 @@ fn apply_injection(
                 if !is_ecall_decomp_row(cycle) {
                     continue;
                 }
-                apply_ecall_decomposition_injection(&mut slice, rows, row);
-                applied = true;
-                break;
+                applied = apply_ecall_decomposition_injection(&mut slice, rows, row, cycle);
+                if applied {
+                    break;
+                }
             }
             KIND_EXEC_SOURCE_BINDING => {
                 if !is_normal_insn_row(cycle) {

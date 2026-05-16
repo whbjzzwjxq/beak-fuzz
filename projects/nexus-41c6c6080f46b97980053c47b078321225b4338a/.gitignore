@@ -1,0 +1,5 @@
+target/
+out/
+vendor/
+nexus-src/
+*.log

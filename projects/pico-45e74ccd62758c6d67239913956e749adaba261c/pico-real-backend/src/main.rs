@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 
 use pico_vm::{
+    chips::chips::riscv_memory::event::MemoryRecordEnum,
     compiler::riscv::{instruction::Instruction, opcode::Opcode, program::Program},
     configs::config::{StarkGenericConfig, Val},
     emulator::{
@@ -10,6 +11,7 @@ use pico_vm::{
         riscv::{
             record::EmulationRecord,
             riscv_emulator::{EmulatorMode, RiscvEmulator},
+            syscalls::SyscallCode,
         },
     },
     instances::{
@@ -58,11 +60,16 @@ struct ExecutedInsn {
     b: u32,
     c: u32,
     memory: Option<u32>,
+    ecall_syscall_id: Option<u32>,
+    ecall_operand_to_check: Option<u32>,
 }
 
 const TIMESTAMP_INJECT_KIND: &str = "pico.semantic.memory.timestamped_load_path";
 const BOOL_INJECT_KIND: &str = "pico.semantic.lookup.boolean_multiplicity";
 const OP_SELECTOR_INJECT_KIND: &str = "pico.semantic.exec.op_selector_binding";
+const READ_WRITE_OP_SELECTOR_INJECT_KIND: &str =
+    "pico.semantic.exec.op_selector_binding.read_write";
+const ECALL_ARG_INJECT_KIND: &str = "pico.semantic.control.ecall_argument_decomposition";
 const ECALL_WORD_INJECT_KIND: &str = "pico.semantic.control.ecall_word_validity";
 const ZERO_REG_INJECT_KIND: &str = "pico.semantic.decode.zero_register_immutability";
 const OPERAND_ROUTING_INJECT_KIND: &str = "pico.semantic.decode.operand_index_routing";
@@ -327,6 +334,8 @@ fn mutate_records_for_injection(
             TIMESTAMP_INJECT_KIND
             | BOOL_INJECT_KIND
             | OP_SELECTOR_INJECT_KIND
+            | READ_WRITE_OP_SELECTOR_INJECT_KIND
+            | ECALL_ARG_INJECT_KIND
             | ZERO_REG_INJECT_KIND
             | OPERAND_ROUTING_INJECT_KIND
             | DEST_BINDING_INJECT_KIND
@@ -382,6 +391,7 @@ fn collect_observed_injection_sites(records: &[EmulationRecord]) -> BTreeMap<Str
             let cpu_anchor = event.clk as u64;
             if event.instruction.is_memory_instruction() {
                 record_site(&mut sites, TIMESTAMP_INJECT_KIND, memory_step);
+                record_site(&mut sites, READ_WRITE_OP_SELECTOR_INJECT_KIND, memory_step);
                 record_site(&mut sites, MEM_STORE_LOAD_INJECT_KIND, memory_step);
                 record_site(&mut sites, MEM_ADDR_ALIGN_INJECT_KIND, memory_step);
                 record_site(&mut sites, MEM_LOAD_VALUE_INJECT_KIND, memory_step);
@@ -414,6 +424,7 @@ fn collect_observed_injection_sites(records: &[EmulationRecord]) -> BTreeMap<Str
                 record_site(&mut sites, UPPER_IMM_INJECT_KIND, cpu_anchor);
             }
             if event.instruction.opcode == Opcode::ECALL {
+                record_site(&mut sites, ECALL_ARG_INJECT_KIND, cpu_step);
                 record_site(&mut sites, ECALL_WORD_INJECT_KIND, cpu_step);
             }
             cpu_step = cpu_step.saturating_add(1);
@@ -468,6 +479,17 @@ fn collect_observed_injection_sites(records: &[EmulationRecord]) -> BTreeMap<Str
     sites
 }
 
+fn ecall_syscall_id(event: &pico_vm::chips::chips::riscv_cpu::event::CpuEvent) -> Option<u32> {
+    if event.instruction.opcode != Opcode::ECALL {
+        return None;
+    }
+    match event.a_record {
+        Some(MemoryRecordEnum::Write(record)) => Some(record.prev_value),
+        Some(MemoryRecordEnum::Read(record)) => Some(record.value),
+        None => Some(event.a),
+    }
+}
+
 fn collect_executed_insns(
     records: &[EmulationRecord],
     words: &[u32],
@@ -483,6 +505,7 @@ fn collect_executed_insns(
             let Some(&word) = words.get(word_idx) else {
                 continue;
             };
+            let ecall_syscall_id = ecall_syscall_id(event);
             out.push(ExecutedInsn {
                 step_idx: out.len() as u64,
                 chunk: event.chunk,
@@ -495,6 +518,14 @@ fn collect_executed_insns(
                 b: event.b,
                 c: event.c,
                 memory: event.memory,
+                ecall_syscall_id,
+                ecall_operand_to_check: if ecall_syscall_id
+                    == Some(SyscallCode::HALT.syscall_id())
+                {
+                    Some(event.b)
+                } else {
+                    None
+                },
             });
         }
     }

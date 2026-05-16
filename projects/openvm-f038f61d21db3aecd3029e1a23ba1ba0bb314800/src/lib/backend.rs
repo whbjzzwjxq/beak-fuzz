@@ -36,12 +36,16 @@ fn build_vm_config() -> SdkVmConfig {
         .rv32m(Default::default())
         .io(Default::default())
         .build();
-    let force_volatile = std::env::var("BEAK_OPENVM_FORCE_VOLATILE")
+    let force_continuations = std::env::var("BEAK_OPENVM_FORCE_CONTINUATIONS")
         .ok()
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    let force_volatile = std::env::var("BEAK_OPENVM_FORCE_VOLATILE")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(!force_continuations);
     let mut sys_cfg = vm_config.system.config.clone().with_max_segment_len(256);
-    if !force_volatile {
+    if force_continuations && !force_volatile {
         sys_cfg = sys_cfg.with_continuations();
     } else {
         sys_cfg = sys_cfg.without_continuations();
@@ -392,6 +396,18 @@ impl OpenVmBackend {
         specs
     }
 
+    fn o25_variant_specs_for_hit(hit: &beak_core::trace::BucketHit, anchor: u64) -> Vec<String> {
+        let address_space = Self::detail_u64(hit, "address_space")
+            .or_else(|| Self::detail_u64(hit, "addr_space"))
+            .unwrap_or(u64::from(RV32_REGISTER_AS)) as u32;
+        let pointer = Self::detail_u64(hit, "pointer").unwrap_or(0) as u32;
+        let row_idx = Self::detail_u64(hit, "row_idx").unwrap_or(anchor) as u64;
+        vec![format!(
+            "mode=remap_boundary_cell,row_idx={row_idx},address_space={address_space},pointer={pointer},width=4,forged_address_space={address_space},forged_pointer={}",
+            1u32 << 29
+        )]
+    }
+
     fn o51_variant_specs() -> Vec<String> {
         let mut specs = Vec::new();
         specs.push("mode=bus_mem_as_other".to_string());
@@ -445,6 +461,25 @@ impl OpenVmBackend {
             {
                 anchor = store_step_idx;
             }
+        }
+        if bucket_id == semantic::memory::VOLATILE_BOUNDARY_RANGE.id {
+            return Self::o25_variant_specs_for_hit(hit, anchor)
+                .into_iter()
+                .map(|variant| SemanticInjectionCandidate {
+                    bucket_id: hit.bucket_id.clone(),
+                    trigger_signal_id: Some(
+                        TraceSignal::ObservedVolatileBoundaryRange.id().to_string(),
+                    ),
+                    semantic_class: semantic::memory::VOLATILE_BOUNDARY_RANGE
+                        .semantic_class
+                        .to_string(),
+                    inject_kind: inject_kind_with_variant(
+                        "openvm.semantic.memory.volatile_boundary_range",
+                        &variant,
+                    ),
+                    schedule: InjectionSchedule::Exact(anchor),
+                })
+                .collect();
         }
         let (semantic_class, inject_kind, fallback_schedule, wildcard_variant) =
             if bucket_id == semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id {
@@ -877,33 +912,6 @@ impl BenchmarkBackend for OpenVmBackend {
     ) -> Vec<SemanticInjectionCandidate> {
         let mut candidates: Vec<_> =
             hits.iter().flat_map(|hit| self.semantic_candidate_from_hit(hit)).collect();
-        let has_o25_candidate = candidates.iter().any(|candidate| {
-            candidate.semantic_class == semantic::memory::VOLATILE_BOUNDARY_RANGE.semantic_class
-        });
-        if !has_o25_candidate {
-            if let Some(steps) = self
-                .last_observed_injection_sites
-                .get("openvm.semantic.memory.volatile_boundary_range")
-            {
-                let schedule =
-                    InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, 0));
-                candidates.extend(
-                    Self::inject_kinds_for_base("openvm.semantic.memory.volatile_boundary_range")
-                        .into_iter()
-                        .map(|inject_kind| SemanticInjectionCandidate {
-                            bucket_id: semantic::memory::VOLATILE_BOUNDARY_RANGE.id.to_string(),
-                            trigger_signal_id: Some(
-                                TraceSignal::ObservedVolatileBoundaryRange.id().to_string(),
-                            ),
-                            semantic_class: semantic::memory::VOLATILE_BOUNDARY_RANGE
-                                .semantic_class
-                                .to_string(),
-                            inject_kind,
-                            schedule: schedule.clone(),
-                        }),
-                );
-            }
-        }
         candidates.sort_by_key(Self::semantic_candidate_priority);
         candidates
     }

@@ -1,0 +1,29 @@
+[package]
+name = "beak-nexus-41c6c608"
+version = "0.1.0"
+edition = "2021"
+description = "Nexus-specific beak binaries (commit 41c6c608)"
+publish = false
+
+[lib]
+path = "src/lib/mod.rs"
+
+[[bin]]
+name = "beak-fuzz"
+path = "src/bin/fuzz.rs"
+
+[[bin]]
+name = "beak-trace"
+path = "src/bin/trace.rs"
+
+[dependencies]
+beak-core = { path = "../../crates/beak-core" }
+clap = "4.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+nexus-common = { path = "../../beak-py/out/nexus-41c6c6080f46b97980053c47b078321225b4338a/nexus-src/common" }
+nexus-vm = { path = "../../beak-py/out/nexus-41c6c6080f46b97980053c47b078321225b4338a/nexus-src/vm" }
+nexus-vm-prover = { path = "../../beak-py/out/nexus-41c6c6080f46b97980053c47b078321225b4338a/nexus-src/prover" }
+
+[patch."https://github.com/starkware-libs/stwo"]
+stwo-prover = { path = "../../beak-py/out/nexus-41c6c6080f46b97980053c47b078321225b4338a/stwo-src/crates/prover" }

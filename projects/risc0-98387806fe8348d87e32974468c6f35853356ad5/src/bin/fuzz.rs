@@ -4,11 +4,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Arg, Command};
 use serde_json::json;
 
-use beak_core::fuzz::benchmark::{BenchmarkConfig, DEFAULT_RNG_SEED, run_benchmark_threaded};
+use beak_core::fuzz::benchmark::{run_benchmark_threaded, BenchmarkConfig, DEFAULT_RNG_SEED};
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
-use beak_risc0_98387806::RISC0_ORACLE_CODE_BASE;
 use beak_risc0_98387806::backend::Risc0Backend;
+use beak_risc0_98387806::RISC0_ORACLE_CODE_BASE;
 
 const ZKVM_COMMIT: &str = "98387806fe8348d87e32974468c6f35853356ad5";
 
@@ -21,7 +21,11 @@ fn workspace_root() -> PathBuf {
 
 fn resolve_path(root: &Path, arg: &str) -> PathBuf {
     let p = PathBuf::from(arg);
-    if p.is_absolute() { p } else { root.join(p) }
+    if p.is_absolute() {
+        p
+    } else {
+        root.join(p)
+    }
 }
 
 fn parse_u32_arg(value: &str, name: &str) -> u32 {
@@ -31,6 +35,11 @@ fn parse_u32_arg(value: &str, name: &str) -> u32 {
     } else {
         s.parse::<u32>().unwrap_or_else(|_| panic!("invalid {name}: {value}"))
     }
+}
+
+fn parse_u8_arg(value: &str, name: &str) -> u8 {
+    let parsed = parse_u32_arg(value, name);
+    u8::try_from(parsed).unwrap_or_else(|_| panic!("invalid {name}: {value}"))
 }
 
 fn parse_hex_word(value: &str) -> u32 {
@@ -54,18 +63,32 @@ fn collect_bin_words(matches: &clap::ArgMatches) -> Vec<u32> {
     out
 }
 
-fn write_inline_seed_jsonl(root: &Path, words: &[u32]) -> PathBuf {
+fn write_inline_seed_jsonl(
+    root: &Path,
+    words: &[u32],
+    frontend: &str,
+    v1compat_host_read_fill: u8,
+) -> PathBuf {
     let ts_millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
     let dir = root.join("storage/fuzzing_seeds");
     std::fs::create_dir_all(&dir).expect("create storage/fuzzing_seeds");
     let path =
         dir.join(format!(".tmp-inline-risc0-98387806-{ts_millis}-pid{}.jsonl", std::process::id()));
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("source".to_string(), json!("cli_bin"));
+    metadata.insert(
+        "label".to_string(),
+        json!(if frontend == "v1compat" { "inline_v1compat_user" } else { "inline_bin" }),
+    );
+    metadata.insert("risc0_frontend".to_string(), json!(frontend));
+    if frontend == "v1compat" {
+        metadata.insert("host_read_contract".to_string(), json!("fill_requested_buffer_with_byte"));
+        metadata.insert("host_read_fill_byte".to_string(), json!(v1compat_host_read_fill));
+        metadata.insert("postcondition".to_string(), json!("read_user_regs_addr"));
+    }
     let line = json!({
         "instructions": words,
-        "metadata": {
-            "source": "cli_bin",
-            "label": "inline_bin",
-        }
+        "metadata": metadata,
     })
     .to_string();
     std::fs::write(&path, format!("{line}\n")).expect("write inline seed jsonl");
@@ -81,6 +104,18 @@ fn main() {
                 .help("Hex encoded RISC-V instruction word(s). Can be repeated, or passed as a space/comma separated list.")
                 .num_args(1..)
                 .action(clap::ArgAction::Append),
+        )
+        .arg(
+            Arg::new("risc0_frontend")
+                .long("risc0-frontend")
+                .help("RISC0 execution frontend: kernel or v1compat.")
+                .default_value("kernel"),
+        )
+        .arg(
+            Arg::new("v1compat_host_read_fill")
+                .long("v1compat-host-read-fill")
+                .help("Byte used by the v1compat frontend host_read implementation.")
+                .default_value("0x12"),
         )
         .arg(
             Arg::new("seeds_jsonl")
@@ -126,11 +161,21 @@ fn main() {
         .get_matches();
 
     let root = workspace_root();
+    let frontend = matches.get_one::<String>("risc0_frontend").unwrap().as_str();
+    if !matches!(frontend, "kernel" | "v1compat") {
+        eprintln!("invalid --risc0-frontend: {frontend}; expected kernel or v1compat");
+        std::process::exit(2);
+    }
+    let v1compat_mode = frontend == "v1compat";
+    let v1compat_host_read_fill = parse_u8_arg(
+        matches.get_one::<String>("v1compat_host_read_fill").unwrap(),
+        "v1compat-host-read-fill",
+    );
     let inline_words = collect_bin_words(&matches);
     let seeds_path = if inline_words.is_empty() {
         resolve_path(&root, matches.get_one::<String>("seeds_jsonl").unwrap())
     } else {
-        write_inline_seed_jsonl(&root, &inline_words)
+        write_inline_seed_jsonl(&root, &inline_words, frontend, v1compat_host_read_fill)
     };
     let requested_initial_limit: usize =
         matches.get_one::<String>("initial_limit").unwrap().parse().expect("initial-limit");
@@ -198,7 +243,7 @@ fn main() {
         mutation_iterations,
         max_instructions,
         precheck_oracle_max_steps,
-        semantic_search_enabled: true,
+        semantic_search_enabled: !v1compat_mode,
         semantic_window_before,
         semantic_window_after,
         semantic_step_stride,
@@ -207,7 +252,13 @@ fn main() {
     };
 
     println!("oracle_code_base = 0x{RISC0_ORACLE_CODE_BASE:08x}");
-    let res = run_benchmark_threaded(cfg, move || Risc0Backend::new(max_instructions));
+    let res = run_benchmark_threaded(cfg, move || {
+        if v1compat_mode {
+            Risc0Backend::new_v1compat(max_instructions, v1compat_host_read_fill)
+        } else {
+            Risc0Backend::new(max_instructions)
+        }
+    });
     match res {
         Ok(out) => {
             println!("Wrote corpus JSONL: {}", out.corpus_path.display());

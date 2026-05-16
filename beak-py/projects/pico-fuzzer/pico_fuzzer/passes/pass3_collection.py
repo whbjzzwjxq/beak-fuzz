@@ -35,6 +35,288 @@ def _patch_columns(path: Path) -> None:
     path.write_text(c)
 
 
+def _patch_local_cf5_bridge_text(c: str) -> str:
+    local_helper = """
+const BEAK_CF5_INJECT_KIND: &str = "pico.semantic.control.ecall_argument_decomposition";
+
+#[derive(Clone, Copy)]
+struct BeakCf5MemoryBridge<F: PrimeField32> {
+    addr: u32,
+    initial_chunk: u32,
+    final_chunk: u32,
+    initial_clk: u32,
+    final_clk: u32,
+    alias_word: Word<F>,
+    alias_limbs: [u32; 4],
+}
+
+fn beak_ecall_syscall_id(event: &CpuEvent) -> u32 {
+    match event.a_record {
+        Some(MemoryRecordEnum::Write(record)) => record.prev_value,
+        Some(MemoryRecordEnum::Read(record)) => record.value,
+        None => event.a,
+    }
+}
+
+fn beak_cf5_alias_limbs<F: PrimeField32>(value: u32) -> Option<[u32; 4]> {
+    if (value >> 24) >= 0x78 {
+        return None;
+    }
+    let bytes = value.to_le_bytes();
+    Some([
+        bytes[0] as u32 + 256,
+        if bytes[1] == 0 { F::ORDER_U32 - 1 } else { bytes[1] as u32 - 1 },
+        bytes[2] as u32,
+        bytes[3] as u32,
+    ])
+}
+
+fn beak_cf5_alias_word<F: PrimeField32>(value: u32) -> Option<(Word<F>, [u32; 4])> {
+    let alias_limbs = beak_cf5_alias_limbs::<F>(value)?;
+    Some((Word(alias_limbs.map(F::from_canonical_u32)), alias_limbs))
+}
+
+fn beak_cf5_memory_bridge<F: PrimeField32>(
+    input: &EmulationRecord,
+    inject_step: u64,
+) -> Option<BeakCf5MemoryBridge<F>> {
+    for (idx, event) in input.cpu_events.iter().enumerate() {
+        if event.instruction.opcode != Opcode::ECALL {
+            continue;
+        }
+        if !(inject_step == u64::MAX
+            || inject_step == idx as u64
+            || inject_step == event.clk as u64
+            || inject_step == 0)
+        {
+            continue;
+        }
+        if beak_ecall_syscall_id(event) != SyscallCode::HALT.syscall_id() {
+            continue;
+        }
+        let Some(MemoryRecordEnum::Read(record)) = event.b_record else {
+            continue;
+        };
+        let (alias_word, alias_limbs) = beak_cf5_alias_word::<F>(event.b)?;
+        return Some(BeakCf5MemoryBridge {
+            addr: event.instruction.op_b,
+            initial_chunk: record.prev_chunk,
+            final_chunk: record.chunk,
+            initial_clk: record.prev_timestamp,
+            final_clk: record.timestamp,
+            alias_word,
+            alias_limbs,
+        });
+    }
+    None
+}
+
+fn beak_cf5_event_matches<F: PrimeField32>(
+    event: &MemoryLocalEvent,
+    bridge: &BeakCf5MemoryBridge<F>,
+) -> bool {
+    event.addr == bridge.addr
+        && event.initial_mem_access.chunk == bridge.initial_chunk
+        && event.initial_mem_access.timestamp == bridge.initial_clk
+        && event.final_mem_access.chunk == bridge.final_chunk
+        && event.final_mem_access.timestamp == bridge.final_clk
+}
+
+"""
+    ts2_local_helper = """
+const BEAK_TS2_INJECT_KIND: &str = "pico.semantic.memory.timestamped_load_path";
+
+#[derive(Clone, Copy)]
+struct BeakTs2MemoryPlan {
+    addr: u32,
+    initial_chunk: u32,
+    initial_timestamp: u32,
+    final_chunk: u32,
+    final_timestamp: u32,
+}
+
+fn beak_ts2_aligned_addr(event: &CpuEvent) -> u32 {
+    let memory_addr = event.b.wrapping_add(event.c);
+    memory_addr - memory_addr % WORD_SIZE as u32
+}
+
+fn beak_ts2_memory_plan(input: &EmulationRecord, inject_step: u64) -> Option<BeakTs2MemoryPlan> {
+    let events = input
+        .cpu_events
+        .iter()
+        .filter(|event| event.instruction.is_memory_instruction())
+        .collect::<Vec<_>>();
+    let mut first_store_by_addr = hashbrown::HashMap::<u32, usize>::new();
+    let mut fallback = None;
+
+    for (event_idx, event) in events.iter().enumerate() {
+        let Some(memory_record) = event.memory_record else {
+            continue;
+        };
+        let addr = beak_ts2_aligned_addr(event);
+        match memory_record {
+            MemoryRecordEnum::Write(write_record) => {
+                if write_record.prev_chunk == 0 && write_record.prev_timestamp == 0 {
+                    first_store_by_addr.entry(addr).or_insert(event_idx);
+                }
+            }
+            MemoryRecordEnum::Read(read_record) => {
+                let Some(&producer_event_idx) = first_store_by_addr.get(&addr) else {
+                    continue;
+                };
+                let Some(MemoryRecordEnum::Write(write_record)) =
+                    events[producer_event_idx].memory_record
+                else {
+                    continue;
+                };
+                if read_record.chunk != write_record.chunk
+                    || read_record.prev_chunk != write_record.chunk
+                    || read_record.prev_timestamp != write_record.timestamp
+                    || read_record.timestamp >= (1 << 24) - 16
+                {
+                    continue;
+                }
+                let plan = BeakTs2MemoryPlan {
+                    addr,
+                    initial_chunk: write_record.prev_chunk,
+                    initial_timestamp: write_record.prev_timestamp,
+                    final_chunk: if write_record.chunk == 0 { 1 } else { write_record.chunk },
+                    final_timestamp: read_record.timestamp,
+                };
+                let producer = events[producer_event_idx];
+                if inject_step == u64::MAX
+                    || inject_step == 0
+                    || inject_step == event_idx as u64
+                    || inject_step == producer_event_idx as u64
+                    || inject_step == event.clk as u64
+                    || inject_step == producer.clk as u64
+                {
+                    return Some(plan);
+                }
+                fallback.get_or_insert(plan);
+            }
+        }
+    }
+
+    fallback
+}
+
+fn beak_ts2_patched_local_event(
+    event: &MemoryLocalEvent,
+    plan: Option<BeakTs2MemoryPlan>,
+) -> MemoryLocalEvent {
+    let mut patched = event.clone();
+    if let Some(plan) = plan {
+        if patched.addr == plan.addr
+            && patched.initial_mem_access.chunk == plan.initial_chunk
+            && patched.initial_mem_access.timestamp == plan.initial_timestamp
+        {
+            patched.final_mem_access.chunk = plan.final_chunk;
+            patched.final_mem_access.timestamp = plan.final_timestamp;
+        }
+    }
+    patched
+}
+
+fn beak_ts2_local_event_matches(event: &MemoryLocalEvent, plan: Option<BeakTs2MemoryPlan>) -> bool {
+    plan.is_some_and(|plan| {
+        event.addr == plan.addr
+            && event.initial_mem_access.chunk == plan.initial_chunk
+            && event.initial_mem_access.timestamp == plan.initial_timestamp
+    })
+}
+
+"""
+    c = c.replace(
+        "    chips::{\n        chips::riscv_global::event::GlobalInteractionEvent,\n        utils::{next_power_of_two, zeroed_f_vec},\n    },\n    compiler::riscv::program::Program,\n    emulator::riscv::record::EmulationRecord,\n",
+        "    chips::{\n        chips::{\n            riscv_cpu::event::CpuEvent,\n            riscv_global::event::GlobalInteractionEvent,\n            riscv_memory::event::{MemoryLocalEvent, MemoryRecordEnum},\n        },\n        utils::{next_power_of_two, zeroed_f_vec},\n    },\n    compiler::{\n        riscv::{opcode::Opcode, program::Program},\n        word::Word,\n    },\n    emulator::riscv::{record::EmulationRecord, syscalls::SyscallCode},\n",
+    )
+    c = c.replace(
+        "    primitives::consts::LOCAL_MEMORY_DATAPAR,\n",
+        "    primitives::consts::{LOCAL_MEMORY_DATAPAR, WORD_SIZE},\n",
+    )
+    if "const BEAK_CF5_INJECT_KIND" not in c:
+        c = _inject_before(
+            c,
+            "impl<F: PrimeField32> ChipBehavior<F> for MemoryLocalChip<F> {",
+            local_helper,
+        )
+    if "const BEAK_TS2_INJECT_KIND" not in c:
+        c = _inject_before(
+            c,
+            "impl<F: PrimeField32> ChipBehavior<F> for MemoryLocalChip<F> {",
+            ts2_local_helper,
+        )
+    if "let beak_cf5_bridge = if inject_kind.as_deref() == Some(BEAK_CF5_INJECT_KIND)" not in c:
+        c = c.replace(
+            "        let mut injected_once = false;\n        let events = input.get_local_mem_events().collect::<Vec<_>>();\n",
+            "        let mut injected_once = false;\n        let beak_cf5_bridge = if inject_kind.as_deref() == Some(BEAK_CF5_INJECT_KIND) {\n            beak_cf5_memory_bridge::<F>(input, inject_step)\n        } else {\n            None\n        };\n        let events = input.get_local_mem_events().collect::<Vec<_>>();\n",
+            1,
+        )
+    if "let beak_ts2_plan = if inject_kind.as_deref() == Some(BEAK_TS2_INJECT_KIND)" not in c:
+        c = c.replace(
+            "        let beak_cf5_bridge = if inject_kind.as_deref() == Some(BEAK_CF5_INJECT_KIND) {\n            beak_cf5_memory_bridge::<F>(input, inject_step)\n        } else {\n            None\n        };\n        let events = input.get_local_mem_events().collect::<Vec<_>>();\n",
+            "        let beak_cf5_bridge = if inject_kind.as_deref() == Some(BEAK_CF5_INJECT_KIND) {\n            beak_cf5_memory_bridge::<F>(input, inject_step)\n        } else {\n            None\n        };\n        let beak_ts2_plan = if inject_kind.as_deref() == Some(BEAK_TS2_INJECT_KIND) {\n            beak_ts2_memory_plan(input, inject_step)\n        } else {\n            None\n        };\n        let events = input.get_local_mem_events().collect::<Vec<_>>();\n",
+            1,
+        )
+    if "beak_ts2_patched_local_event(raw_event, beak_ts2_plan)" not in c:
+        c = c.replace(
+            "                    let event = &events[base_event_idx + k];\n",
+            "                    let raw_event = &events[base_event_idx + k];\n                    if beak_ts2_local_event_matches(raw_event, beak_ts2_plan) {\n                        std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                        injected_once = true;\n                    }\n                    let patched_event = beak_ts2_patched_local_event(raw_event, beak_ts2_plan);\n                    let event = &patched_event;\n",
+            1,
+        )
+    if "beak_cf5_event_matches(event, bridge)" not in c:
+        c = c.replace(
+            "                    cols.addr = F::from_canonical_u32(event.addr);\n",
+            "                    if let Some(bridge) = beak_cf5_bridge\n                        .as_ref()\n                        .filter(|bridge| beak_cf5_event_matches(event, bridge))\n                    {\n                        cols.addr = F::from_canonical_u32(bridge.addr);\n                        cols.initial_chunk = F::from_canonical_u32(bridge.initial_chunk);\n                        cols.final_chunk = F::from_canonical_u32(bridge.final_chunk);\n                        cols.initial_clk = F::from_canonical_u32(bridge.initial_clk);\n                        cols.final_clk = F::from_canonical_u32(bridge.final_clk);\n                        cols.initial_value = bridge.alias_word.clone();\n                        cols.final_value = bridge.alias_word.clone();\n                        cols.is_real = F::ONE;\n                        cols.is_real_shadow = F::ONE;\n                        std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                        injected_once = true;\n                        continue;\n                    }\n                    cols.addr = F::from_canonical_u32(event.addr);\n",
+            1,
+        )
+    if "fn extra_record(&self, input: &Self::Record, extra: &mut Self::Record) {\n        let inject_kind = std::env::var" not in c:
+        c = c.replace(
+            "    fn extra_record(&self, input: &Self::Record, extra: &mut Self::Record) {\n        let local_mem_events = input.get_local_mem_events().collect::<Vec<_>>();\n",
+            "    fn extra_record(&self, input: &Self::Record, extra: &mut Self::Record) {\n        let inject_kind = std::env::var(\"BEAK_PICO_WITNESS_INJECT_KIND\").ok();\n        let inject_step = std::env::var(\"BEAK_PICO_WITNESS_INJECT_STEP\")\n            .ok()\n            .and_then(|s| s.parse::<u64>().ok())\n            .unwrap_or(0);\n        let beak_cf5_bridge = if inject_kind.as_deref() == Some(BEAK_CF5_INJECT_KIND) {\n            beak_cf5_memory_bridge::<F>(input, inject_step)\n        } else {\n            None\n        };\n        let local_mem_events = input.get_local_mem_events().collect::<Vec<_>>();\n",
+            1,
+        )
+    if "beak_ts2_memory_plan(input, inject_step)\n        } else {\n            None\n        };\n        let local_mem_events" not in c:
+        c = c.replace(
+            "        let beak_cf5_bridge = if inject_kind.as_deref() == Some(BEAK_CF5_INJECT_KIND) {\n            beak_cf5_memory_bridge::<F>(input, inject_step)\n        } else {\n            None\n        };\n        let local_mem_events = input.get_local_mem_events().collect::<Vec<_>>();\n",
+            "        let beak_cf5_bridge = if inject_kind.as_deref() == Some(BEAK_CF5_INJECT_KIND) {\n            beak_cf5_memory_bridge::<F>(input, inject_step)\n        } else {\n            None\n        };\n        let beak_ts2_plan = if inject_kind.as_deref() == Some(BEAK_TS2_INJECT_KIND) {\n            beak_ts2_memory_plan(input, inject_step)\n        } else {\n            None\n        };\n        let local_mem_events = input.get_local_mem_events().collect::<Vec<_>>();\n",
+            1,
+        )
+    c = c.replace("        let global_events: Vec<_> = local_mem_events\n", "        let mut global_events: Vec<_> = local_mem_events\n", 1)
+    if "let alias_bridge = beak_cf5_bridge.filter" not in c:
+        c = c.replace(
+            "                            let event = events[k];\n",
+            "                            let event = events[k];\n                            let alias_bridge = beak_cf5_bridge\n                                .as_ref()\n                                .filter(|bridge| beak_cf5_event_matches(event, bridge));\n                            let initial_limbs = alias_bridge.map_or(\n                                [\n                                    event.initial_mem_access.value & 255,\n                                    (event.initial_mem_access.value >> 8) & 255,\n                                    (event.initial_mem_access.value >> 16) & 255,\n                                    (event.initial_mem_access.value >> 24) & 255,\n                                ],\n                                |bridge| bridge.alias_limbs,\n                            );\n                            let final_limbs = alias_bridge.map_or(\n                                [\n                                    event.final_mem_access.value & 255,\n                                    (event.final_mem_access.value >> 8) & 255,\n                                    (event.final_mem_access.value >> 16) & 255,\n                                    (event.final_mem_access.value >> 24) & 255,\n                                ],\n                                |bridge| bridge.alias_limbs,\n                            );\n",
+            1,
+        )
+        c = c.replace(
+            "                                    event.initial_mem_access.value & 255,\n                                    (event.initial_mem_access.value >> 8) & 255,\n                                    (event.initial_mem_access.value >> 16) & 255,\n                                    (event.initial_mem_access.value >> 24) & 255,\n",
+            "                                    initial_limbs[0],\n                                    initial_limbs[1],\n                                    initial_limbs[2],\n                                    initial_limbs[3],\n",
+            1,
+        )
+        c = c.replace(
+            "                                    event.final_mem_access.value & 255,\n                                    (event.final_mem_access.value >> 8) & 255,\n                                    (event.final_mem_access.value >> 16) & 255,\n                                    (event.final_mem_access.value >> 24) & 255,\n",
+            "                                    final_limbs[0],\n                                    final_limbs[1],\n                                    final_limbs[2],\n                                    final_limbs[3],\n",
+            1,
+        )
+    if "for raw_event in local_mem_events" in c and "let patched_event = beak_ts2_patched_local_event(raw_event, beak_ts2_plan);" not in c:
+        c = c.replace(
+            "        for raw_event in local_mem_events {\n",
+            "        for raw_event in local_mem_events {\n            if beak_ts2_local_event_matches(raw_event, beak_ts2_plan) {\n                std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n            }\n            let patched_event = beak_ts2_patched_local_event(raw_event, beak_ts2_plan);\n            let event = &patched_event;\n",
+            1,
+        )
+    if "for raw_event in local_mem_events" in c:
+        c = c.replace("            let event = &raw_event;\n", "", 1)
+    if "extra.cpu_local_memory_access.push(beak_cf5_marker_event(bridge));" in c:
+        c = c.replace(
+            "        if let Some(bridge) = beak_cf5_bridge {\n            extra.cpu_local_memory_access.push(beak_cf5_marker_event(bridge));\n            global_events.push(beak_cf5_global_event(bridge, true));\n            global_events.push(beak_cf5_global_event(bridge, false));\n        }\n\n        extra.global_lookup_events.extend(global_events);\n",
+            "        extra.global_lookup_events.extend(global_events);\n",
+            1,
+        )
+    return c
+
+
 def _patch_local_traces(path: Path) -> None:
     c = path.read_text()
     if "BEAK_PICO_WITNESS_INJECT_KIND" in c:
@@ -47,6 +329,7 @@ def _patch_local_traces(path: Path) -> None:
                 "cols.is_real_shadow = F::from_canonical_u32(2);\n                        injected_once = true;",
                 "cols.is_real_shadow = F::from_canonical_u32(2);\n                        std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                        injected_once = true;",
             )
+        c = _patch_local_cf5_bridge_text(c)
         path.write_text(c)
         return
     c = _replace_once(
@@ -63,6 +346,7 @@ def _patch_local_traces(path: Path) -> None:
         "cols.is_real_shadow = F::from_canonical_u32(2);\n                        injected_once = true;",
         "cols.is_real_shadow = F::from_canonical_u32(2);\n                        std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                        injected_once = true;",
     )
+    c = _patch_local_cf5_bridge_text(c)
     path.write_text(c)
 
 
@@ -84,13 +368,366 @@ def _patch_local_constraints(path: Path) -> None:
 
 def _patch_rw_traces(path: Path) -> None:
     c = path.read_text()
-    memory_hook = """\n            // BEAK-INSERT pico semantic memory rw hooks\n            if !injected_once\n                && (inject_step == u64::MAX\n                    || inject_step == event_idx as u64\n                    || inject_step == event.clk as u64\n                    || (inject_step == 0 && !injected_once))\n            {\n                let mut beak_applied = false;\n                match inject_kind.as_deref() {\n                    Some(\"pico.semantic.memory.address_alignment_consistency\")\n                    | Some(\"pico.semantic.memory.address_progression_consistency\")\n                    | Some(\"pico.semantic.memory.address_boundary_range\") => {\n                        cols.addr_word[0] = cols.addr_word[0] + F::ONE;\n                        beak_applied = true;\n                    }\n                    Some(\"pico.semantic.memory.load_value_binding\")\n                    | Some(\"pico.semantic.memory.write_payload_consistency\")\n                    | Some(\"pico.semantic.memory.store_load_payload_flow\") => {\n                        cols.memory_access.access.value[0] = cols.memory_access.access.value[0] + F::ONE;\n                        beak_applied = true;\n                    }\n                    Some(\"pico.semantic.memory.kind_selector_consistency\") => {\n                        cols.instruction.is_lw = F::ONE - cols.instruction.is_lw;\n                        beak_applied = true;\n                    }\n                    _ => {}\n                }\n                if beak_applied {\n                    std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                    injected_once = true;\n                }\n            }\n"""
+    rw_helper = """
+fn flip_read_write_selector_pair<F: Field>(cols: &mut MemoryChipValueCols<F>) -> bool {
+    if cols.instruction.is_lw == F::ONE {
+        cols.instruction.is_lw = F::ZERO;
+        cols.instruction.is_sw = F::ONE;
+        true
+    } else if cols.instruction.is_sw == F::ONE {
+        cols.instruction.is_sw = F::ZERO;
+        cols.instruction.is_lw = F::ONE;
+        true
+    } else if cols.instruction.is_lb == F::ONE {
+        cols.instruction.is_lb = F::ZERO;
+        cols.instruction.is_sb = F::ONE;
+        true
+    } else if cols.instruction.is_lbu == F::ONE {
+        cols.instruction.is_lbu = F::ZERO;
+        cols.instruction.is_sb = F::ONE;
+        true
+    } else if cols.instruction.is_lh == F::ONE {
+        cols.instruction.is_lh = F::ZERO;
+        cols.instruction.is_sh = F::ONE;
+        true
+    } else if cols.instruction.is_lhu == F::ONE {
+        cols.instruction.is_lhu = F::ZERO;
+        cols.instruction.is_sh = F::ONE;
+        true
+    } else if cols.instruction.is_sb == F::ONE {
+        cols.instruction.is_sb = F::ZERO;
+        cols.instruction.is_lb = F::ONE;
+        true
+    } else if cols.instruction.is_sh == F::ONE {
+        cols.instruction.is_sh = F::ZERO;
+        cols.instruction.is_lh = F::ONE;
+        true
+    } else {
+        false
+    }
+}
+
+fn disable_non_x0_load_value_binding<F: Field>(cols: &mut MemoryChipValueCols<F>) -> bool {
+    let is_load = cols.instruction.is_lb == F::ONE
+        || cols.instruction.is_lbu == F::ONE
+        || cols.instruction.is_lh == F::ONE
+        || cols.instruction.is_lhu == F::ONE
+        || cols.instruction.is_lw == F::ONE;
+
+    if !is_load || cols.instruction.op_a_0 == F::ONE {
+        return false;
+    }
+
+    cols.instruction.op_a_0 = F::ONE;
+    cols.mem_value_is_pos_not_x0 = F::ZERO;
+    cols.mem_value_is_neg_not_x0 = F::ZERO;
+    true
+}
+
+"""
+    ts2_helper = """
+const BEAK_TS2_INJECT_KIND: &str = "pico.semantic.memory.timestamped_load_path";
+const BEAK_TS2_HIGH_TIMESTAMP: u32 = 2_013_265_921 - 16;
+
+#[derive(Clone, Copy)]
+struct BeakTs2ChainPlan {
+    producer_event_idx: usize,
+    consumer_event_idx: usize,
+    chain_chunk: u32,
+    final_timestamp: u32,
+    high_timestamp: u32,
+}
+
+impl BeakTs2ChainPlan {
+    fn involves(self, event_idx: usize) -> bool {
+        event_idx == self.producer_event_idx || event_idx == self.consumer_event_idx
+    }
+
+    fn is_consumer(self, event_idx: usize) -> bool {
+        event_idx == self.consumer_event_idx
+    }
+
+    fn final_timestamp(self) -> u32 {
+        self.final_timestamp
+    }
+}
+
+fn beak_ts2_aligned_addr(event: &CpuEvent) -> u32 {
+    let memory_addr = event.b.wrapping_add(event.c);
+    memory_addr - memory_addr % WORD_SIZE as u32
+}
+
+fn beak_ts2_chain_plan(events: &[&CpuEvent], inject_step: u64) -> Option<BeakTs2ChainPlan> {
+    let mut first_store_by_addr = HashMap::<u32, usize>::new();
+    let mut fallback = None;
+
+    for (event_idx, event) in events.iter().enumerate() {
+        let Some(memory_record) = event.memory_record else {
+            continue;
+        };
+        let addr = beak_ts2_aligned_addr(event);
+        match memory_record {
+            MemoryRecordEnum::Write(write_record) => {
+                if write_record.prev_chunk == 0 && write_record.prev_timestamp == 0 {
+                    first_store_by_addr.entry(addr).or_insert(event_idx);
+                }
+            }
+            MemoryRecordEnum::Read(read_record) => {
+                let Some(&producer_event_idx) = first_store_by_addr.get(&addr) else {
+                    continue;
+                };
+                let Some(MemoryRecordEnum::Write(write_record)) =
+                    events[producer_event_idx].memory_record
+                else {
+                    continue;
+                };
+                if read_record.chunk != write_record.chunk
+                    || read_record.prev_chunk != write_record.chunk
+                    || read_record.prev_timestamp != write_record.timestamp
+                    || read_record.timestamp >= (1 << 24) - 16
+                {
+                    continue;
+                }
+                let plan = BeakTs2ChainPlan {
+                    producer_event_idx,
+                    consumer_event_idx: event_idx,
+                    chain_chunk: if write_record.chunk == 0 { 1 } else { write_record.chunk },
+                    final_timestamp: read_record.timestamp,
+                    high_timestamp: BEAK_TS2_HIGH_TIMESTAMP,
+                };
+                let producer = events[producer_event_idx];
+                if inject_step == u64::MAX
+                    || inject_step == 0
+                    || inject_step == event_idx as u64
+                    || inject_step == producer_event_idx as u64
+                    || inject_step == event.clk as u64
+                    || inject_step == producer.clk as u64
+                {
+                    return Some(plan);
+                }
+                fallback.get_or_insert(plan);
+            }
+        }
+    }
+
+    fallback
+}
+
+fn beak_ts2_patched_event(
+    mut event: CpuEvent,
+    event_idx: usize,
+    plan: Option<BeakTs2ChainPlan>,
+) -> CpuEvent {
+    let Some(plan) = plan else {
+        return event;
+    };
+    if event_idx == plan.producer_event_idx {
+        event.chunk = plan.chain_chunk;
+        event.clk = plan.high_timestamp;
+        if let Some(MemoryRecordEnum::Write(mut record)) = event.memory_record {
+            record.chunk = plan.chain_chunk;
+            record.timestamp = plan.high_timestamp;
+            record.prev_chunk = 0;
+            record.prev_timestamp = 0;
+            event.memory_record = Some(MemoryRecordEnum::Write(record));
+        }
+    } else if event_idx == plan.consumer_event_idx {
+        event.chunk = plan.chain_chunk;
+        if let Some(MemoryRecordEnum::Read(mut record)) = event.memory_record {
+            record.chunk = plan.chain_chunk;
+            record.prev_chunk = plan.chain_chunk;
+            record.prev_timestamp = plan.high_timestamp;
+            event.memory_record = Some(MemoryRecordEnum::Read(record));
+        }
+    }
+    event
+}
+
+fn beak_ts2_field_diff_minus_one(current_timestamp: u32, high_timestamp: u32) -> u32 {
+    let p = 2_013_265_921u64;
+    ((p + current_timestamp as u64 - high_timestamp as u64 - 1) % p) as u32
+}
+
+fn beak_ts2_fix_consumer_diff_cols<F: PrimeField32>(
+    cols: &mut MemoryChipValueCols<F>,
+    event_idx: usize,
+    plan: Option<BeakTs2ChainPlan>,
+) {
+    let Some(plan) = plan else {
+        return;
+    };
+    if !plan.is_consumer(event_idx) {
+        return;
+    }
+    let diff_minus_one =
+        beak_ts2_field_diff_minus_one(plan.final_timestamp(), plan.high_timestamp);
+    cols.memory_access.access.diff_16bit_limb =
+        F::from_canonical_u16((diff_minus_one & 0xffff) as u16);
+    cols.memory_access.access.diff_8bit_limb =
+        F::from_canonical_u32((diff_minus_one >> 16) & 0xff);
+}
+
+fn beak_ts2_u16_range_event(value: u16) -> ByteLookupEvent {
+    ByteLookupEvent::new(
+        ByteOpcode::U16Range,
+        0,
+        0,
+        (value >> 8) as u8,
+        (value & u8::MAX as u16) as u8,
+    )
+}
+
+fn beak_ts2_u8_range_event(value: u8) -> ByteLookupEvent {
+    ByteLookupEvent::new(ByteOpcode::U8Range, 0, 0, value, 0)
+}
+
+fn beak_ts2_remove_one_event(events: &mut Vec<ByteLookupEvent>, target: ByteLookupEvent) {
+    if let Some(pos) = events.iter().position(|event| *event == target) {
+        events.remove(pos);
+    }
+}
+
+fn beak_ts2_add_consumer_range_events(
+    output: &mut impl ByteRecordBehavior,
+    mut row_events: Vec<ByteLookupEvent>,
+    event_idx: usize,
+    plan: Option<BeakTs2ChainPlan>,
+) {
+    let Some(plan) = plan else {
+        output.add_byte_lookup_events(row_events);
+        return;
+    };
+    if !plan.is_consumer(event_idx) {
+        output.add_byte_lookup_events(row_events);
+        return;
+    }
+    let old_diff_minus_one = plan
+        .final_timestamp()
+        .wrapping_sub(plan.high_timestamp)
+        .wrapping_sub(1);
+    beak_ts2_remove_one_event(
+        &mut row_events,
+        beak_ts2_u16_range_event((old_diff_minus_one & 0xffff) as u16),
+    );
+    beak_ts2_remove_one_event(
+        &mut row_events,
+        beak_ts2_u8_range_event(((old_diff_minus_one >> 16) & 0xff) as u8),
+    );
+    output.add_byte_lookup_events(row_events);
+    let diff_minus_one =
+        beak_ts2_field_diff_minus_one(plan.final_timestamp(), plan.high_timestamp);
+    output.add_u16_range_check((diff_minus_one & 0xffff) as u16);
+    output.add_u8_range_check(((diff_minus_one >> 16) & 0xff) as u8, 0);
+}
+
+"""
+    memory_hook = """
+            // BEAK-INSERT pico semantic memory rw hooks
+            if !injected_once
+                && (inject_step == u64::MAX
+                    || inject_step == event_idx as u64
+                    || inject_step == event.clk as u64
+                    || (inject_step == 0 && !injected_once))
+            {
+                let mut beak_applied = false;
+                match inject_kind.as_deref() {
+                    Some("pico.semantic.memory.address_alignment_consistency")
+                    | Some("pico.semantic.memory.address_progression_consistency")
+                    | Some("pico.semantic.memory.address_boundary_range") => {
+                        cols.addr_word[0] = cols.addr_word[0] + F::ONE;
+                        beak_applied = true;
+                    }
+                    Some("pico.semantic.memory.load_value_binding")
+                    | Some("pico.semantic.memory.write_payload_consistency")
+                    | Some("pico.semantic.memory.store_load_payload_flow") => {
+                        cols.memory_access.access.value[0] =
+                            cols.memory_access.access.value[0] + F::ONE;
+                        beak_applied = true;
+                    }
+                    Some("pico.semantic.memory.kind_selector_consistency") => {
+                        beak_applied = flip_read_write_selector_pair(cols);
+                    }
+                    Some("pico.semantic.exec.op_selector_binding.read_write") => {
+                        beak_applied = disable_non_x0_load_value_binding(cols);
+                    }
+                    _ => {}
+                }
+                if beak_applied {
+                    std::env::set_var("BEAK_PICO_WITNESS_INJECTION_APPLIED", "1");
+                    injected_once = true;
+                }
+            }
+"""
     c = c.replace(
         "    IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator, ParallelSlice,\n",
-        "    IntoParallelRefIterator, ParallelIterator, ParallelSlice,\n",
+        "    IntoParallelRefIterator, ParallelIterator,\n",
+    )
+    c = c.replace(
+        "use p3_maybe_rayon::prelude::{IntoParallelRefIterator, ParallelIterator, ParallelSlice};\n",
+        "use p3_maybe_rayon::prelude::{IntoParallelRefIterator, ParallelIterator};\n",
     )
     c = c.replace("use rayon::slice::ParallelSliceMut;\n", "")
-    if "pico.semantic.memory.timestamped_load_path" in c:
+    c = _inject_before(
+        c,
+        "impl<F: PrimeField32> ChipBehavior<F> for MemoryReadWriteChip<F> {",
+        rw_helper,
+    )
+    c = _inject_before(
+        c,
+        "impl<F: PrimeField32> ChipBehavior<F> for MemoryReadWriteChip<F> {",
+        ts2_helper,
+    )
+    c = c.replace(
+        'Some("pico.semantic.exec.op_selector_binding.read_write") => {\n'
+        "                        beak_applied = flip_read_write_selector_pair(cols);\n"
+        "                    }",
+        'Some("pico.semantic.exec.op_selector_binding.read_write") => {\n'
+        "                        beak_applied = disable_non_x0_load_value_binding(cols);\n"
+        "                    }",
+    )
+    c = _replace_once(
+        c,
+        "    fn extra_record(&self, input: &Self::Record, extra: &mut Self::Record) {\n        // We only care about the CPU events of memory instructions.\n        let mem_events = input\n            .cpu_events\n            .iter()\n            .filter(|e| e.instruction.is_memory_instruction())\n            .collect_vec();\n        // Generate the trace rows for each event.\n        let chunk_size = std::cmp::max(mem_events.len() / num_cpus::get(), 1);\n        let (alu_events, blu_events): (Vec<_>, Vec<_>) = mem_events\n            .par_chunks(chunk_size)\n            .map(|ops: &[&CpuEvent]| {\n                let mut alu = HashMap::new();\n                // The range map stores range (u8) lookup event -> multiplicity.\n                let mut blu = vec![];\n                ops.iter().for_each(|op| {\n                    let mut row = [F::ZERO; NUM_MEMORY_CHIP_VALUE_COLS];\n                    let cols: &mut MemoryChipValueCols<F> = row.as_mut_slice().borrow_mut();\n                    let alu_events = self.event_to_row(op, cols, &mut blu);\n                    alu_events.into_iter().for_each(|(key, value)| {\n                        alu.entry(key).or_insert(Vec::default()).extend(value);\n                    });\n                });\n                (alu, blu)\n            })\n            .unzip();\n        for alu_events_chunk in alu_events {\n            extra.add_alu_events(alu_events_chunk);\n        }\n        for blu_events_chunk in blu_events {\n            extra.add_byte_lookup_events(blu_events_chunk);\n        }\n    }\n",
+        "    fn extra_record(&self, input: &Self::Record, extra: &mut Self::Record) {\n        let inject_kind = std::env::var(\"BEAK_PICO_WITNESS_INJECT_KIND\").ok();\n        let inject_step = std::env::var(\"BEAK_PICO_WITNESS_INJECT_STEP\")\n            .ok()\n            .and_then(|s| s.parse::<u64>().ok())\n            .unwrap_or(0);\n        let mut injected_once = false;\n\n        // We only care about the CPU events of memory instructions.\n        let mem_events = input\n            .cpu_events\n            .iter()\n            .filter(|e| e.instruction.is_memory_instruction())\n            .collect_vec();\n        // Generate the trace rows for each event.\n        let mut alu_events = HashMap::new();\n        // The range map stores range (u8) lookup event -> multiplicity.\n        let mut blu_events = vec![];\n        for (event_idx, op) in mem_events.iter().enumerate() {\n            let mut row = [F::ZERO; NUM_MEMORY_CHIP_VALUE_COLS];\n            let cols: &mut MemoryChipValueCols<F> = row.as_mut_slice().borrow_mut();\n            let mut row_alu_events = self.event_to_row(op, cols, &mut blu_events);\n\n            if !injected_once\n                && inject_kind.as_deref()\n                    == Some(\"pico.semantic.exec.op_selector_binding.read_write\")\n                && (inject_step == u64::MAX\n                    || inject_step == event_idx as u64\n                    || inject_step == op.clk as u64\n                    || (inject_step == 0 && !injected_once))\n                && disable_non_x0_load_value_binding(cols)\n            {\n                row_alu_events.remove(&Opcode::SUB);\n                std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                injected_once = true;\n            }\n\n            row_alu_events.into_iter().for_each(|(key, value)| {\n                alu_events.entry(key).or_insert(Vec::default()).extend(value);\n            });\n        }\n        extra.add_alu_events(alu_events);\n        extra.add_byte_lookup_events(blu_events);\n    }\n",
+    )
+    if "beak_ts2_chain_plan(&mem_events" not in c:
+        c = _replace_once(
+            c,
+            "        let mem_events = input\n            .cpu_events\n            .iter()\n            .filter(|e| e.instruction.is_memory_instruction())\n            .collect_vec();\n        // Generate the trace rows for each event.\n",
+            "        let mem_events = input\n            .cpu_events\n            .iter()\n            .filter(|e| e.instruction.is_memory_instruction())\n            .collect_vec();\n        let beak_ts2_plan = if inject_kind.as_deref() == Some(BEAK_TS2_INJECT_KIND) {\n            beak_ts2_chain_plan(&mem_events, inject_step)\n        } else {\n            None\n        };\n        // Generate the trace rows for each event.\n",
+        )
+        c = _replace_once(
+            c,
+            "            let mut row_alu_events = self.event_to_row(op, cols, &mut blu_events);\n",
+            "            let patched = beak_ts2_patched_event(**op, event_idx, beak_ts2_plan);\n            if beak_ts2_plan.is_some_and(|plan| plan.involves(event_idx)) {\n                std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                injected_once = true;\n            }\n            let mut row_blu_events = vec![];\n            let mut row_alu_events = self.event_to_row(&patched, cols, &mut row_blu_events);\n            beak_ts2_fix_consumer_diff_cols(cols, event_idx, beak_ts2_plan);\n            beak_ts2_add_consumer_range_events(\n                &mut blu_events,\n                row_blu_events,\n                event_idx,\n                beak_ts2_plan,\n            );\n",
+        )
+    if "let mut patched = **event;" in c or "beak_ts2_chain_plan(&events" in c:
+        if "beak_ts2_chain_plan(&events" not in c:
+            c = _replace_once(
+                c,
+                "        let events: Vec<_> = input\n            .cpu_events\n            .par_iter()\n            .filter(|e| e.instruction.is_memory_instruction())\n            .collect();\n",
+                "        let events: Vec<_> = input\n            .cpu_events\n            .par_iter()\n            .filter(|e| e.instruction.is_memory_instruction())\n            .collect();\n        let beak_ts2_plan = if inject_kind.as_deref() == Some(BEAK_TS2_INJECT_KIND) {\n            beak_ts2_chain_plan(&events, inject_step)\n        } else {\n            None\n        };\n",
+            )
+            c = c.replace(
+                "            let mut patched = **event;\n            if inject_kind.as_deref() == Some(\"pico.semantic.memory.timestamped_load_path\")\n                && (inject_step == u64::MAX\n                    || inject_step == event_idx as u64\n                    || (inject_step == 0 && !injected_once))\n            {\n                if let Some(mut mr) = patched.memory_record {\n                    match &mut mr {\n                        MemoryRecordEnum::Read(r) => {\n                            r.prev_chunk = r.chunk;\n                            r.prev_timestamp = BABYBEAR_P - 16;\n                        }\n                        MemoryRecordEnum::Write(w) => {\n                            w.prev_chunk = w.chunk;\n                            w.prev_timestamp = BABYBEAR_P - 16;\n                        }\n                    }\n                    patched.memory_record = Some(mr);\n                    std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                    injected_once = true;\n                }\n            }\n",
+                "            let patched = beak_ts2_patched_event(**event, event_idx, beak_ts2_plan);\n            if beak_ts2_plan.is_some_and(|plan| plan.involves(event_idx)) {\n                std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                injected_once = true;\n            }\n",
+            )
+            c = c.replace(
+                "            self.event_to_row(&patched, cols, &mut vec![]);\n",
+                "            self.event_to_row(&patched, cols, &mut vec![]);\n            beak_ts2_fix_consumer_diff_cols(cols, event_idx, beak_ts2_plan);\n",
+                1,
+            )
+        if "beak_ts2_chain_plan(&mem_events" not in c:
+            c = _replace_once(
+                c,
+                "        let mem_events = input\n            .cpu_events\n            .iter()\n            .filter(|e| e.instruction.is_memory_instruction())\n            .collect_vec();\n        // Generate the trace rows for each event.\n",
+                "        let mem_events = input\n            .cpu_events\n            .iter()\n            .filter(|e| e.instruction.is_memory_instruction())\n            .collect_vec();\n        let beak_ts2_plan = if inject_kind.as_deref() == Some(BEAK_TS2_INJECT_KIND) {\n            beak_ts2_chain_plan(&mem_events, inject_step)\n        } else {\n            None\n        };\n        // Generate the trace rows for each event.\n",
+            )
+            c = _replace_once(
+                c,
+                "            let mut row_alu_events = self.event_to_row(op, cols, &mut blu_events);\n",
+                "            let patched = beak_ts2_patched_event(**op, event_idx, beak_ts2_plan);\n            if beak_ts2_plan.is_some_and(|plan| plan.involves(event_idx)) {\n                std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                injected_once = true;\n            }\n            let mut row_blu_events = vec![];\n            let mut row_alu_events = self.event_to_row(&patched, cols, &mut row_blu_events);\n            beak_ts2_fix_consumer_diff_cols(cols, event_idx, beak_ts2_plan);\n            beak_ts2_add_consumer_range_events(\n                &mut blu_events,\n                row_blu_events,\n                event_idx,\n                beak_ts2_plan,\n            );\n",
+            )
         if "BEAK_PICO_WITNESS_INJECTION_APPLIED" not in c:
             c = c.replace(
                 "patched.memory_record = Some(mr);\n                    injected_once = true;",
@@ -102,12 +739,17 @@ def _patch_rw_traces(path: Path) -> None:
     c = _replace_once(
         c,
         "    fn generate_main(&self, input: &Self::Record, _: &mut Self::Record) -> RowMajorMatrix<F> {\n        // Parallelize the initial filtering and collection\n",
-        "    fn generate_main(&self, input: &Self::Record, _: &mut Self::Record) -> RowMajorMatrix<F> {\n        const BABYBEAR_P: u32 = 2_013_265_921;\n        let inject_kind = std::env::var(\"BEAK_PICO_WITNESS_INJECT_KIND\").ok();\n        let inject_step = std::env::var(\"BEAK_PICO_WITNESS_INJECT_STEP\")\n            .ok()\n            .and_then(|s| s.parse::<u64>().ok())\n            .unwrap_or(0);\n        let mut injected_once = false;\n        // Parallelize the initial filtering and collection\n",
+        "    fn generate_main(&self, input: &Self::Record, _: &mut Self::Record) -> RowMajorMatrix<F> {\n        let inject_kind = std::env::var(\"BEAK_PICO_WITNESS_INJECT_KIND\").ok();\n        let inject_step = std::env::var(\"BEAK_PICO_WITNESS_INJECT_STEP\")\n            .ok()\n            .and_then(|s| s.parse::<u64>().ok())\n            .unwrap_or(0);\n        let mut injected_once = false;\n        // Parallelize the initial filtering and collection\n",
+    )
+    c = _replace_once(
+        c,
+        "        let events: Vec<_> = input\n            .cpu_events\n            .par_iter()\n            .filter(|e| e.instruction.is_memory_instruction())\n            .collect();\n",
+        "        let events: Vec<_> = input\n            .cpu_events\n            .par_iter()\n            .filter(|e| e.instruction.is_memory_instruction())\n            .collect();\n        let beak_ts2_plan = if inject_kind.as_deref() == Some(BEAK_TS2_INJECT_KIND) {\n            beak_ts2_chain_plan(&events, inject_step)\n        } else {\n            None\n        };\n",
     )
     c = _replace_once(
         c,
         "        // Use rayon's parallel slice operations for better chunk handling\n        values[..populate_len]\n            .par_chunks_mut(NUM_MEMORY_CHIP_VALUE_COLS)\n            .zip_eq(events.par_iter())\n            .for_each(|(row, event)| {\n                let cols: &mut MemoryChipValueCols<_> = row.borrow_mut();\n                self.event_to_row(event, cols, &mut vec![]);\n            });\n",
-        "        for (event_idx, (row, event)) in values[..populate_len]\n            .chunks_mut(NUM_MEMORY_CHIP_VALUE_COLS)\n            .zip(events.iter())\n            .enumerate()\n        {\n            let mut patched = **event;\n            if inject_kind.as_deref() == Some(\"pico.semantic.memory.timestamped_load_path\")\n                && (inject_step == u64::MAX\n                    || inject_step == event_idx as u64\n                    || (inject_step == 0 && !injected_once))\n            {\n                if let Some(mut mr) = patched.memory_record {\n                    match &mut mr {\n                        MemoryRecordEnum::Read(r) => {\n                            r.prev_chunk = r.chunk;\n                            r.prev_timestamp = BABYBEAR_P - 16;\n                        }\n                        MemoryRecordEnum::Write(w) => {\n                            w.prev_chunk = w.chunk;\n                            w.prev_timestamp = BABYBEAR_P - 16;\n                        }\n                    }\n                    patched.memory_record = Some(mr);\n                    injected_once = true;\n                }\n            }\n            let cols: &mut MemoryChipValueCols<_> = row.borrow_mut();\n            self.event_to_row(&patched, cols, &mut vec![]);\n        }\n",
+        "        for (event_idx, (row, event)) in values[..populate_len]\n            .chunks_mut(NUM_MEMORY_CHIP_VALUE_COLS)\n            .zip(events.iter())\n            .enumerate()\n        {\n            let patched = beak_ts2_patched_event(**event, event_idx, beak_ts2_plan);\n            if beak_ts2_plan.is_some_and(|plan| plan.involves(event_idx)) {\n                std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                injected_once = true;\n            }\n            let cols: &mut MemoryChipValueCols<_> = row.borrow_mut();\n            self.event_to_row(&patched, cols, &mut vec![]);\n            beak_ts2_fix_consumer_diff_cols(cols, event_idx, beak_ts2_plan);\n        }\n",
     )
     c = c.replace(
         "patched.memory_record = Some(mr);\n                    injected_once = true;",
@@ -119,44 +761,222 @@ def _patch_rw_traces(path: Path) -> None:
 
 def _patch_init_final_traces(path: Path) -> None:
     c = path.read_text()
-    if "pico.semantic.memory.timestamped_load_path" in c:
-        if "BEAK_PICO_WITNESS_INJECTION_APPLIED" not in c:
-            c = c.replace(
-                "timestamp = BABYBEAR_P - 8;\n                    injected_once = true;",
-                "timestamp = BABYBEAR_P - 8;\n                    std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                    injected_once = true;",
-            )
-            path.write_text(c)
-        return
-    c = _replace_once(
-        c,
-        "    fn generate_main(&self, input: &Self::Record, _: &mut Self::Record) -> RowMajorMatrix<F> {\n        let mut memory_events = match self.kind {\n",
-        "    fn generate_main(&self, input: &Self::Record, _: &mut Self::Record) -> RowMajorMatrix<F> {\n        const BABYBEAR_P: u32 = 2_013_265_921;\n        let inject_kind = std::env::var(\"BEAK_PICO_WITNESS_INJECT_KIND\").ok();\n        let inject_step = std::env::var(\"BEAK_PICO_WITNESS_INJECT_STEP\")\n            .ok()\n            .and_then(|s| s.parse::<u64>().ok())\n            .unwrap_or(0);\n        let mut injected_once = false;\n        let mut memory_events = match self.kind {\n",
-    )
-    c = _replace_once(
-        c,
-        "                    timestamp,\n",
-        "                    mut timestamp,\n",
-    )
-    c = _replace_once(
-        c,
-        "                } = memory_events[i];\n\n                let mut row = [F::ZERO; NUM_MEMORY_INITIALIZE_FINALIZE_COLS];\n",
-        "                } = memory_events[i];\n                if inject_kind.as_deref() == Some(\"pico.semantic.memory.timestamped_load_path\")\n                    && (inject_step == u64::MAX\n                        || inject_step == i as u64\n                        || (inject_step == 0 && !injected_once))\n                {\n                    timestamp = BABYBEAR_P - 8;\n                    injected_once = true;\n                }\n\n                let mut row = [F::ZERO; NUM_MEMORY_INITIALIZE_FINALIZE_COLS];\n",
-    )
+    ts2_helper = """
+const BEAK_TS2_INJECT_KIND: &str = "pico.semantic.memory.timestamped_load_path";
+const WORD_SIZE_U32: u32 = 4;
+
+#[derive(Clone, Copy)]
+struct BeakTs2FinalizePlan {
+    addr: u32,
+    final_chunk: u32,
+    final_timestamp: u32,
+}
+
+fn beak_ts2_aligned_addr(event: &CpuEvent) -> u32 {
+    let memory_addr = event.b.wrapping_add(event.c);
+    memory_addr - memory_addr % WORD_SIZE_U32
+}
+
+fn beak_ts2_finalize_plan(
+    input: &EmulationRecord,
+    inject_step: u64,
+) -> Option<BeakTs2FinalizePlan> {
+    let events = input
+        .cpu_events
+        .iter()
+        .filter(|event| event.instruction.is_memory_instruction())
+        .collect::<Vec<_>>();
+    let mut first_store_by_addr = hashbrown::HashMap::<u32, usize>::new();
+    let mut fallback = None;
+
+    for (event_idx, event) in events.iter().enumerate() {
+        let Some(memory_record) = event.memory_record else {
+            continue;
+        };
+        let addr = beak_ts2_aligned_addr(event);
+        match memory_record {
+            MemoryRecordEnum::Write(write_record) => {
+                if write_record.prev_chunk == 0 && write_record.prev_timestamp == 0 {
+                    first_store_by_addr.entry(addr).or_insert(event_idx);
+                }
+            }
+            MemoryRecordEnum::Read(read_record) => {
+                let Some(&producer_event_idx) = first_store_by_addr.get(&addr) else {
+                    continue;
+                };
+                let Some(MemoryRecordEnum::Write(write_record)) =
+                    events[producer_event_idx].memory_record
+                else {
+                    continue;
+                };
+                if read_record.chunk != write_record.chunk
+                    || read_record.prev_chunk != write_record.chunk
+                    || read_record.prev_timestamp != write_record.timestamp
+                    || read_record.timestamp >= (1 << 24) - 16
+                {
+                    continue;
+                }
+                let plan = BeakTs2FinalizePlan {
+                    addr,
+                    final_chunk: if write_record.chunk == 0 { 1 } else { write_record.chunk },
+                    final_timestamp: read_record.timestamp,
+                };
+                let producer = events[producer_event_idx];
+                if inject_step == u64::MAX
+                    || inject_step == 0
+                    || inject_step == event_idx as u64
+                    || inject_step == producer_event_idx as u64
+                    || inject_step == event.clk as u64
+                    || inject_step == producer.clk as u64
+                {
+                    return Some(plan);
+                }
+                fallback.get_or_insert(plan);
+            }
+        }
+    }
+
+    fallback
+}
+
+fn beak_ts2_patched_finalize_event(
+    mut event: MemoryInitializeFinalizeEvent,
+    kind: MemoryChipType,
+    plan: Option<BeakTs2FinalizePlan>,
+) -> MemoryInitializeFinalizeEvent {
+    if kind == MemoryChipType::Finalize {
+        if let Some(plan) = plan {
+            if event.addr == plan.addr {
+                event.chunk = plan.final_chunk;
+                event.timestamp = plan.final_timestamp;
+            }
+        }
+    }
+    event
+}
+
+fn beak_ts2_finalize_event_matches(
+    event: &MemoryInitializeFinalizeEvent,
+    kind: MemoryChipType,
+    plan: Option<BeakTs2FinalizePlan>,
+) -> bool {
+    kind == MemoryChipType::Finalize && plan.is_some_and(|plan| event.addr == plan.addr)
+}
+
+"""
+    c = _remove_init_final_ts2_hook(c)
     c = c.replace(
-        "timestamp = BABYBEAR_P - 8;\n                    injected_once = true;",
-        "timestamp = BABYBEAR_P - 8;\n                    std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                    injected_once = true;",
+        "    chips::chips::{\n        riscv_global::event::GlobalInteractionEvent,\n        riscv_memory::event::MemoryInitializeFinalizeEvent,\n    },\n",
+        "    chips::chips::{\n        riscv_cpu::event::CpuEvent,\n        riscv_global::event::GlobalInteractionEvent,\n        riscv_memory::event::{MemoryInitializeFinalizeEvent, MemoryRecordEnum},\n    },\n",
     )
+    if "const BEAK_TS2_INJECT_KIND" not in c:
+        c = _inject_before(
+            c,
+            "impl<F: PrimeField32> ChipBehavior<F> for MemoryInitializeFinalizeChip<F> {",
+            ts2_helper,
+        )
+    if "let beak_ts2_plan = if inject_kind.as_deref() == Some(BEAK_TS2_INJECT_KIND)" not in c:
+        c = c.replace(
+            "    fn generate_main(&self, input: &Self::Record, _: &mut Self::Record) -> RowMajorMatrix<F> {\n        let mut memory_events = match self.kind {\n",
+            "    fn generate_main(&self, input: &Self::Record, _: &mut Self::Record) -> RowMajorMatrix<F> {\n        let inject_kind = std::env::var(\"BEAK_PICO_WITNESS_INJECT_KIND\").ok();\n        let inject_step = std::env::var(\"BEAK_PICO_WITNESS_INJECT_STEP\")\n            .ok()\n            .and_then(|s| s.parse::<u64>().ok())\n            .unwrap_or(0);\n        let beak_ts2_plan = if inject_kind.as_deref() == Some(BEAK_TS2_INJECT_KIND) {\n            beak_ts2_finalize_plan(input, inject_step)\n        } else {\n            None\n        };\n        let mut memory_events = match self.kind {\n",
+            1,
+        )
+        c = c.replace(
+            "    fn extra_record(&self, input: &Self::Record, extra: &mut Self::Record) {\n        let mut memory_events = match self.kind {\n",
+            "    fn extra_record(&self, input: &Self::Record, extra: &mut Self::Record) {\n        let inject_kind = std::env::var(\"BEAK_PICO_WITNESS_INJECT_KIND\").ok();\n        let inject_step = std::env::var(\"BEAK_PICO_WITNESS_INJECT_STEP\")\n            .ok()\n            .and_then(|s| s.parse::<u64>().ok())\n            .unwrap_or(0);\n        let beak_ts2_plan = if inject_kind.as_deref() == Some(BEAK_TS2_INJECT_KIND) {\n            beak_ts2_finalize_plan(input, inject_step)\n        } else {\n            None\n        };\n        let mut memory_events = match self.kind {\n",
+            1,
+        )
     c = _replace_once(
         c,
         "        let rows: Vec<[F; NUM_MEMORY_INITIALIZE_FINALIZE_COLS]> = (0..memory_events.len())\n            .into_par_iter()\n            .map(|i| {\n",
         "        let rows: Vec<[F; NUM_MEMORY_INITIALIZE_FINALIZE_COLS]> = (0..memory_events.len())\n            .map(|i| {\n",
     )
+    if "beak_ts2_patched_finalize_event(memory_events[i].clone()" not in c:
+        c = c.replace(
+            "                let MemoryInitializeFinalizeEvent {\n                    addr,\n                    value,\n                    chunk,\n                    timestamp,\n                    used,\n                } = memory_events[i].clone();\n",
+            "                if beak_ts2_finalize_event_matches(&memory_events[i], self.kind, beak_ts2_plan) {\n                    std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                }\n                let event =\n                    beak_ts2_patched_finalize_event(memory_events[i].clone(), self.kind, beak_ts2_plan);\n                let MemoryInitializeFinalizeEvent {\n                    addr,\n                    value,\n                    chunk,\n                    timestamp,\n                    used,\n                } = event;\n",
+            1,
+        )
+    if "beak_ts2_patched_finalize_event(event, self.kind, beak_ts2_plan)" not in c:
+        c = c.replace(
+            "            .map(|event| {\n                let interaction_chunk = if is_receive { event.chunk } else { 0 };\n",
+            "            .map(|event| {\n                if beak_ts2_finalize_event_matches(&event, self.kind, beak_ts2_plan) {\n                    std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                }\n                let event = beak_ts2_patched_finalize_event(event, self.kind, beak_ts2_plan);\n                let interaction_chunk = if is_receive { event.chunk } else { 0 };\n",
+            1,
+        )
     path.write_text(c)
+
+
+def _remove_init_final_ts2_hook(c: str) -> str:
+    c = c.replace(
+        "        const BABYBEAR_P: u32 = 2_013_265_921;\n        let inject_kind = std::env::var(\"BEAK_PICO_WITNESS_INJECT_KIND\").ok();\n        let inject_step = std::env::var(\"BEAK_PICO_WITNESS_INJECT_STEP\")\n            .ok()\n            .and_then(|s| s.parse::<u64>().ok())\n            .unwrap_or(0);\n        let mut injected_once = false;\n",
+        "",
+    )
+    c = c.replace("                    mut timestamp,\n", "                    timestamp,\n")
+    c = c.replace(
+        "                if inject_kind.as_deref() == Some(\"pico.semantic.memory.timestamped_load_path\")\n                    && (inject_step == u64::MAX\n                        || inject_step == i as u64\n                        || (inject_step == 0 && !injected_once))\n                {\n                    timestamp = BABYBEAR_P - 8;\n                    std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                    injected_once = true;\n                }\n\n",
+        "",
+    )
+    c = c.replace(
+        "                if inject_kind.as_deref() == Some(\"pico.semantic.memory.timestamped_load_path\")\n                    && (inject_step == u64::MAX\n                        || inject_step == i as u64\n                        || (inject_step == 0 && !injected_once))\n                {\n                    timestamp = BABYBEAR_P - 8;\n                    injected_once = true;\n                }\n\n",
+        "",
+    )
+    return c
 
 
 def _patch_cpu_traces(path: Path) -> None:
     c = path.read_text()
-    cpu_hook = """\n            // BEAK-INSERT pico semantic cpu-row hooks\n            if !injected_once\n                && (inject_step == u64::MAX\n                    || inject_step == idx as u64\n                    || inject_step == event.clk as u64\n                    || (inject_step == 0 && !injected_once))\n            {\n                let mut beak_applied = false;\n                match inject_kind.as_deref() {\n                    Some(\"pico.semantic.decode.zero_register_immutability\")\n                        if event.instruction.op_a == 0 =>\n                    {\n                        cols.op_a_access.access.value[0] = cols.op_a_access.access.value[0] + F::ONE;\n                        beak_applied = true;\n                    }\n                    Some(\"pico.semantic.decode.operand_index_routing\") => {\n                        cols.instruction.op_b[0] = cols.instruction.op_b[0] + F::ONE;\n                        beak_applied = true;\n                    }\n                    Some(\"pico.semantic.exec.dest_binding\")\n                        if event.instruction.op_a != 0 =>\n                    {\n                        cols.op_a_access.access.value[0] = cols.op_a_access.access.value[0] + F::ONE;\n                        beak_applied = true;\n                    }\n                    Some(\"pico.semantic.decode.field_range\") => {\n                        cols.instruction.op_a[0] = cols.instruction.op_a[0] + F::from_canonical_u32(32);\n                        beak_applied = true;\n                    }\n                    Some(\"pico.semantic.decode.immediate_sign_extension\")\n                    | Some(\"pico.semantic.decode.format_immediate_reassembly\")\n                    | Some(\"pico.semantic.decode.upper_immediate_materialization\") => {\n                        if event.instruction.imm_c {\n                            cols.instruction.op_c[0] = cols.instruction.op_c[0] + F::ONE;\n                            beak_applied = true;\n                        } else if event.instruction.imm_b {\n                            cols.instruction.op_b[0] = cols.instruction.op_b[0] + F::ONE;\n                            beak_applied = true;\n                        }\n                    }\n                    Some(\"pico.semantic.control.entrypoint_binding\") if idx == 0 => {\n                        cols.pc = cols.pc + F::from_canonical_u32(4);\n                        beak_applied = true;\n                    }\n                    Some(\"pico.semantic.exec.control_flow_binding\") => {\n                        cols.next_pc = cols.next_pc + F::from_canonical_u32(4);\n                        beak_applied = true;\n                    }\n                    Some(\"pico.semantic.time.boundary_origin_consistency\") if idx == 0 => {\n                        cols.clk = cols.clk + F::ONE;\n                        beak_applied = true;\n                    }\n                    _ => {}\n                }\n                if beak_applied {\n                    std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                    injected_once = true;\n                }\n            }\n"""
+    cpu_helper = """
+fn beak_cf5_alias_word<F: Field>(value: u32) -> Option<Word<F>> {
+    if (value >> 24) >= 0x78 {
+        return None;
+    }
+    let mut word = Word::<F>::from(value);
+    word[0] = word[0] + F::from_canonical_u32(256);
+    word[1] = word[1] - F::ONE;
+    Some(word)
+}
+
+"""
+    cpu_hook = """\n            // BEAK-INSERT pico semantic cpu-row hooks\n            if !injected_once\n                && (inject_step == u64::MAX\n                    || inject_step == idx as u64\n                    || inject_step == event.clk as u64\n                    || (inject_step == 0 && !injected_once))\n            {\n                let mut beak_applied = false;\n                match inject_kind.as_deref() {\n                    Some(\"pico.semantic.decode.zero_register_immutability\")\n                        if event.instruction.op_a == 0 =>\n                    {\n                        cols.op_a_access.access.value[0] = cols.op_a_access.access.value[0] + F::ONE;\n                        beak_applied = true;\n                    }\n                    Some(\"pico.semantic.decode.operand_index_routing\") => {\n                        cols.instruction.op_b[0] = cols.instruction.op_b[0] + F::ONE;\n                        beak_applied = true;\n                    }\n                    Some(\"pico.semantic.exec.dest_binding\")\n                        if event.instruction.op_a != 0 =>\n                    {\n                        cols.op_a_access.access.value[0] = cols.op_a_access.access.value[0] + F::ONE;\n                        beak_applied = true;\n                    }\n                    Some(\"pico.semantic.decode.field_range\") => {\n                        cols.instruction.op_a[0] = cols.instruction.op_a[0] + F::from_canonical_u32(32);\n                        beak_applied = true;\n                    }\n                    Some(\"pico.semantic.decode.immediate_sign_extension\")\n                    | Some(\"pico.semantic.decode.format_immediate_reassembly\")\n                    | Some(\"pico.semantic.decode.upper_immediate_materialization\") => {\n                        if event.instruction.imm_c {\n                            cols.instruction.op_c[0] = cols.instruction.op_c[0] + F::ONE;\n                            beak_applied = true;\n                        } else if event.instruction.imm_b {\n                            cols.instruction.op_b[0] = cols.instruction.op_b[0] + F::ONE;\n                            beak_applied = true;\n                        }\n                    }\n                    Some(\"pico.semantic.control.entrypoint_binding\") if idx == 0 => {\n                        cols.pc = cols.pc + F::from_canonical_u32(4);\n                        beak_applied = true;\n                    }\n                    Some(\"pico.semantic.exec.control_flow_binding\") => {\n                        cols.next_pc = cols.next_pc + F::from_canonical_u32(4);\n                        beak_applied = true;\n                    }\n                    Some(\"pico.semantic.control.ecall_argument_decomposition\")\n                        if event.instruction.opcode == Opcode::ECALL =>\n                    {\n                        if cols.ecall_range_check_operand == F::ONE {\n                            if let Some(alias_word) = beak_cf5_alias_word::<F>(event.b) {\n                                cols.op_b_access.access.value = alias_word;\n                                let ecall_cols = cols.opcode_specific.ecall_mut();\n                                ecall_cols.operand_to_check = alias_word;\n                                ecall_cols.operand_range_check_cols.populate(event.b);\n                                beak_applied = true;\n                            }\n                        }\n                    }\n                    Some(\"pico.semantic.time.boundary_origin_consistency\") if idx == 0 => {\n                        cols.clk = cols.clk + F::ONE;\n                        beak_applied = true;\n                    }\n                    _ => {}\n                }\n                if beak_applied {\n                    std::env::set_var(\"BEAK_PICO_WITNESS_INJECTION_APPLIED\", \"1\");\n                    injected_once = true;\n                }\n            }\n"""
+    c = c.replace(
+        "    compiler::riscv::{\n        opcode::{ByteOpcode, Opcode},\n        program::Program,\n    },\n",
+        "    compiler::{\n        riscv::{\n            opcode::{ByteOpcode, Opcode},\n            program::Program,\n        },\n        word::Word,\n    },\n",
+    )
+    c = _inject_before(
+        c,
+        "impl<F: PrimeField32> ChipBehavior<F> for CpuChip<F> {",
+        cpu_helper,
+    )
+    old_cf5 = """                    Some(\"pico.semantic.control.ecall_argument_decomposition\")
+                        if event.instruction.opcode == Opcode::ECALL =>
+                    {
+                        if cols.ecall_range_check_operand == F::ONE {
+                            let ecall_cols = cols.opcode_specific.ecall_mut();
+                            ecall_cols.operand_to_check[0] =
+                                ecall_cols.operand_to_check[0] + F::ONE;
+                            beak_applied = true;
+                        } else {
+                            cols.op_b_access.access.value[0] =
+                                cols.op_b_access.access.value[0] + F::ONE;
+                            beak_applied = true;
+                        }
+                    }
+"""
+    new_cf5 = """                    Some(\"pico.semantic.control.ecall_argument_decomposition\")
+                        if event.instruction.opcode == Opcode::ECALL =>
+                    {
+                        if cols.ecall_range_check_operand == F::ONE {
+                            if let Some(alias_word) = beak_cf5_alias_word::<F>(event.b) {
+                                cols.op_b_access.access.value = alias_word;
+                                let ecall_cols = cols.opcode_specific.ecall_mut();
+                                ecall_cols.operand_to_check = alias_word;
+                                ecall_cols.operand_range_check_cols.populate(event.b);
+                                beak_applied = true;
+                            }
+                        }
+                    }
+"""
+    c = c.replace(old_cf5, new_cf5)
     if "pico.semantic.exec.op_selector_binding" in c:
         c = _inject_before(c, "        }\n\n        // Convert the trace", cpu_hook)
         path.write_text(c)

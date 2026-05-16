@@ -94,6 +94,16 @@ pub struct OpenVMMemoryFinalization {
     changed_from_initial: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenVMVolatileBoundaryRow {
+    seq: u64,
+    step_idx: u64,
+    row_idx: u64,
+    address_space: u32,
+    pointer: u32,
+    is_valid: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenVmMemoryObservationProfile {
     ImmediateSign,
@@ -748,6 +758,35 @@ fn derive_semantic_feedback(
     (bucket_hits, signals)
 }
 
+fn volatile_boundary_obligation_hits(row: &OpenVMVolatileBoundaryRow) -> Vec<BucketHit> {
+    if !row.is_valid {
+        return Vec::new();
+    }
+    ["rc3.volatile_addr_space", "rc3.volatile_pointer"]
+        .into_iter()
+        .map(|cell_id| {
+            BucketHit::semantic(
+                semantic::memory::VOLATILE_BOUNDARY_RANGE,
+                HashMap::from([
+                    ("obligation_id".to_string(), json!("rc3")),
+                    ("cell_id".to_string(), json!(cell_id)),
+                    ("op_idx".to_string(), json!(row.step_idx)),
+                    ("step_idx".to_string(), json!(row.step_idx)),
+                    ("backend".to_string(), json!("openvm")),
+                    ("commit".to_string(), json!(OPENVM_COMMIT)),
+                    ("trace_source".to_string(), json!("volatile_boundary")),
+                    ("volatile_seq".to_string(), json!(row.seq)),
+                    ("row_idx".to_string(), json!(row.row_idx)),
+                    ("addr_space".to_string(), json!(row.address_space)),
+                    ("address_space".to_string(), json!(row.address_space)),
+                    ("pointer".to_string(), json!(row.pointer)),
+                    ("is_valid".to_string(), json!(row.is_valid)),
+                ]),
+            )
+        })
+        .collect()
+}
+
 impl OpenVMTrace {
     fn ensure_len<T: Default + Clone>(v: &mut Vec<T>, idx: usize) {
         if v.len() <= idx {
@@ -765,6 +804,7 @@ impl OpenVMTrace {
         let mut memory_accesses = Vec::new();
         let mut memory_inits = Vec::new();
         let mut memory_finalizations = Vec::new();
+        let mut volatile_boundary_hits = Vec::new();
 
         for (idx, log) in logs.into_iter().enumerate() {
             let obj = log.as_object().ok_or_else(|| format!("log[{}]: not an object", idx))?;
@@ -808,18 +848,25 @@ impl OpenVMTrace {
                         .map_err(|e| format!("log[{}] memory_finalization: {}", idx, e))?;
                     memory_finalizations.push(finalization);
                 }
+                "volatile_boundary" => {
+                    let row: OpenVMVolatileBoundaryRow = serde_json::from_value(data)
+                        .map_err(|e| format!("log[{}] volatile_boundary: {}", idx, e))?;
+                    volatile_boundary_hits.extend(volatile_boundary_obligation_hits(&row));
+                }
                 _ => return Err(format!("log[{}]: unknown type \"{}\"", idx, ty)),
             }
         }
 
-        Ok(Self::new(
+        let mut trace = Self::new(
             instructions,
             chip_rows,
             interactions,
             memory_accesses,
             memory_inits,
             memory_finalizations,
-        ))
+        );
+        trace.bucket_hits.extend(volatile_boundary_hits);
+        Ok(trace)
     }
 
     pub fn from_logs_with_words(logs: Vec<Value>, words: &[u32]) -> Result<Self, String> {
@@ -3122,6 +3169,39 @@ mod tests {
             hit.bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id
                 && hit.details.get("cell_id").and_then(|v| v.as_str()) == Some("ts2.consecutive")
                 && hit.details.get("ts_diff").and_then(|v| v.as_u64()) == Some(1)
+        }));
+    }
+
+    #[test]
+    fn volatile_boundary_logs_emit_rc3_cells() {
+        let trace = OpenVMTrace::from_logs(vec![serde_json::json!({
+            "type": "volatile_boundary",
+            "data": {
+                "seq": 11,
+                "step_idx": 3,
+                "row_idx": 3,
+                "address_space": 2,
+                "pointer": 4096,
+                "is_valid": true
+            }
+        })])
+        .expect("trace");
+
+        assert!(trace.bucket_hits().iter().any(|hit| {
+            hit.bucket_id == semantic::memory::VOLATILE_BOUNDARY_RANGE.id
+                && hit.details.get("obligation_id").and_then(|v| v.as_str()) == Some("rc3")
+                && hit.details.get("cell_id").and_then(|v| v.as_str())
+                    == Some("rc3.volatile_addr_space")
+                && hit.details.get("addr_space").and_then(|v| v.as_u64()) == Some(2)
+                && hit.details.get("pointer").and_then(|v| v.as_u64()) == Some(4096)
+        }));
+        assert!(trace.bucket_hits().iter().any(|hit| {
+            hit.bucket_id == semantic::memory::VOLATILE_BOUNDARY_RANGE.id
+                && hit.details.get("obligation_id").and_then(|v| v.as_str()) == Some("rc3")
+                && hit.details.get("cell_id").and_then(|v| v.as_str())
+                    == Some("rc3.volatile_pointer")
+                && hit.details.get("addr_space").and_then(|v| v.as_u64()) == Some(2)
+                && hit.details.get("pointer").and_then(|v| v.as_u64()) == Some(4096)
         }));
     }
 }

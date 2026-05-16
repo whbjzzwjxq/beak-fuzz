@@ -321,6 +321,18 @@ pub mod row {
         "semantic.row.padding_interaction_send",
         SemanticBucketCategory::Row,
     );
+
+    pub const TABLE_POWER2_BOUNDARY: SemanticBucket = SemanticBucket::new(
+        "sem.row.table_power2_boundary",
+        "semantic.row.table_power2_boundary",
+        SemanticBucketCategory::Row,
+    );
+
+    pub const BYTECODE_TABLE_BOUNDARY: SemanticBucket = SemanticBucket::new(
+        "sem.row.bytecode_table_boundary",
+        "semantic.row.bytecode_table_boundary",
+        SemanticBucketCategory::Row,
+    );
 }
 
 pub mod time {
@@ -383,6 +395,8 @@ pub const ALL_BUCKETS: &[SemanticBucket] = &[
     memory::VOLATILE_BOUNDARY_RANGE,
     memory::WRITE_PAYLOAD_CONSISTENCY,
     row::PADDING_INTERACTION_SEND,
+    row::TABLE_POWER2_BOUNDARY,
+    row::BYTECODE_TABLE_BOUNDARY,
     time::BOUNDARY_ORIGIN_CONSISTENCY,
     time::MONOTONIC_ACCESS_ORDERING,
 ];

@@ -41,6 +41,71 @@ def _memory_instruction_trace_candidates(sp1_install_path: Path) -> list[Path]:
     return out
 
 
+def _syscall_instr_trace_candidates(sp1_install_path: Path) -> list[Path]:
+    out: list[Path] = []
+    for path in [
+        sp1_install_path
+        / "crates"
+        / "core"
+        / "machine"
+        / "src"
+        / "syscall"
+        / "instructions"
+        / "trace.rs"
+    ]:
+        if path.exists():
+            out.append(path)
+    return out
+
+
+def _sha_extend_trace_candidates(sp1_install_path: Path) -> list[Path]:
+    out: list[Path] = []
+    for path in [
+        sp1_install_path
+        / "crates"
+        / "core"
+        / "machine"
+        / "src"
+        / "syscall"
+        / "precompiles"
+        / "sha256"
+        / "extend"
+        / "trace.rs"
+    ]:
+        if path.exists():
+            out.append(path)
+    return out
+
+
+def _sha_compress_trace_candidates(sp1_install_path: Path) -> list[Path]:
+    out: list[Path] = []
+    for path in [
+        sp1_install_path
+        / "crates"
+        / "core"
+        / "machine"
+        / "src"
+        / "syscall"
+        / "precompiles"
+        / "sha256"
+        / "compress"
+        / "trace.rs"
+    ]:
+        if path.exists():
+            out.append(path)
+    return out
+
+
+def _memory_global_candidates(sp1_install_path: Path) -> list[Path]:
+    out: list[Path] = []
+    for path in [
+        sp1_install_path / "crates" / "core" / "machine" / "src" / "memory" / "global.rs"
+    ]:
+        if path.exists():
+            out.append(path)
+    return out
+
+
 def _byte_trace_candidates(sp1_install_path: Path) -> list[Path]:
     out: list[Path] = []
     for path in [sp1_install_path / "crates" / "core" / "machine" / "src" / "bytes" / "trace.rs"]:
@@ -60,6 +125,22 @@ def _byte_event_candidates(sp1_install_path: Path) -> list[Path]:
 def _execution_record_candidates(sp1_install_path: Path) -> list[Path]:
     out: list[Path] = []
     for path in [sp1_install_path / "crates" / "core" / "executor" / "src" / "record.rs"]:
+        if path.exists():
+            out.append(path)
+    return out
+
+
+def _syscall_context_candidates(sp1_install_path: Path) -> list[Path]:
+    out: list[Path] = []
+    for path in [
+        sp1_install_path
+        / "crates"
+        / "core"
+        / "executor"
+        / "src"
+        / "syscalls"
+        / "context.rs"
+    ]:
         if path.exists():
             out.append(path)
     return out
@@ -506,6 +587,620 @@ def _patch_v4_memory_instructions(path: Path) -> None:
     path.write_text(contents)
 
 
+def _patch_v4_syscall_instr_padding(path: Path) -> None:
+    contents = _ensure_fuzzer_utils_import(path, path.read_text())
+
+    helper_guard = "// BEAK-INSERT: sp1.v4.syscall_instr_padding_semantic_injection.helpers"
+    if helper_guard not in contents:
+        helper_anchor = "impl SyscallInstrsChip {\n"
+        helper_insert = """// BEAK-INSERT: sp1.v4.syscall_instr_padding_semantic_injection.helpers
+    fn beak_syscall_instr_padding_injection_kind(step: u64) -> Option<String> {
+        fuzzer_utils::matching_injection_kind(
+            "sp1.semantic.row.padding_interaction_send",
+            step,
+        )
+    }
+
+    fn beak_syscall_instr_padding_kind_matches(inject_kind: &str) -> bool {
+        fuzzer_utils::injection_variant_value(inject_kind, "site")
+            .map(|site| site == "syscall_instr_padding_send_table")
+            .unwrap_or(true)
+    }
+
+    fn beak_mutate_syscall_instr_padding_row<F: PrimeField32>(
+        cols: &mut SyscallInstrColumns<F>,
+    ) {
+        cols.op_a_access.prev_value[1] = F::one();
+    }
+    // BEAK-INSERT-END
+
+"""
+        contents = _insert_after_once(contents, helper_anchor, helper_insert, helper_guard)
+
+    guard = "// BEAK-INSERT: sp1.v4.syscall_instr_padding_semantic_injection.row"
+    anchor = """                    if idx < input.syscall_events.len() {
+                        let event = &input.syscall_events[idx];
+                        self.event_to_row(event, cols, &mut blu);
+                    }"""
+    insert = """
+
+                    // BEAK-INSERT: sp1.v4.syscall_instr_padding_semantic_injection.row
+                    if idx >= input.syscall_events.len() {
+                        if let Some(beak_kind) =
+                            Self::beak_syscall_instr_padding_injection_kind(idx as u64)
+                        {
+                            if Self::beak_syscall_instr_padding_kind_matches(beak_kind.as_str()) {
+                                Self::beak_mutate_syscall_instr_padding_row(cols);
+                            }
+                        }
+                    }
+                    // BEAK-INSERT-END"""
+    contents = _insert_after_once(contents, anchor, insert, guard)
+
+    path.write_text(contents)
+
+
+def _patch_v4_sha_extend_precompile(path: Path) -> None:
+    contents = _ensure_fuzzer_utils_import(path, path.read_text())
+
+    helper_guard = "// BEAK-INSERT: sp1.v4.sha_extend_precompile_address_injection.helpers"
+    if helper_guard not in contents:
+        helper_anchor = "impl ShaExtendChip {\n"
+        helper_insert = """// BEAK-INSERT: sp1.v4.sha_extend_precompile_address_injection.helpers
+    fn beak_precompile_address_injection_kind(step: u64) -> Option<String> {
+        let inject_kind =
+            std::env::var("BEAK_SP1_WITNESS_INJECT_KIND").unwrap_or_default();
+        if fuzzer_utils::injection_variant_value(
+            inject_kind.as_str(),
+            "site",
+        ) == Some("precompile_global_alignment")
+        {
+            return None;
+        }
+        fuzzer_utils::matching_injection_kind(
+            "sp1.semantic.memory.address_pointer_consistency",
+            step,
+        )
+    }
+
+    fn beak_variant_u32(inject_kind: &str, key: &str) -> Option<u32> {
+        fuzzer_utils::injection_variant_value(inject_kind, key)?.parse().ok()
+    }
+
+    fn beak_sha_extend_site(inject_kind: &str) -> &str {
+        let site = fuzzer_utils::injection_variant_value(inject_kind, "site").unwrap_or("addr_word");
+        if site == "precompile_slice" {
+            if fuzzer_utils::injection_variant_value(inject_kind, "phase")
+                .map(|phase| phase.starts_with("sha_extend."))
+                .unwrap_or(false)
+            {
+                return "sha_extend_w_slice";
+            }
+        }
+        site
+    }
+
+    fn beak_sha_extend_phase_ptr(w_ptr: u32, phase: &str) -> Option<u32> {
+        match phase {
+            "sha_extend.w_i_minus_15_read" => Some(w_ptr.wrapping_add(4)),
+            "sha_extend.w_i_minus_2_read" => Some(w_ptr.wrapping_add(56)),
+            "sha_extend.w_i_minus_16_read" => Some(w_ptr),
+            "sha_extend.w_i_minus_7_read" => Some(w_ptr.wrapping_add(36)),
+            "sha_extend.w_i_write" => Some(w_ptr.wrapping_add(64)),
+            _ => None,
+        }
+    }
+
+    fn beak_sha_extend_effective_ptr_matches(inject_kind: &str, w_ptr: u32) -> bool {
+        let Some(target_ptr) = Self::beak_variant_u32(inject_kind, "effective_ptr") else {
+            return true;
+        };
+        if let Some(phase) = fuzzer_utils::injection_variant_value(inject_kind, "phase") {
+            return Self::beak_sha_extend_phase_ptr(w_ptr, phase)
+                .map(|phase_ptr| phase_ptr == target_ptr)
+                .unwrap_or(false);
+        }
+        [
+            "sha_extend.w_i_minus_15_read",
+            "sha_extend.w_i_minus_2_read",
+            "sha_extend.w_i_minus_16_read",
+            "sha_extend.w_i_minus_7_read",
+            "sha_extend.w_i_write",
+        ]
+        .iter()
+        .filter_map(|phase| Self::beak_sha_extend_phase_ptr(w_ptr, phase))
+        .any(|phase_ptr| phase_ptr == target_ptr)
+    }
+
+    fn beak_mutate_sha_extend_address_row<F: PrimeField32>(
+        cols: &mut ShaExtendCols<F>,
+        inject_kind: &str,
+        w_ptr: u32,
+    ) {
+        let site = Self::beak_sha_extend_site(inject_kind);
+        match site {
+            "precompile_global_alignment" => {}
+            "sha_extend_w_slice" => {
+                if Self::beak_sha_extend_effective_ptr_matches(inject_kind, w_ptr) {
+                    cols.w_ptr = cols.w_ptr + F::one();
+                }
+            }
+            "access_value" => {
+                cols.w_i_minus_16.access.value[0] =
+                    cols.w_i_minus_16.access.value[0] + F::one();
+            }
+            "prev_clk" => {
+                cols.w_i_minus_16.access.prev_clk = cols.w_i_minus_16.access.prev_clk + F::one();
+            }
+            _ => {
+                cols.w_ptr = cols.w_ptr + F::one();
+            }
+        }
+    }
+    // BEAK-INSERT-END
+
+"""
+        contents = _insert_after_once(contents, helper_anchor, helper_insert, helper_guard)
+
+    guard = "// BEAK-INSERT: sp1.v4.sha_extend_precompile_address_injection.row"
+    insert = """
+
+            // BEAK-INSERT: sp1.v4.sha_extend_precompile_address_injection.row
+            if let Some(beak_kind) =
+                Self::beak_precompile_address_injection_kind(event.clk as u64)
+            {
+                Self::beak_mutate_sha_extend_address_row(cols, beak_kind.as_str(), event.w_ptr);
+            }
+            // BEAK-INSERT-END"""
+    anchor = "            cols.w_i.populate(event.w_i_writes[j], blu);"
+    contents = _insert_after_once(contents, anchor, insert, guard)
+
+    path.write_text(contents)
+
+
+def _patch_v4_sha_compress_precompile(path: Path) -> None:
+    contents = _ensure_fuzzer_utils_import(path, path.read_text())
+
+    helper_guard = "// BEAK-INSERT: sp1.v4.sha_compress_precompile_address_injection.helpers"
+    if helper_guard not in contents:
+        helper_anchor = "impl ShaCompressChip {\n"
+        helper_insert = """// BEAK-INSERT: sp1.v4.sha_compress_precompile_address_injection.helpers
+    fn beak_precompile_address_injection_kind(step: u64) -> Option<String> {
+        let inject_kind =
+            std::env::var("BEAK_SP1_WITNESS_INJECT_KIND").unwrap_or_default();
+        if fuzzer_utils::injection_variant_value(
+            inject_kind.as_str(),
+            "site",
+        ) == Some("precompile_global_alignment")
+        {
+            return None;
+        }
+        fuzzer_utils::matching_injection_kind(
+            "sp1.semantic.memory.address_pointer_consistency",
+            step,
+        )
+    }
+
+    fn beak_variant_u32(inject_kind: &str, key: &str) -> Option<u32> {
+        fuzzer_utils::injection_variant_value(inject_kind, key)?.parse().ok()
+    }
+
+    fn beak_sha_compress_site(inject_kind: &str) -> &str {
+        let site = fuzzer_utils::injection_variant_value(inject_kind, "site").unwrap_or("addr_word");
+        if site != "precompile_slice" {
+            return site;
+        }
+        match fuzzer_utils::injection_variant_value(inject_kind, "phase") {
+            Some("sha_compress.w_read") => "sha_compress_w_slice",
+            Some("sha_compress.h_read") | Some("sha_compress.h_write") => {
+                "sha_compress_h_slice"
+            }
+            _ => site,
+        }
+    }
+
+    fn beak_sha_compress_phase_matches(inject_kind: &str, phases: &[&str]) -> bool {
+        fuzzer_utils::injection_variant_value(inject_kind, "phase")
+            .map(|phase| phases.iter().any(|expected| phase == *expected))
+            .unwrap_or(true)
+    }
+
+    fn beak_sha_compress_effective_ptr_matches(
+        inject_kind: &str,
+        effective_ptr: u32,
+    ) -> bool {
+        Self::beak_variant_u32(inject_kind, "effective_ptr")
+            .map(|ptr| ptr == effective_ptr)
+            .unwrap_or(true)
+    }
+
+    fn beak_mutate_sha_compress_address_row<F: PrimeField32>(
+        cols: &mut ShaCompressCols<F>,
+        inject_kind: &str,
+        row_phase: &str,
+        w_ptr: u32,
+        h_ptr: u32,
+    ) {
+        let site = Self::beak_sha_compress_site(inject_kind);
+        match site {
+            "precompile_global_alignment" => {}
+            "sha_compress_w_slice" => {
+                if !Self::beak_sha_compress_phase_matches(inject_kind, &["sha_compress.w_read"]) {
+                    return;
+                }
+                if !Self::beak_sha_compress_effective_ptr_matches(inject_kind, w_ptr) {
+                    return;
+                }
+                cols.w_ptr = cols.w_ptr + F::one();
+                if row_phase == "sha_compress.w_read" {
+                    cols.mem_addr = cols.mem_addr + F::one();
+                }
+            }
+            "sha_compress_h_slice" => {
+                if !Self::beak_sha_compress_phase_matches(
+                    inject_kind,
+                    &["sha_compress.h_read", "sha_compress.h_write"],
+                ) {
+                    return;
+                }
+                if !Self::beak_sha_compress_effective_ptr_matches(inject_kind, h_ptr) {
+                    return;
+                }
+                cols.h_ptr = cols.h_ptr + F::one();
+                if row_phase == "sha_compress.h_read" || row_phase == "sha_compress.h_write" {
+                    cols.mem_addr = cols.mem_addr + F::one();
+                }
+            }
+            "w_ptr" => {
+                cols.w_ptr = cols.w_ptr + F::one();
+            }
+            "h_ptr" => {
+                cols.h_ptr = cols.h_ptr + F::one();
+            }
+            "access_value" => {
+                cols.mem.access.value[0] = cols.mem.access.value[0] + F::one();
+            }
+            "prev_clk" => {
+                cols.mem.access.prev_clk = cols.mem.access.prev_clk + F::one();
+            }
+            _ => {
+                cols.mem_addr = cols.mem_addr + F::one();
+            }
+        }
+    }
+    // BEAK-INSERT-END
+
+"""
+        contents = _insert_after_once(contents, helper_anchor, helper_insert, helper_guard)
+
+    inserts = [
+        (
+            "            cols.start = cols.is_real * cols.octet_num[0] * cols.octet[0];",
+            """
+            // BEAK-INSERT: sp1.v4.sha_compress_precompile_address_injection.init_row
+            if let Some(beak_kind) =
+                Self::beak_precompile_address_injection_kind(event.clk as u64)
+            {
+                Self::beak_mutate_sha_compress_address_row(
+                    cols,
+                    beak_kind.as_str(),
+                    "sha_compress.h_read",
+                    event.w_ptr,
+                    event.h_ptr,
+                );
+            }
+            // BEAK-INSERT-END
+""",
+            "// BEAK-INSERT: sp1.v4.sha_compress_precompile_address_injection.init_row",
+        ),
+        (
+            "            if rows.as_ref().is_some() {\n                rows.as_mut().unwrap().push(row);\n            }\n        }\n\n        let mut v:",
+            """            // BEAK-INSERT: sp1.v4.sha_compress_precompile_address_injection.compression_row
+            if let Some(beak_kind) =
+                Self::beak_precompile_address_injection_kind(event.clk as u64)
+            {
+                Self::beak_mutate_sha_compress_address_row(
+                    cols,
+                    beak_kind.as_str(),
+                    "sha_compress.w_read",
+                    event.w_ptr,
+                    event.h_ptr,
+                );
+            }
+            // BEAK-INSERT-END
+
+            if rows.as_ref().is_some() {
+                rows.as_mut().unwrap().push(row);
+            }
+        }
+
+        let mut v:""",
+            "// BEAK-INSERT: sp1.v4.sha_compress_precompile_address_injection.compression_row",
+        ),
+        (
+            "            cols.is_last_row = cols.octet[7] * cols.octet_num[9];\n            cols.start = cols.is_real * cols.octet_num[0] * cols.octet[0];",
+            """            cols.is_last_row = cols.octet[7] * cols.octet_num[9];
+            cols.start = cols.is_real * cols.octet_num[0] * cols.octet[0];
+            // BEAK-INSERT: sp1.v4.sha_compress_precompile_address_injection.finalize_row
+            if let Some(beak_kind) =
+                Self::beak_precompile_address_injection_kind(event.clk as u64)
+            {
+                Self::beak_mutate_sha_compress_address_row(
+                    cols,
+                    beak_kind.as_str(),
+                    "sha_compress.h_write",
+                    event.w_ptr,
+                    event.h_ptr,
+                );
+            }
+            // BEAK-INSERT-END""",
+            "// BEAK-INSERT: sp1.v4.sha_compress_precompile_address_injection.finalize_row",
+        ),
+    ]
+    for anchor, insert, guard in inserts:
+        if guard in contents:
+            continue
+        if anchor in contents:
+            if "let mut v:" in anchor:
+                contents = contents.replace(anchor, insert, 1)
+            else:
+                contents = contents.replace(anchor, insert, 1)
+
+    path.write_text(contents)
+
+
+def _patch_v4_memory_global(path: Path) -> None:
+    contents = _ensure_fuzzer_utils_import(path, path.read_text())
+
+    helper_guard = "// BEAK-INSERT: sp1.v4.global_memory_address_injection.helpers"
+    if helper_guard not in contents:
+        helper_anchor = """impl MemoryGlobalChip {
+    /// Creates a new memory chip with a certain type.
+    pub const fn new(kind: MemoryChipType) -> Self {
+        Self { kind }
+    }
+"""
+        helper_insert = """
+    // BEAK-INSERT: sp1.v4.global_memory_address_injection.helpers
+    fn beak_global_address_injection_kind(step: u64) -> Option<String> {
+        fuzzer_utils::matching_injection_kind(
+            "sp1.semantic.memory.address_pointer_consistency",
+            step,
+        )
+    }
+
+    fn beak_base_injection_kind(inject_kind: &str) -> &str {
+        inject_kind
+            .split_once("::")
+            .map(|(base, _)| base)
+            .unwrap_or(inject_kind)
+    }
+
+    fn beak_env_global_address_injection_kind() -> Option<(String, u64)> {
+        let inject_kind = std::env::var("BEAK_SP1_WITNESS_INJECT_KIND").ok()?;
+        if inject_kind.is_empty()
+            || Self::beak_base_injection_kind(inject_kind.as_str())
+                != "sp1.semantic.memory.address_pointer_consistency"
+        {
+            return None;
+        }
+        let inject_step = std::env::var("BEAK_SP1_WITNESS_INJECT_STEP")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        Some((inject_kind, inject_step))
+    }
+
+    fn beak_global_address_injection_kind_for_event(event_timestamp: u32) -> Option<String> {
+        if let Some(kind) = Self::beak_global_address_injection_kind(event_timestamp as u64) {
+            return Some(kind);
+        }
+        let (kind, _inject_step) = Self::beak_env_global_address_injection_kind()?;
+        if Self::beak_is_precompile_global_alignment(kind.as_str()) {
+            return Some(kind);
+        }
+        None
+    }
+
+    fn beak_mark_global_address_injection(inject_kind: &str, event_timestamp: u32) {
+        let step = if Self::beak_is_precompile_global_alignment(inject_kind) {
+            Self::beak_env_global_address_injection_kind()
+                .map(|(_, step)| step)
+                .unwrap_or(event_timestamp as u64)
+        } else {
+            event_timestamp as u64
+        };
+        let _ = fuzzer_utils::matching_injection_kind(
+            "sp1.semantic.memory.address_pointer_consistency",
+            step,
+        );
+    }
+
+    fn beak_variant_u32(inject_kind: &str, key: &str) -> Option<u32> {
+        fuzzer_utils::injection_variant_value(inject_kind, key)?.parse().ok()
+    }
+
+    fn beak_variant_u64(inject_kind: &str, key: &str) -> Option<u64> {
+        fuzzer_utils::injection_variant_value(inject_kind, key)?.parse().ok()
+    }
+
+    fn beak_is_precompile_global_alignment(inject_kind: &str) -> bool {
+        fuzzer_utils::injection_variant_value(inject_kind, "site")
+            == Some("precompile_global_alignment")
+    }
+
+    fn beak_precompile_slice_len_words(inject_kind: &str) -> Option<u32> {
+        if let Some(len) = Self::beak_variant_u32(inject_kind, "slice_len_words") {
+            if len > 0 {
+                return Some(len);
+            }
+        }
+        match fuzzer_utils::injection_variant_value(inject_kind, "phase") {
+            Some("sha_compress.w_read") => Some(64),
+            Some("sha_compress.h_read") | Some("sha_compress.h_write") => Some(8),
+            _ => None,
+        }
+    }
+
+    fn beak_precompile_global_alignment_addr(
+        event_addr: u32,
+        inject_kind: &str,
+    ) -> Option<u32> {
+        if !Self::beak_is_precompile_global_alignment(inject_kind) {
+            return None;
+        }
+        if let Some(source) = fuzzer_utils::injection_variant_value(inject_kind, "trace_source") {
+            if source != "precompile_events" {
+                return None;
+            }
+        }
+        let target_ptr = Self::beak_variant_u32(inject_kind, "effective_ptr")?;
+        let len_words = Self::beak_precompile_slice_len_words(inject_kind)?;
+        let aligned_start = target_ptr.wrapping_sub(target_ptr % 4);
+        let span = (len_words as u64).saturating_mul(4);
+        let event_addr_u64 = event_addr as u64;
+        let aligned_start_u64 = aligned_start as u64;
+        if event_addr_u64 < aligned_start_u64
+            || event_addr_u64 >= aligned_start_u64.saturating_add(span)
+        {
+            return None;
+        }
+        let delta = event_addr_u64.saturating_sub(aligned_start_u64);
+        if delta % 4 != 0 {
+            return None;
+        }
+        Some(target_ptr.wrapping_add(delta as u32))
+    }
+
+    fn beak_global_phase(&self) -> &'static str {
+        match self.kind {
+            MemoryChipType::Initialize => "initialize",
+            MemoryChipType::Finalize => "finalize",
+        }
+    }
+
+    fn beak_global_trace_source(&self) -> &'static str {
+        match self.kind {
+            MemoryChipType::Initialize => "global_memory_initialize_event",
+            MemoryChipType::Finalize => "global_memory_finalize_event",
+        }
+    }
+
+    fn beak_global_event_matches(
+        &self,
+        event: &MemoryInitializeFinalizeEvent,
+        event_idx: u64,
+        inject_kind: &str,
+    ) -> bool {
+        if event.used == 0 {
+            return false;
+        }
+        if Self::beak_is_precompile_global_alignment(inject_kind) {
+            return Self::beak_precompile_global_alignment_addr(event.addr, inject_kind).is_some();
+        }
+        if fuzzer_utils::injection_variant_value(inject_kind, "site") != Some("global_event") {
+            return false;
+        }
+        if let Some(phase) = fuzzer_utils::injection_variant_value(inject_kind, "phase") {
+            if phase != self.beak_global_phase() {
+                return false;
+            }
+        }
+        if let Some(source) = fuzzer_utils::injection_variant_value(inject_kind, "trace_source") {
+            if source != self.beak_global_trace_source() {
+                return false;
+            }
+        }
+        if let Some(ptr) = Self::beak_variant_u32(inject_kind, "effective_ptr") {
+            if ptr != event.addr {
+                return false;
+            }
+        }
+        if let Some(target_event_idx) = Self::beak_variant_u64(inject_kind, "event_idx") {
+            if target_event_idx != event_idx {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn beak_mutate_global_address_event(
+        event: &mut MemoryInitializeFinalizeEvent,
+        inject_kind: &str,
+    ) {
+        if let Some(addr) = Self::beak_precompile_global_alignment_addr(event.addr, inject_kind) {
+            event.addr = addr;
+        } else {
+            event.addr = event.addr.wrapping_add(1);
+        }
+    }
+
+    fn beak_apply_global_address_injection(
+        &self,
+        memory_events: &mut [MemoryInitializeFinalizeEvent],
+    ) {
+        for (event_idx, event) in memory_events.iter_mut().enumerate() {
+            if let Some(beak_kind) =
+                Self::beak_global_address_injection_kind_for_event(event.timestamp)
+            {
+                if self.beak_global_event_matches(event, event_idx as u64, beak_kind.as_str()) {
+                    Self::beak_mark_global_address_injection(beak_kind.as_str(), event.timestamp);
+                    Self::beak_mutate_global_address_event(event, beak_kind.as_str());
+                }
+            }
+        }
+    }
+
+    fn beak_mutate_global_address_row<F: PrimeField32>(
+        cols: &mut MemoryInitCols<F>,
+        inject_kind: &str,
+    ) {
+        let site = fuzzer_utils::injection_variant_value(inject_kind, "site").unwrap_or("addr_word");
+        match site {
+            "global_event" => {}
+            "precompile_global_alignment" => {}
+            "access_value" => {
+                cols.value[0] = F::one() - cols.value[0];
+            }
+            "prev_clk" => {
+                cols.timestamp = cols.timestamp + F::one();
+            }
+            _ => {
+                cols.addr = cols.addr + F::one();
+            }
+        }
+    }
+    // BEAK-INSERT-END
+"""
+        contents = _insert_after_once(contents, helper_anchor, helper_insert, helper_guard)
+
+    guard = "// BEAK-INSERT: sp1.v4.global_memory_address_injection.row"
+    insert = """
+
+                // BEAK-INSERT: sp1.v4.global_memory_address_injection.row
+                if used != 0 {
+                    if let Some(beak_kind) =
+                        Self::beak_global_address_injection_kind(timestamp as u64)
+                    {
+                        Self::beak_mutate_global_address_row(cols, beak_kind.as_str());
+                    }
+                }
+                // BEAK-INSERT-END"""
+    anchor = "                cols.is_real = F::from_canonical_u32(used);"
+    contents = _insert_after_once(contents, anchor, insert, guard)
+
+    apply_guard = "self.beak_apply_global_address_injection(&mut memory_events);"
+    if apply_guard not in contents:
+        anchor = """        let mut memory_events = match self.kind {
+            MemoryChipType::Initialize => input.global_memory_initialize_events.clone(),
+            MemoryChipType::Finalize => input.global_memory_finalize_events.clone(),
+        };
+"""
+        contents = contents.replace(anchor, anchor + f"        {apply_guard}\n")
+
+    path.write_text(contents)
+
+
 def _patch_v4_byte_trace(path: Path) -> None:
     contents = _ensure_fuzzer_utils_import(path, path.read_text())
     if "NUM_BYTE_OPS" not in contents:
@@ -630,6 +1325,175 @@ fn beak_execution_record_byte_lookup_count(blu_event: ByteLookupEvent, count: us
                 // BEAK-INSERT-END"""
     if map_guard not in contents and map_anchor in contents:
         contents = contents.replace(map_anchor, map_insert, 1)
+
+    path.write_text(contents)
+
+
+def _patch_v4_syscall_context(path: Path) -> None:
+    contents = _ensure_fuzzer_utils_import(path, path.read_text())
+
+    helper_guard = "// BEAK-INSERT: sp1.v4.precompile_slice_executor_address_injection.helpers"
+    helper_anchor = "impl<'a, 'b> SyscallContext<'a, 'b> {\n"
+    helper_insert = """// BEAK-INSERT: sp1.v4.precompile_slice_executor_address_injection.helpers
+    const BEAK_MEMORY_ADDRESS_INJECT_KIND: &'static str =
+        "sp1.semantic.memory.address_pointer_consistency";
+    const BEAK_BABYBEAR_FIELD_MODULUS: u64 = 2_013_265_921;
+
+    fn beak_variant_u32(inject_kind: &str, key: &str) -> Option<u32> {
+        fuzzer_utils::injection_variant_value(inject_kind, key)?.parse().ok()
+    }
+
+    fn beak_base_injection_kind(inject_kind: &str) -> &str {
+        inject_kind
+            .split_once("::")
+            .map(|(base, _)| base)
+            .unwrap_or(inject_kind)
+    }
+
+    fn beak_precompile_phase_matches_access(inject_kind: &str, access: &str) -> bool {
+        let Some(phase) = fuzzer_utils::injection_variant_value(inject_kind, "phase") else {
+            return true;
+        };
+        match access {
+            "read" => phase.ends_with("_read"),
+            "write" => phase.ends_with("_write"),
+            _ => true,
+        }
+    }
+
+    fn beak_precompile_slice_site_matches(inject_kind: &str, access: &str) -> bool {
+        let site = fuzzer_utils::injection_variant_value(inject_kind, "site")
+            .unwrap_or("precompile_slice");
+        let phase = fuzzer_utils::injection_variant_value(inject_kind, "phase");
+        match site {
+            "precompile_slice" => true,
+            "sha_compress_w_slice" => {
+                access == "read" && phase.map(|p| p == "sha_compress.w_read").unwrap_or(true)
+            }
+            "sha_compress_h_slice" => phase
+                .map(|p| {
+                    (access == "read" && p == "sha_compress.h_read")
+                        || (access == "write" && p == "sha_compress.h_write")
+                })
+                .unwrap_or(true),
+            "sha_extend_w_slice" => phase
+                .map(|p| p.starts_with("sha_extend.") && Self::beak_precompile_phase_matches_access(inject_kind, access))
+                .unwrap_or(true),
+            _ => false,
+        }
+    }
+
+    fn beak_precompile_slice_crosses_field(addr: u32, len: usize) -> bool {
+        len > 0
+            && (addr as u64)
+                .saturating_add((len as u64).saturating_mul(4))
+                > Self::BEAK_BABYBEAR_FIELD_MODULUS
+    }
+
+    fn beak_precompile_slice_address_injection_kind(
+        &self,
+        addr: u32,
+        len: usize,
+        access: &str,
+    ) -> Option<String> {
+        let inject_kind =
+            std::env::var("BEAK_SP1_WITNESS_INJECT_KIND").unwrap_or_default();
+        let inject_step = std::env::var("BEAK_SP1_WITNESS_INJECT_STEP")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        if Self::beak_base_injection_kind(inject_kind.as_str())
+            != Self::BEAK_MEMORY_ADDRESS_INJECT_KIND
+            || inject_step != self.clk as u64
+        {
+            return None;
+        }
+        if !Self::beak_precompile_slice_site_matches(&inject_kind, access) {
+            return None;
+        }
+        if let Some(expected_access) = fuzzer_utils::injection_variant_value(&inject_kind, "access")
+        {
+            if expected_access != access {
+                return None;
+            }
+        }
+        if !Self::beak_precompile_phase_matches_access(&inject_kind, access) {
+            return None;
+        }
+        if let Some(target_ptr) = Self::beak_variant_u32(&inject_kind, "effective_ptr") {
+            if target_ptr != addr {
+                return None;
+            }
+        }
+        if len == 0 {
+            return None;
+        }
+        fuzzer_utils::matching_injection_kind(
+            Self::BEAK_MEMORY_ADDRESS_INJECT_KIND,
+            self.clk as u64,
+        )
+    }
+
+    fn beak_precompile_slice_addr(addr: u32, lane: usize, inject_kind: Option<&str>) -> u32 {
+        let raw = (addr as u64).saturating_add((lane as u64).saturating_mul(4));
+        if let Some(kind) = inject_kind {
+            if raw >= Self::BEAK_BABYBEAR_FIELD_MODULUS
+                || Self::beak_precompile_slice_crosses_field(addr, lane.saturating_add(1))
+            {
+                return (raw % Self::BEAK_BABYBEAR_FIELD_MODULUS) as u32;
+            }
+            if Self::beak_precompile_slice_site_matches(kind, "read")
+                || Self::beak_precompile_slice_site_matches(kind, "write")
+            {
+                return (raw as u32).wrapping_add(1);
+            }
+        }
+        raw as u32
+    }
+    // BEAK-INSERT-END
+
+"""
+    contents = _insert_after_once(contents, helper_anchor, helper_insert, helper_guard)
+
+    mr_anchor = """        let mut records = Vec::new();
+        let mut values = Vec::new();
+        for i in 0..len {
+            let (record, value) = self.mr(addr + i as u32 * 4);"""
+    mr_insert = """        let mut records = Vec::new();
+        let mut values = Vec::new();
+        let beak_kind =
+            self.beak_precompile_slice_address_injection_kind(addr, len, "read");
+        for i in 0..len {
+            let (record, value) =
+                self.mr(Self::beak_precompile_slice_addr(addr, i, beak_kind.as_deref()));"""
+    if "self.beak_precompile_slice_address_injection_kind(addr, len, \"read\")" not in contents:
+        contents = contents.replace(mr_anchor, mr_insert, 1)
+
+    mw_anchor = """        let mut records = Vec::new();
+        for i in 0..values.len() {
+            let record = self.mw(addr + i as u32 * 4, values[i]);"""
+    mw_insert = """        let mut records = Vec::new();
+        let beak_kind =
+            self.beak_precompile_slice_address_injection_kind(addr, values.len(), "write");
+        for i in 0..values.len() {
+            let record =
+                self.mw(Self::beak_precompile_slice_addr(addr, i, beak_kind.as_deref()), values[i]);"""
+    if (
+        "self.beak_precompile_slice_address_injection_kind(addr, values.len(), \"write\")"
+        not in contents
+    ):
+        contents = contents.replace(mw_anchor, mw_insert, 1)
+
+    unsafe_anchor = """        let mut values = Vec::new();
+        for i in 0..len {
+            values.push(self.rt.word(addr + i as u32 * 4));"""
+    unsafe_insert = """        let mut values = Vec::new();
+        let beak_kind =
+            self.beak_precompile_slice_address_injection_kind(addr, len, "write");
+        for i in 0..len {
+            values.push(self.rt.word(Self::beak_precompile_slice_addr(addr, i, beak_kind.as_deref())));"""
+    if "values.push(self.rt.word(Self::beak_precompile_slice_addr" not in contents:
+        contents = contents.replace(unsafe_anchor, unsafe_insert, 1)
 
     path.write_text(contents)
 
@@ -866,10 +1730,20 @@ def apply(*, sp1_install_path: Path, commit_or_branch: str) -> None:
     _patch_v4_alu_chip_traces(sp1_install_path)
     for path in _memory_instruction_trace_candidates(sp1_install_path):
         _patch_v4_memory_instructions(path)
+    for path in _syscall_instr_trace_candidates(sp1_install_path):
+        _patch_v4_syscall_instr_padding(path)
+    for path in _sha_extend_trace_candidates(sp1_install_path):
+        _patch_v4_sha_extend_precompile(path)
+    for path in _sha_compress_trace_candidates(sp1_install_path):
+        _patch_v4_sha_compress_precompile(path)
+    for path in _memory_global_candidates(sp1_install_path):
+        _patch_v4_memory_global(path)
     for path in _byte_event_candidates(sp1_install_path):
         _patch_v4_byte_record(path)
     for path in _execution_record_candidates(sp1_install_path):
         _patch_v4_execution_record(path)
+    for path in _syscall_context_candidates(sp1_install_path):
+        _patch_v4_syscall_context(path)
     for path in _byte_trace_candidates(sp1_install_path):
         _patch_v4_byte_trace(path)
     for path in _cpu_trace_candidates(sp1_install_path):

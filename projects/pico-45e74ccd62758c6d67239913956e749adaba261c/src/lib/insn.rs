@@ -22,6 +22,8 @@ pub struct PicoInsn {
     pub runtime_b: Option<u32>,
     pub runtime_c: Option<u32>,
     pub memory_value: Option<u32>,
+    pub ecall_syscall_id: Option<u32>,
+    pub ecall_operand_to_check: Option<u32>,
     pub asm: String,
 }
 
@@ -51,6 +53,8 @@ impl PicoInsn {
             runtime_b: None,
             runtime_c: None,
             memory_value: None,
+            ecall_syscall_id: None,
+            ecall_operand_to_check: None,
             asm: insn.asm,
         }
     }

@@ -94,6 +94,16 @@ pub struct OpenVMMemoryFinalization {
     changed_from_initial: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenVMLookupMultiplicity {
+    seq: u64,
+    step_idx: u64,
+    table_name: String,
+    row_idx: u64,
+    multiplicity: u32,
+    is_real: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenVmMemoryObservationProfile {
     ImmediateSign,
@@ -446,7 +456,7 @@ fn derive_semantic_feedback(
     let mut timestamped_load_path = Vec::new();
     let mut volatile_boundary = Vec::new();
     let mut arithmetic_special_case = Vec::new();
-    let mut saw_padding_interaction_candidate = false;
+    let mut base_alu_row_count = 0u64;
 
     let mut saw_system_terminate = false;
     let mut saw_missing_row_timestamp = false;
@@ -477,7 +487,7 @@ fn derive_semantic_feedback(
 
         match &row.payload {
             OpenVMChipRowPayload::BaseAlu { rs2, a, b, c, .. } => {
-                saw_padding_interaction_candidate = true;
+                base_alu_row_count = base_alu_row_count.saturating_add(1);
                 if profile.emit_alu_immediate_limb_semantic {
                     if let Some(imm) = rs2_imm_value(rs2) {
                         immediate_limb.push(ImmediateLimbObservation {
@@ -739,13 +749,63 @@ fn derive_semantic_feedback(
     bucket_hits.extend(semantic_matchers::match_arithmetic_special_case_semantic_hits(
         &arithmetic_special_case,
     ));
-    if profile.emit_padding_interaction_semantic && saw_padding_interaction_candidate {
+    if profile.emit_padding_interaction_semantic
+        && base_alu_row_count > 0
+        && !base_alu_row_count.is_power_of_two()
+    {
         bucket_hits.push(BucketHit::semantic(
             semantic::row::PADDING_INTERACTION_SEND,
-            HashMap::from([("scope".to_string(), Value::String("base_alu".to_string()))]),
+            HashMap::from([
+                ("obligation_id".to_string(), json!("pd1")),
+                ("cell_id".to_string(), json!("pd1.exec_padding")),
+                ("step_idx".to_string(), json!(base_alu_row_count)),
+                ("backend".to_string(), json!("openvm")),
+                ("commit".to_string(), json!(OPENVM_COMMIT)),
+                ("trace_source".to_string(), json!("air_padding")),
+                ("scope".to_string(), json!("base_alu")),
+                ("table_name".to_string(), json!("Rv32BaseAluAdapter")),
+                ("core_table_name".to_string(), json!("BaseAluCore")),
+                ("interaction_kind".to_string(), json!("memory_read")),
+                ("is_padding".to_string(), json!(true)),
+                ("real_rows".to_string(), json!(base_alu_row_count)),
+                ("padding_row_idx".to_string(), json!(base_alu_row_count)),
+                ("anchor_strategy".to_string(), json!("first_power2_padding_row")),
+            ]),
         ));
     }
     (bucket_hits, signals)
+}
+
+fn lookup_multiplicity_obligation_hit(row: &OpenVMLookupMultiplicity) -> Option<BucketHit> {
+    if !row.is_real && row.multiplicity == 0 {
+        return None;
+    }
+    let cell_id = if row.is_real {
+        if row.multiplicity > 1 {
+            "bu1.multi_send"
+        } else {
+            "bu1.real_row"
+        }
+    } else {
+        "bu1.padding_row"
+    };
+    Some(BucketHit::semantic(
+        semantic::lookup::BOOLEAN_MULTIPLICITY,
+        HashMap::from([
+            ("obligation_id".to_string(), json!("bu1")),
+            ("cell_id".to_string(), json!(cell_id)),
+            ("op_idx".to_string(), json!(row.step_idx)),
+            ("step_idx".to_string(), json!(row.step_idx)),
+            ("backend".to_string(), json!("openvm")),
+            ("commit".to_string(), json!(OPENVM_COMMIT)),
+            ("trace_source".to_string(), json!("lookup_multiplicity")),
+            ("lookup_seq".to_string(), json!(row.seq)),
+            ("table_name".to_string(), json!(row.table_name)),
+            ("row_idx".to_string(), json!(row.row_idx)),
+            ("multiplicity".to_string(), json!(row.multiplicity)),
+            ("is_real".to_string(), json!(row.is_real)),
+        ]),
+    ))
 }
 
 impl OpenVMTrace {
@@ -765,6 +825,7 @@ impl OpenVMTrace {
         let mut memory_accesses = Vec::new();
         let mut memory_inits = Vec::new();
         let mut memory_finalizations = Vec::new();
+        let mut lookup_multiplicity_hits = Vec::new();
 
         for (idx, log) in logs.into_iter().enumerate() {
             let obj = log.as_object().ok_or_else(|| format!("log[{}]: not an object", idx))?;
@@ -808,18 +869,27 @@ impl OpenVMTrace {
                         .map_err(|e| format!("log[{}] memory_finalization: {}", idx, e))?;
                     memory_finalizations.push(finalization);
                 }
+                "lookup_multiplicity" => {
+                    let row: OpenVMLookupMultiplicity = serde_json::from_value(data)
+                        .map_err(|e| format!("log[{}] lookup_multiplicity: {}", idx, e))?;
+                    if let Some(hit) = lookup_multiplicity_obligation_hit(&row) {
+                        lookup_multiplicity_hits.push(hit);
+                    }
+                }
                 _ => return Err(format!("log[{}]: unknown type \"{}\"", idx, ty)),
             }
         }
 
-        Ok(Self::new(
+        let mut trace = Self::new(
             instructions,
             chip_rows,
             interactions,
             memory_accesses,
             memory_inits,
             memory_finalizations,
-        ))
+        );
+        trace.bucket_hits.extend(lookup_multiplicity_hits);
+        Ok(trace)
     }
 
     pub fn from_logs_with_words(logs: Vec<Value>, words: &[u32]) -> Result<Self, String> {
@@ -3122,6 +3192,32 @@ mod tests {
             hit.bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id
                 && hit.details.get("cell_id").and_then(|v| v.as_str()) == Some("ts2.consecutive")
                 && hit.details.get("ts_diff").and_then(|v| v.as_u64()) == Some(1)
+        }));
+    }
+
+    #[test]
+    fn lookup_multiplicity_logs_emit_canonical_bu1_cells() {
+        let trace = OpenVMTrace::from_logs(vec![serde_json::json!({
+            "type": "lookup_multiplicity",
+            "data": {
+                "seq": 7,
+                "step_idx": 42,
+                "table_name": "bitwise_op_lookup.xor",
+                "row_idx": 42,
+                "multiplicity": 2,
+                "is_real": true
+            }
+        })])
+        .expect("trace");
+
+        assert!(trace.bucket_hits().iter().any(|hit| {
+            hit.bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id
+                && hit.details.get("obligation_id").and_then(|v| v.as_str()) == Some("bu1")
+                && hit.details.get("cell_id").and_then(|v| v.as_str()) == Some("bu1.multi_send")
+                && hit.details.get("table_name").and_then(|v| v.as_str())
+                    == Some("bitwise_op_lookup.xor")
+                && hit.details.get("multiplicity").and_then(|v| v.as_u64()) == Some(2)
+                && hit.details.get("is_real").and_then(|v| v.as_bool()) == Some(true)
         }));
     }
 }

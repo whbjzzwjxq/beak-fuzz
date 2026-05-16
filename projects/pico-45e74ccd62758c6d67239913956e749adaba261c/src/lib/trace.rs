@@ -14,6 +14,7 @@ use crate::interaction::{
 };
 
 pub const PICO_COMMIT: &str = "45e74ccd62758c6d67239913956e749adaba261c";
+const PICO_HALT_SYSCALL_ID: u32 = 0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PicoExecutedInsn {
@@ -28,6 +29,10 @@ pub struct PicoExecutedInsn {
     pub b: u32,
     pub c: u32,
     pub memory: Option<u32>,
+    #[serde(default)]
+    pub ecall_syscall_id: Option<u32>,
+    #[serde(default)]
+    pub ecall_operand_to_check: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +72,8 @@ impl PicoTrace {
                 b: 0,
                 c: 0,
                 memory: None,
+                ecall_syscall_id: None,
+                ecall_operand_to_check: None,
             })
             .collect::<Vec<_>>();
         Self::from_executed(&executed)
@@ -93,6 +100,8 @@ impl PicoTrace {
             insn.runtime_b = Some(event.b);
             insn.runtime_c = Some(event.c);
             insn.memory_value = event.memory;
+            insn.ecall_syscall_id = event.ecall_syscall_id;
+            insn.ecall_operand_to_check = event.ecall_operand_to_check;
             instructions.push(insn.clone());
             seq = seq.saturating_add(1);
 
@@ -492,6 +501,7 @@ impl PicoTrace {
                 );
             }
             "ecall" => {
+                self.push_ecall_argument_hit(insn);
                 self.push_hit(
                     semantic::control::ECALL_WORD_VALIDITY,
                     insn,
@@ -629,6 +639,29 @@ impl PicoTrace {
         ));
     }
 
+    fn push_ecall_argument_hit(&mut self, insn: &PicoInsn) {
+        let mut details = base_details(insn, "cf5", cf5_cell(insn), "instruction");
+        details.insert("semantic_family".to_string(), json!("ecall_argument_decomposition"));
+        details.insert("syscall_id".to_string(), json!(insn.ecall_syscall_id));
+        details.insert("syscall_nr".to_string(), json!(insn.ecall_syscall_id));
+        details.insert("operand_to_check".to_string(), json!(insn.ecall_operand_to_check));
+        details.insert(
+            "operand_range_check_enabled".to_string(),
+            json!(insn.ecall_operand_to_check.is_some()),
+        );
+        details.insert("pico_syscall_register".to_string(), json!("x5"));
+        details.insert("pico_halt_syscall_id".to_string(), json!(PICO_HALT_SYSCALL_ID));
+        details.insert("op_b".to_string(), json!(insn.runtime_b));
+        details.insert("op_c".to_string(), json!(insn.runtime_c));
+        details.insert("a0".to_string(), json!(insn.runtime_b));
+        details.insert("a1".to_string(), json!(insn.runtime_c));
+        for idx in 2..=7 {
+            details.insert(format!("a{idx}"), Value::Null);
+        }
+        self.bucket_hits
+            .push(BucketHit::semantic(semantic::control::ECALL_ARGUMENT_DECOMPOSITION, details));
+    }
+
     fn enrich_semantic_hits(&mut self) {
         let insns_by_step =
             self.instructions.iter().map(|insn| (insn.step_idx, insn)).collect::<HashMap<_, _>>();
@@ -725,6 +758,9 @@ fn base_details_for_bucket(bucket_id: &str, insn: &PicoInsn) -> HashMap<String, 
         id if id == semantic::control::ECALL_WORD_VALIDITY.id => {
             ("cf7", "cf7.standard", "instruction")
         }
+        id if id == semantic::control::ECALL_ARGUMENT_DECOMPOSITION.id => {
+            ("cf5", cf5_cell(insn), "instruction")
+        }
         id if id == semantic::exec::CONTROL_FLOW_BINDING.id => ("cf6", "cf6.normal", "instruction"),
         id if id == semantic::memory::LOAD_VALUE_BINDING.id => ("me3", me3_cell(insn), "memory"),
         id if id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id => {
@@ -736,6 +772,15 @@ fn base_details_for_bucket(bucket_id: &str, insn: &PicoInsn) -> HashMap<String, 
         _ => ("unknown", "unknown", "instruction"),
     };
     base_details(insn, obligation_id, cell_id, trace_source)
+}
+
+fn cf5_cell(insn: &PicoInsn) -> &'static str {
+    if insn.ecall_syscall_id == Some(PICO_HALT_SYSCALL_ID) || insn.ecall_operand_to_check.is_some()
+    {
+        "cf5.halt"
+    } else {
+        "cf5.operand_to_check_word"
+    }
 }
 
 fn id1_cell(insn: &PicoInsn) -> &'static str {
@@ -1046,5 +1091,56 @@ impl Trace for PicoTrace {
 
     fn trace_signals(&self) -> &[TraceSignal] {
         &self.trace_signals
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use beak_core::trace::Trace;
+
+    #[test]
+    fn ecall_argument_decomposition_emits_cf5_details() {
+        let trace = PicoTrace::from_executed(&[PicoExecutedInsn {
+            step_idx: 0,
+            chunk: 0,
+            clk: 0,
+            pc: 0x1000,
+            next_pc: 0,
+            word: 0x0000_0073,
+            opcode: "ecall".to_string(),
+            a: 0,
+            b: 7,
+            c: 9,
+            memory: None,
+            ecall_syscall_id: Some(PICO_HALT_SYSCALL_ID),
+            ecall_operand_to_check: Some(7),
+        }])
+        .expect("ecall trace");
+
+        let hit = trace
+            .bucket_hits()
+            .iter()
+            .find(|hit| hit.bucket_id == semantic::control::ECALL_ARGUMENT_DECOMPOSITION.id)
+            .expect("cf5 hit");
+
+        assert_eq!(hit.details.get("obligation_id").and_then(Value::as_str), Some("cf5"));
+        assert_eq!(hit.details.get("cell_id").and_then(Value::as_str), Some("cf5.halt"));
+        assert_eq!(
+            hit.details.get("syscall_id").and_then(Value::as_u64),
+            Some(PICO_HALT_SYSCALL_ID as u64)
+        );
+        assert_eq!(hit.details.get("operand_to_check").and_then(Value::as_u64), Some(7));
+        assert_eq!(
+            hit.details.get("operand_range_check_enabled").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(hit.details.get("op_b").and_then(Value::as_u64), Some(7));
+        assert_eq!(hit.details.get("op_c").and_then(Value::as_u64), Some(9));
+        assert_eq!(hit.details.get("a0").and_then(Value::as_u64), Some(7));
+        assert_eq!(hit.details.get("a1").and_then(Value::as_u64), Some(9));
+        for idx in 2..=7 {
+            assert_eq!(hit.details.get(&format!("a{idx}")), Some(&Value::Null));
+        }
     }
 }

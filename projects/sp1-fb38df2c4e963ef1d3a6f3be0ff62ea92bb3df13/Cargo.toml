@@ -18,6 +18,7 @@ path = "src/bin/trace.rs"
 
 [dependencies]
 clap = "4.5"
+fuzzer_utils = { path = "../../beak-py/out/sp1-fb38df2c4e963ef1d3a6f3be0ff62ea92bb3df13/sp1-src/crates/fuzzer_utils" }
 p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "aef4f8f03f960925f7088d757aeeb956a7f4b30c" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

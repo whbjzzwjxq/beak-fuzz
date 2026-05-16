@@ -4,7 +4,10 @@ import argparse
 from pathlib import Path
 
 from jolt_fuzzer.settings import JOLT_BENCHMARK_COMMIT, resolve_jolt_commit
-from jolt_fuzzer.utils_install import clone_and_checkout_jolt
+from jolt_fuzzer.utils_install import (
+    clone_and_checkout_jolt,
+    clone_and_checkout_jolt_auxiliary_sources,
+)
 from zkvm_fuzzer_utils.snapshot_install import (
     apply_pass_pipeline,
     default_snapshot_out_root,
@@ -52,6 +55,10 @@ def _install(args: argparse.Namespace) -> int:
         dest=dest,
         commit_or_branch=resolved,
         zkvm_src=args.zkvm_src,
+    )
+    clone_and_checkout_jolt_auxiliary_sources(
+        jolt_install_path=dest,
+        commit_or_branch=resolved,
     )
     apply_pass_pipeline(
         package_name="jolt_fuzzer",

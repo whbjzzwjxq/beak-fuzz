@@ -28,6 +28,6 @@ mod tests {
             assert!(!seed.instructions.is_empty());
             count += 1;
         }
-        assert_eq!(count, 2172);
+        assert_eq!(count, 2173);
     }
 }

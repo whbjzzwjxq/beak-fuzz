@@ -174,6 +174,11 @@ fn main() {
     if mismatch {
         println!("\n*** SOUNDNESS BUG DETECTED ***");
         std::process::exit(1);
+    } else if inject_kind.is_some()
+        && backend_resp.injection_applied
+        && backend_resp.backend_error.is_none()
+    {
+        println!("\n*** UNDERCONSTRAINED CANDIDATE DETECTED ***");
     } else {
         println!("  All 32 registers match.");
     }

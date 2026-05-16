@@ -5,11 +5,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Arg, Command};
 use serde_json::json;
 
-use beak_core::fuzz::benchmark::{BenchmarkConfig, DEFAULT_RNG_SEED, run_benchmark_threaded};
+use beak_core::fuzz::benchmark::{run_benchmark_threaded, BenchmarkConfig, DEFAULT_RNG_SEED};
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
 use beak_openvm_336f1a47::backend::{
-    OpenVmBackend, WorkerRequest, WorkerResponse, run_backend_once,
+    run_backend_once, OpenVmBackend, WorkerRequest, WorkerResponse, BIGINT_BLT256_FRONTEND_WORDS,
 };
 
 const ZKVM_COMMIT: &str = "336f1a475e5aa3513c4c5a266399f4128c119bba";
@@ -24,7 +24,11 @@ fn workspace_root() -> PathBuf {
 
 fn resolve_path(root: &Path, arg: &str) -> PathBuf {
     let p = PathBuf::from(arg);
-    if p.is_absolute() { p } else { root.join(p) }
+    if p.is_absolute() {
+        p
+    } else {
+        root.join(p)
+    }
 }
 
 fn parse_u32_arg(value: &str, name: &str) -> u32 {
@@ -57,7 +61,7 @@ fn collect_bin_words(matches: &clap::ArgMatches) -> Vec<u32> {
     out
 }
 
-fn write_inline_seed_jsonl(root: &Path, words: &[u32]) -> PathBuf {
+fn write_inline_seed_jsonl(root: &Path, words: &[u32], source: &str, label: &str) -> PathBuf {
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let dir = root.join("storage/fuzzing_seeds");
     std::fs::create_dir_all(&dir).expect("create storage/fuzzing_seeds");
@@ -65,8 +69,8 @@ fn write_inline_seed_jsonl(root: &Path, words: &[u32]) -> PathBuf {
     let line = json!({
         "instructions": words,
         "metadata": {
-            "source": "cli_bin",
-            "label": "inline_bin",
+            "source": source,
+            "label": label,
         }
     })
     .to_string();
@@ -83,6 +87,12 @@ fn main() {
                 .help("Hex encoded RISC-V instruction word(s). Can be repeated, or passed as a space/comma separated list.")
                 .num_args(1..)
                 .action(clap::ArgAction::Append),
+        )
+        .arg(
+            Arg::new("openvm_bigint_blt256")
+                .long("openvm-bigint-blt256")
+                .help("Run the project-local OpenVM-direct BigInt BLT256 frontend seed.")
+                .action(clap::ArgAction::SetTrue),
         )
         .arg(
             Arg::new("seeds_jsonl")
@@ -174,11 +184,21 @@ fn main() {
     }
 
     let root = workspace_root();
-    let inline_words = collect_bin_words(&matches);
+    let openvm_bigint_blt256 = matches.get_flag("openvm_bigint_blt256");
+    let inline_words = if openvm_bigint_blt256 {
+        BIGINT_BLT256_FRONTEND_WORDS.to_vec()
+    } else {
+        collect_bin_words(&matches)
+    };
     let seeds_path = if inline_words.is_empty() {
         resolve_path(&root, matches.get_one::<String>("seeds_jsonl").unwrap())
     } else {
-        write_inline_seed_jsonl(&root, &inline_words)
+        let (source, label) = if openvm_bigint_blt256 {
+            ("openvm_bigint_blt256_frontend", "openvm_bigint_blt256")
+        } else {
+            ("cli_bin", "inline_bin")
+        };
+        write_inline_seed_jsonl(&root, &inline_words, source, label)
     };
     let parsed_initial_limit: usize =
         matches.get_one::<String>("initial_limit").unwrap().parse().expect("initial-limit");

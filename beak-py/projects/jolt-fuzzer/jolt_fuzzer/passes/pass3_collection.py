@@ -2,8 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from jolt_fuzzer.settings import JOLT_READWRITE_SIZING_COMMIT
+
 
 def apply(*, jolt_install_path: Path, commit_or_branch: str) -> None:
+    if commit_or_branch == JOLT_READWRITE_SIZING_COMMIT:
+        # The 6c read/write-memory snapshot is intentionally kept vulnerable.
+        # Its Beak project verifies baseline prover exceptions and derives a
+        # PD4 bytecode-boundary bucket without installing witness mutations into
+        # the upstream Jolt source.
+        return
+
     _ = commit_or_branch
     _patch_host_trace_injection(jolt_install_path)
     _patch_read_write_memory_injection(jolt_install_path)

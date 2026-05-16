@@ -1198,6 +1198,13 @@ fn emit_instruction_obligation_hits(instructions: &[Risc0Insn]) -> Vec<BucketHit
                 "rf2",
                 cell,
             );
+            push_obligation_hit(
+                &mut hits,
+                semantic::exec::SOURCE_OPERAND_BINDING,
+                insn,
+                "rf2",
+                cell,
+            );
         }
 
         if rd.filter(|rd| *rd != 0).is_some() {
@@ -1616,6 +1623,7 @@ mod tests {
         assert!(sigs.iter().all(|id| semantic::by_id(id).is_some()));
         assert!(sigs.contains(&semantic::decode::RD_BIT_DECOMPOSITION.id));
         assert!(sigs.contains(&semantic::decode::OPERAND_INDEX_ROUTING.id));
+        assert!(sigs.contains(&semantic::exec::SOURCE_OPERAND_BINDING.id));
         assert!(sigs.contains(&semantic::arithmetic::DIVISION_REMAINDER_BOUND.id));
         assert!(sigs.contains(&semantic::control::ECALL_ARGUMENT_DECOMPOSITION.id));
         assert!(sigs.contains(&semantic::exec::DEST_BINDING.id));

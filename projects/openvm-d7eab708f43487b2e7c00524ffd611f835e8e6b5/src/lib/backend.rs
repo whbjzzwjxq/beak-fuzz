@@ -363,7 +363,13 @@ impl OpenVmBackend {
             Self::step_from_hit(hit)
         };
         let (semantic_class, inject_kind, fallback_schedule) =
-            if bucket_id == semantic::control::ENTRYPOINT_BINDING.id {
+            if bucket_id == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id {
+                (
+                    semantic::decode::ZERO_REGISTER_IMMUTABILITY.semantic_class,
+                    "openvm.semantic.decode.zero_register_immutability",
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::control::ENTRYPOINT_BINDING.id {
                 (
                     semantic::control::ENTRYPOINT_BINDING.semantic_class,
                     "openvm.semantic.control.entrypoint_binding",
@@ -711,7 +717,16 @@ impl BenchmarkBackend for OpenVmBackend {
         &self,
         hits: &[beak_core::trace::BucketHit],
     ) -> Vec<SemanticInjectionCandidate> {
-        hits.iter().flat_map(|hit| self.semantic_candidate_from_hit(hit)).collect()
+        let mut candidates: Vec<_> =
+            hits.iter().flat_map(|hit| self.semantic_candidate_from_hit(hit)).collect();
+        candidates.sort_by_key(|candidate| {
+            if candidate.bucket_id == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id {
+                0
+            } else {
+                1
+            }
+        });
+        candidates
     }
 }
 

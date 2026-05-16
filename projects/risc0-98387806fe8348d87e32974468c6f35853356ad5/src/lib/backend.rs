@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
 use std::{cell::RefCell, rc::Rc};
 
 use beak_core::fuzz::benchmark::{
@@ -14,11 +15,11 @@ use risc0_binfmt::{MemoryImage, Program};
 use risc0_circuit_rv32im::{
     execute::{
         platform::{
-            HOST_ECALL_TERMINATE, MACHINE_REGS_ADDR, REG_A0, REG_A1, REG_A7, USER_REGS_ADDR,
-            USER_START_ADDR, WORD_SIZE,
+            HOST_ECALL_READ, HOST_ECALL_TERMINATE, MACHINE_REGS_ADDR, REG_A0, REG_A1, REG_A2,
+            REG_A7, USER_REGS_ADDR, USER_START_ADDR, WORD_SIZE,
         },
         testutil::DEFAULT_SESSION_LIMIT,
-        CycleLimit, Executor, DEFAULT_SEGMENT_LIMIT_PO2,
+        CycleLimit, Executor, Syscall, SyscallContext, DEFAULT_SEGMENT_LIMIT_PO2,
     },
     prove::beak::{
         collect_preflight_trace_records, prove_segment_with_injection, BeakInjectionPlan,
@@ -105,6 +106,12 @@ pub struct RunResponse {
     pub backend_error: Option<String>,
     pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pub injection_applied: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Risc0ExecutionMode {
+    Kernel,
+    V1Compat { host_read_fill: u8 },
 }
 
 fn base_inject_kind(kind: &str) -> &str {
@@ -236,7 +243,7 @@ fn risc0_entry_pc() -> u32 {
 
 fn build_program(words: &[u32]) -> Program {
     let entry = risc0_entry_pc();
-    let mut image = std::collections::BTreeMap::<u32, u32>::new();
+    let mut image = BTreeMap::<u32, u32>::new();
     for (idx, &word) in words.iter().enumerate() {
         image.insert(entry + (idx as u32) * WORD_SIZE as u32, word);
     }
@@ -244,6 +251,52 @@ fn build_program(words: &[u32]) -> Program {
         image.insert(entry + ((words.len() + idx) as u32) * WORD_SIZE as u32, word);
     }
     Program::new_from_entry_and_image(entry, image)
+}
+
+const V1COMPAT_DIGEST_OUT_ADDR: u32 = 0x0001_0100;
+
+fn build_v1compat_user_program(words: &[u32]) -> Program {
+    let entry = risc0_entry_pc();
+    let mut image = BTreeMap::<u32, u32>::new();
+    for (idx, &word) in words.iter().enumerate() {
+        image.insert(entry + (idx as u32) * WORD_SIZE as u32, word);
+    }
+    for idx in 0..8u32 {
+        image.entry(V1COMPAT_DIGEST_OUT_ADDR + idx * WORD_SIZE as u32).or_insert(0);
+    }
+    Program::new_from_entry_and_image(entry, image)
+}
+
+fn v1compat_elf_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(
+        "../../beak-py/out/risc0-98387806fe8348d87e32974468c6f35853356ad5/risc0-src/risc0/zkos/v1compat/elfs/v1compat.elf",
+    )
+}
+
+fn v1compat_kernel_program() -> Result<Program, String> {
+    let path = v1compat_elf_path();
+    let bytes = std::fs::read(&path)
+        .map_err(|e| format!("read v1compat ELF {} failed: {e}", path.display()))?;
+    Program::load_elf(&bytes, u32::MAX).map_err(|e| format!("load v1compat ELF failed: {e}"))
+}
+
+fn execute_session_with_syscall<S: Syscall>(
+    image: MemoryImage,
+    max_cycles: CycleLimit,
+    syscall: &S,
+    trace: Vec<Rc<RefCell<dyn TraceCallback>>>,
+) -> Result<
+    (Vec<risc0_circuit_rv32im::execute::Segment>, risc0_circuit_rv32im::execute::ExecutorResult),
+    String,
+> {
+    let mut segments = Vec::new();
+    let result = Executor::new(image, syscall, None, trace)
+        .run(DEFAULT_SEGMENT_LIMIT_PO2, MAX_INSN_CYCLES, max_cycles, |segment| {
+            segments.push(segment);
+            Ok(())
+        })
+        .map_err(|e| format!("risc0 execute failed: {e}"))?;
+    Ok((segments, result))
 }
 
 fn execute_session(
@@ -254,14 +307,7 @@ fn execute_session(
     (Vec<risc0_circuit_rv32im::execute::Segment>, risc0_circuit_rv32im::execute::ExecutorResult),
     String,
 > {
-    let mut segments = Vec::new();
-    let result = Executor::new(image, &Risc0HostSyscall, None, trace)
-        .run(DEFAULT_SEGMENT_LIMIT_PO2, MAX_INSN_CYCLES, max_cycles, |segment| {
-            segments.push(segment);
-            Ok(())
-        })
-        .map_err(|e| format!("risc0 execute failed: {e}"))?;
-    Ok((segments, result))
+    execute_session_with_syscall(image, max_cycles, &Risc0HostSyscall, trace)
 }
 
 fn collect_preflight_records_for_segments(
@@ -308,10 +354,10 @@ fn collect_preflight_records_for_segments(
 #[derive(Default)]
 struct Risc0HostSyscall;
 
-impl risc0_circuit_rv32im::execute::Syscall for Risc0HostSyscall {
+impl Syscall for Risc0HostSyscall {
     fn host_read(
         &self,
-        _ctx: &mut dyn risc0_circuit_rv32im::execute::SyscallContext,
+        _ctx: &mut dyn SyscallContext,
         _fd: u32,
         buf: &mut [u8],
     ) -> anyhow::Result<u32> {
@@ -323,7 +369,33 @@ impl risc0_circuit_rv32im::execute::Syscall for Risc0HostSyscall {
 
     fn host_write(
         &self,
-        _ctx: &mut dyn risc0_circuit_rv32im::execute::SyscallContext,
+        _ctx: &mut dyn SyscallContext,
+        _fd: u32,
+        buf: &[u8],
+    ) -> anyhow::Result<u32> {
+        Ok(buf.len() as u32)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Risc0FillHostSyscall {
+    fill: u8,
+}
+
+impl Syscall for Risc0FillHostSyscall {
+    fn host_read(
+        &self,
+        _ctx: &mut dyn SyscallContext,
+        _fd: u32,
+        buf: &mut [u8],
+    ) -> anyhow::Result<u32> {
+        buf.fill(self.fill);
+        Ok(buf.len() as u32)
+    }
+
+    fn host_write(
+        &self,
+        _ctx: &mut dyn SyscallContext,
         _fd: u32,
         buf: &[u8],
     ) -> anyhow::Result<u32> {
@@ -359,6 +431,11 @@ fn final_regs_from_post_image(post_image: &MemoryImage) -> Result<[u32; 32], Str
     } else {
         Ok(machine_regs)
     }
+}
+
+fn final_user_regs_from_post_image(post_image: &MemoryImage) -> Result<[u32; 32], String> {
+    let mut image = post_image.clone();
+    read_reg_bank(&mut image, USER_REGS_ADDR.waddr(), "user")
 }
 
 fn termination_start_cycle(words: &[u32]) -> Result<u64, String> {
@@ -465,9 +542,16 @@ fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
         if insn.imm.is_some() {
             kinds.insert(IMM_SIGN_INJECT_KIND);
         }
+        if let (Some(rs1), Some(rs2)) = (insn.rs1, insn.rs2) {
+            if rs1 == rs2 && rs1 != 0 {
+                kinds.insert(EXEC_SOURCE_BINDING_INJECT_KIND);
+            } else if insn.regs_before[rs1 as usize] != insn.regs_before[rs2 as usize] {
+                kinds.insert(OPERAND_ROUTE_INJECT_KIND);
+                kinds.insert(EXEC_SOURCE_BINDING_INJECT_KIND);
+            }
+        }
         match insn.mnemonic.as_str() {
             "div" | "divu" | "rem" | "remu" => {
-                kinds.insert(OPERAND_ROUTE_INJECT_KIND);
                 if let Some(rs2) = insn.rs2 {
                     if insn.regs_before[rs2 as usize] != 0 {
                         kinds.insert(DIV_REM_BOUND_INJECT_KIND);
@@ -478,7 +562,10 @@ fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
             }
             "ecall" => {
                 kinds.insert(ZERO_REGISTER_INJECT_KIND);
-                kinds.insert(ECALL_ARG_DECOMP_INJECT_KIND);
+                let len = insn.regs_before[REG_A2];
+                if insn.regs_before[REG_A7] == HOST_ECALL_READ && len > 7 && (len & 0x3) != 0 {
+                    kinds.insert(ECALL_ARG_DECOMP_INJECT_KIND);
+                }
             }
             _ => {}
         }
@@ -529,6 +616,7 @@ fn observe_sites_for_words(words: &[u32]) -> BTreeMap<String, Vec<u64>> {
         if insn.rd == Some(0) {
             kinds.insert(ZERO_REGISTER_INJECT_KIND);
         } else if insn.rd.unwrap_or(0) != 0
+            && insn.rd.is_some_and(|rd| ((rd >> 1) & 0x3) != 0)
             && !matches!(
                 insn.mnemonic.as_str(),
                 "sb" | "sh"
@@ -613,10 +701,10 @@ fn bump_hit_detail(hit: &mut BucketHit, kind: &str, step: u64) {
             details.insert("beak_write_addr".to_string(), json!("x0"));
         }
         OPERAND_ROUTE_INJECT_KIND => {
-            details.insert("beak_rs2_source".to_string(), json!("rs1_alias"));
+            details.insert("beak_rs2_source".to_string(), json!("rs1_full_read_record"));
         }
         RD_BITS_INJECT_KIND => {
-            details.insert("beak_rd_bits_tampered".to_string(), json!(true));
+            details.insert("beak_rd_bits_tampered".to_string(), json!("rd12_minus_1_rd0_plus_2"));
         }
         FIELD_RANGE_INJECT_KIND => {
             details.insert("beak_decoder_field".to_string(), json!("func3_xor_1"));
@@ -646,13 +734,13 @@ fn bump_hit_detail(hit: &mut BucketHit, kind: &str, step: u64) {
             details.insert("beak_divrem_relation".to_string(), json!("rem_plus_denom"));
         }
         ECALL_ARG_DECOMP_INJECT_KIND => {
-            details.insert("beak_len_decomposition".to_string(), json!("force_low2_hot_1"));
+            details.insert("beak_len_decomposition".to_string(), json!("len_high_one_same_flags"));
         }
         ENTRYPOINT_INJECT_KIND => {
             details.insert("beak_entrypoint_binding".to_string(), json!("pc_addr_med14_plus_one"));
         }
         EXEC_SOURCE_BINDING_INJECT_KIND => {
-            details.insert("beak_preflight_binding".to_string(), json!("src2_from_src1"));
+            details.insert("beak_preflight_binding".to_string(), json!("src2_full_read_from_src1"));
         }
         EXEC_DEST_BINDING_INJECT_KIND => {
             details.insert("beak_preflight_binding".to_string(), json!("rd_plus_one"));
@@ -796,15 +884,16 @@ fn apply_injected_hit_details(hits: &mut [BucketHit], kind: &str, step: u64) {
     }
 }
 
-pub fn run_backend_once(
+fn run_backend_once_with_syscall<S: Syscall>(
     words: &[u32],
     inject_kind: Option<&str>,
     inject_step: u64,
+    mode: Risc0ExecutionMode,
+    image: MemoryImage,
+    syscall: &S,
 ) -> Result<RunResponse, String> {
     let observed_injection_sites = observe_sites_for_words(words);
 
-    let program = build_program(words);
-    let image = risc0_binfmt::MemoryImage::new_kernel(program);
     let executed_records = Rc::new(RefCell::new(Vec::<Risc0ExecutedInsnRecord>::new()));
     let records_cb = executed_records.clone();
     let trace_cb: Rc<RefCell<dyn TraceCallback>> =
@@ -818,7 +907,8 @@ pub fn run_backend_once(
             }
             Ok(())
         }));
-    let (segments, _result) = execute_session(image, DEFAULT_SESSION_LIMIT, vec![trace_cb])?;
+    let (segments, result) =
+        execute_session_with_syscall(image, DEFAULT_SESSION_LIMIT, syscall, vec![trace_cb])?;
     let executed_records = executed_records.borrow().clone();
     let (preflight_txns, preflight_summaries) = collect_preflight_records_for_segments(&segments)?;
     let trace = Risc0Trace::from_words_with_preflight_and_executed(
@@ -863,7 +953,12 @@ pub fn run_backend_once(
         }
     }
 
-    let final_regs = final_regs_for_oracle(words).unwrap_or_else(|_| oracle_fallback_regs(words));
+    let final_regs = match mode {
+        Risc0ExecutionMode::Kernel => {
+            final_regs_for_oracle(words).unwrap_or_else(|_| oracle_fallback_regs(words))
+        }
+        Risc0ExecutionMode::V1Compat { .. } => final_user_regs_from_post_image(&result.post_image)?,
+    };
 
     Ok(RunResponse {
         final_regs: Some(final_regs),
@@ -876,8 +971,46 @@ pub fn run_backend_once(
     })
 }
 
+pub fn run_backend_once_with_mode(
+    words: &[u32],
+    inject_kind: Option<&str>,
+    inject_step: u64,
+    mode: Risc0ExecutionMode,
+) -> Result<RunResponse, String> {
+    match mode {
+        Risc0ExecutionMode::Kernel => {
+            let program = build_program(words);
+            let image = MemoryImage::new_kernel(program);
+            run_backend_once_with_syscall(
+                words,
+                inject_kind,
+                inject_step,
+                mode,
+                image,
+                &Risc0HostSyscall,
+            )
+        }
+        Risc0ExecutionMode::V1Compat { host_read_fill } => {
+            let user = build_v1compat_user_program(words);
+            let kernel = v1compat_kernel_program()?;
+            let image = MemoryImage::with_kernel(user, kernel);
+            let syscall = Risc0FillHostSyscall { fill: host_read_fill };
+            run_backend_once_with_syscall(words, inject_kind, inject_step, mode, image, &syscall)
+        }
+    }
+}
+
+pub fn run_backend_once(
+    words: &[u32],
+    inject_kind: Option<&str>,
+    inject_step: u64,
+) -> Result<RunResponse, String> {
+    run_backend_once_with_mode(words, inject_kind, inject_step, Risc0ExecutionMode::Kernel)
+}
+
 pub struct Risc0Backend {
     max_instructions: usize,
+    mode: Risc0ExecutionMode,
     eval: BackendEval,
     last_observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pending_injection: Option<BeakInjectionPlan>,
@@ -885,8 +1018,17 @@ pub struct Risc0Backend {
 
 impl Risc0Backend {
     pub fn new(max_instructions: usize) -> Self {
+        Self::new_with_mode(max_instructions, Risc0ExecutionMode::Kernel)
+    }
+
+    pub fn new_v1compat(max_instructions: usize, host_read_fill: u8) -> Self {
+        Self::new_with_mode(max_instructions, Risc0ExecutionMode::V1Compat { host_read_fill })
+    }
+
+    pub fn new_with_mode(max_instructions: usize, mode: Risc0ExecutionMode) -> Self {
         Self {
             max_instructions,
+            mode,
             eval: BackendEval::default(),
             last_observed_injection_sites: BTreeMap::new(),
             pending_injection: None,
@@ -1000,6 +1142,11 @@ impl Risc0Backend {
             Some((
                 semantic::control::ENTRYPOINT_BINDING.semantic_class,
                 ENTRYPOINT_INJECT_KIND.to_string(),
+            ))
+        } else if bucket_id == semantic::exec::SOURCE_OPERAND_BINDING.id {
+            Some((
+                semantic::exec::SOURCE_OPERAND_BINDING.semantic_class,
+                EXEC_SOURCE_BINDING_INJECT_KIND.to_string(),
             ))
         } else if bucket_id == semantic::exec::DEST_BINDING.id {
             Some((
@@ -1121,10 +1268,11 @@ impl BenchmarkBackend for Risc0Backend {
 
     fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
         self.eval = BackendEval::default();
-        let resp = match run_backend_once(
+        let resp = match run_backend_once_with_mode(
             words,
             self.pending_injection.as_ref().map(|plan| plan.kind.as_str()),
             self.pending_injection.as_ref().map(|plan| plan.step).unwrap_or(0),
+            self.mode,
         ) {
             Ok(resp) => resp,
             Err(err) => {
@@ -1166,7 +1314,7 @@ mod tests {
         build_program, clear_executor_word_injection, configure_executor_word_injection,
         current_executor_word_injection_hit, ensure_seal_matches_segment_claim, execute_session,
         nonzero_reg_count, observe_sites_for_words, read_reg_bank, ECALL_ARG_DECOMP_INJECT_KIND,
-        EXEC_SOURCE_BINDING_INJECT_KIND,
+        EXEC_SOURCE_BINDING_INJECT_KIND, OPERAND_ROUTE_INJECT_KIND,
     };
     use beak_core::trace::BucketHit;
     use risc0_binfmt::MemoryImage;
@@ -1186,9 +1334,9 @@ mod tests {
 
     #[test]
     fn observe_ecall_injection_site() {
-        let words = [0x0010_0893, 0x0000_0073];
+        let words = [0x0010_0893, 0x0000_0513, 0x0050_05b7, 0x0090_0613, 0x0000_0073];
         let sites = observe_sites_for_words(&words);
-        assert_eq!(sites.get(ECALL_ARG_DECOMP_INJECT_KIND), Some(&vec![1]));
+        assert_eq!(sites.get(ECALL_ARG_DECOMP_INJECT_KIND), Some(&vec![4]));
     }
 
     #[test]
@@ -1246,7 +1394,7 @@ mod tests {
     }
 
     #[test]
-    fn source_binding_bucket_is_not_backend_mapped() {
+    fn source_binding_bucket_maps_to_lower_source_read_hook() {
         let mut backend = super::Risc0Backend::new(16);
         backend.last_observed_injection_sites =
             observe_sites_for_words(&[0x0010_0093, 0x0020_0113, 0x0020_81b3]);
@@ -1256,6 +1404,14 @@ mod tests {
         };
 
         let candidates = backend.semantic_candidate_from_hit(&hit);
-        assert!(candidates.is_empty());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].inject_kind, EXEC_SOURCE_BINDING_INJECT_KIND);
+    }
+
+    #[test]
+    fn same_source_binding_site_maps_to_lower_source_read_hook() {
+        let sites = observe_sites_for_words(&[0x0080_0113, 0x0021_00b3]);
+        assert_eq!(sites.get(EXEC_SOURCE_BINDING_INJECT_KIND), Some(&vec![1]));
+        assert!(!sites.contains_key(OPERAND_ROUTE_INJECT_KIND));
     }
 }

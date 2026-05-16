@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::observations::{SequenceInsnObservation, SequenceSemanticMatcherProfile};
-use beak_core::trace::{semantic, semantic_matchers, BucketHit, Trace, TraceSignal};
-use serde_json::{json, Value};
+use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic, semantic_matchers};
+use serde_json::{Value, json};
 use sp1_core_executor::{
     ByteOpcode, ExecutionRecord, Executor, ExecutorMode, Instruction as SP1Instruction, Opcode,
     Program,
@@ -810,6 +810,42 @@ fn byte_lookup_step(row: usize, opcode_index: usize) -> u64 {
     (row as u64).saturating_mul(9).saturating_add(opcode_index as u64)
 }
 
+fn syscall_instr_padded_rows(real_rows: usize) -> usize {
+    if real_rows == 0 { 0 } else { real_rows.next_power_of_two().max(16) }
+}
+
+fn emit_syscall_instr_padding_hits(records: &[ExecutionRecord]) -> Vec<BucketHit> {
+    let mut hits = Vec::new();
+    for (record_idx, record) in records.iter().enumerate() {
+        let real_rows = record.syscall_events.len();
+        let padded_rows = syscall_instr_padded_rows(real_rows);
+        if padded_rows <= real_rows {
+            continue;
+        }
+        let row_idx = real_rows as u64;
+        let mut details = HashMap::new();
+        details.insert("obligation_id".to_string(), json!("pd1"));
+        details.insert("cell_id".to_string(), json!("pd1.lookup_padding"));
+        details.insert("backend".to_string(), json!(BACKEND));
+        details.insert("commit".to_string(), json!(COMMIT));
+        details.insert("trace_source".to_string(), json!("syscall_instruction_padding"));
+        details.insert("table_name".to_string(), json!("SyscallInstrs"));
+        details.insert("interaction_kind".to_string(), json!("syscall_local"));
+        details.insert("send_to_table_source".to_string(), json!("op_a_access.prev_value.byte1"));
+        details.insert("step_idx".to_string(), json!(row_idx));
+        details.insert("row_idx".to_string(), json!(row_idx));
+        details.insert("record_idx".to_string(), json!(record_idx));
+        details.insert("real_rows".to_string(), json!(real_rows));
+        details.insert("padded_rows".to_string(), json!(padded_rows));
+        details.insert("padding_rows".to_string(), json!(padded_rows - real_rows));
+        details.insert("is_real".to_string(), json!(false));
+        details.insert("is_padding".to_string(), json!(true));
+        details.insert("strict_candidate".to_string(), json!(true));
+        hits.push(BucketHit::semantic(semantic::row::PADDING_INTERACTION_SEND, details));
+    }
+    hits
+}
+
 fn emit_memory_event_obligation_hits(
     records: &[ExecutionRecord],
     instructions: &[Sp1Insn],
@@ -1385,11 +1421,7 @@ fn emit_instruction_obligation_hits(instructions: &[Sp1Insn]) -> Vec<BucketHit> 
             }
             "jal" | "jalr" => {
                 let cell = if mnemonic == "jal" {
-                    if rd == Some(0) {
-                        "cf2.jal_x0"
-                    } else {
-                        "cf2.jal_rd"
-                    }
+                    if rd == Some(0) { "cf2.jal_x0" } else { "cf2.jal_rd" }
                 } else if rd == Some(0) {
                     "cf2.jalr_x0"
                 } else {
@@ -1701,6 +1733,7 @@ impl Sp1Trace {
 
         let mut out = Self::new(instructions, chip_rows, interactions);
         out.bucket_hits.extend(emit_memory_event_obligation_hits(records, &out.instructions));
+        out.bucket_hits.extend(emit_syscall_instr_padding_hits(records));
         Ok(out)
     }
 

@@ -1,0 +1,35 @@
+[package]
+name = "beak-jolt-6c3b0b49"
+version = "0.1.0"
+edition = "2021"
+description = "Jolt-specific beak binaries for the vulnerable read/write-memory snapshot"
+publish = false
+
+[lib]
+path = "src/lib/mod.rs"
+
+[[bin]]
+name = "beak-fuzz"
+path = "src/bin/fuzz.rs"
+
+[[bin]]
+name = "beak-trace"
+path = "src/bin/trace.rs"
+
+[dependencies]
+ark-bn254 = "0.4.0"
+beak-core = { path = "../../crates/beak-core" }
+clap = "4.5"
+serde_json = "1.0"
+
+common = { path = "../../beak-py/out/jolt-6c3b0b49db0afceb967b33656176fa7a27e557b9/jolt-src/common" }
+tracer = { path = "../../beak-py/out/jolt-6c3b0b49db0afceb967b33656176fa7a27e557b9/jolt-src/tracer" }
+jolt-core = { path = "../../beak-py/out/jolt-6c3b0b49db0afceb967b33656176fa7a27e557b9/jolt-src/jolt-core", features = ["host"] }
+
+[patch.crates-io]
+ark-ff = { git = "https://github.com/a16z/arkworks-algebra", branch = "optimize/field-from-u64" }
+ark-ec = { git = "https://github.com/a16z/arkworks-algebra", branch = "optimize/field-from-u64" }
+ark-serialize = { git = "https://github.com/a16z/arkworks-algebra", branch = "optimize/field-from-u64" }
+
+[patch."https://gitlab.com/UlvetannaOSS/binius"]
+binius_field = { path = "../../beak-py/out/jolt-6c3b0b49db0afceb967b33656176fa7a27e557b9/binius-src/crates/field" }

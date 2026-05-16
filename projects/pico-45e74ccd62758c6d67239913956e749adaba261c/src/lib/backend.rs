@@ -70,6 +70,9 @@ struct RealRunnerResponse {
 const TIMESTAMP_INJECT_KIND: &str = "pico.semantic.memory.timestamped_load_path";
 const BOOL_INJECT_KIND: &str = "pico.semantic.lookup.boolean_multiplicity";
 const OP_SELECTOR_INJECT_KIND: &str = "pico.semantic.exec.op_selector_binding";
+const READ_WRITE_OP_SELECTOR_INJECT_KIND: &str =
+    "pico.semantic.exec.op_selector_binding.read_write";
+const ECALL_ARG_INJECT_KIND: &str = "pico.semantic.control.ecall_argument_decomposition";
 const ZERO_REG_INJECT_KIND: &str = "pico.semantic.decode.zero_register_immutability";
 const OPERAND_ROUTING_INJECT_KIND: &str = "pico.semantic.decode.operand_index_routing";
 const DEST_BINDING_INJECT_KIND: &str = "pico.semantic.exec.dest_binding";
@@ -365,9 +368,29 @@ impl PicoBackend {
                     InjectionSchedule::AroundAnchor(anchor),
                 )
             } else if bucket_id == semantic::exec::OP_SELECTOR_BINDING.id {
+                let is_read_write_cell = hit
+                    .details
+                    .get("cell_id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|cell| matches!(cell, "id4.load" | "id4.store"))
+                    || hit
+                        .details
+                        .get("mnemonic")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(is_memory_mnemonic);
                 (
                     semantic::exec::OP_SELECTOR_BINDING.semantic_class,
-                    OP_SELECTOR_INJECT_KIND,
+                    if is_read_write_cell {
+                        READ_WRITE_OP_SELECTOR_INJECT_KIND
+                    } else {
+                        OP_SELECTOR_INJECT_KIND
+                    },
+                    InjectionSchedule::AroundAnchor(anchor),
+                )
+            } else if bucket_id == semantic::control::ECALL_ARGUMENT_DECOMPOSITION.id {
+                (
+                    semantic::control::ECALL_ARGUMENT_DECOMPOSITION.semantic_class,
+                    ECALL_ARG_INJECT_KIND,
                     InjectionSchedule::AroundAnchor(anchor),
                 )
             } else if bucket_id == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id {
@@ -556,24 +579,26 @@ impl PicoBackend {
 
     fn semantic_candidate_priority(candidate: &SemanticInjectionCandidate) -> u8 {
         let bucket_id = candidate.bucket_id.as_str();
-        if bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id {
+        if bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id {
             0
-        } else if bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id {
+        } else if bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id {
             1
-        } else if bucket_id == semantic::exec::OP_SELECTOR_BINDING.id {
+        } else if bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id {
             2
+        } else if bucket_id == semantic::exec::OP_SELECTOR_BINDING.id {
+            3
         } else if bucket_id.starts_with("sem.decode.")
             || bucket_id.starts_with("sem.exec.")
             || bucket_id.starts_with("sem.control.")
             || bucket_id.starts_with("sem.time.")
         {
-            3
-        } else if bucket_id.starts_with("sem.alu.") || bucket_id.starts_with("sem.arithmetic.") {
             4
-        } else if bucket_id.starts_with("sem.memory.") {
+        } else if bucket_id.starts_with("sem.alu.") || bucket_id.starts_with("sem.arithmetic.") {
             5
-        } else {
+        } else if bucket_id.starts_with("sem.memory.") {
             6
+        } else {
+            7
         }
     }
 
@@ -651,6 +676,10 @@ impl PicoBackend {
             let _ = worker.reader_thread.join();
         }
     }
+}
+
+fn is_memory_mnemonic(mnemonic: &str) -> bool {
+    matches!(mnemonic, "lb" | "lh" | "lw" | "lbu" | "lhu" | "sb" | "sh" | "sw")
 }
 
 impl BenchmarkBackend for PicoBackend {
@@ -763,5 +792,145 @@ impl BenchmarkBackend for PicoBackend {
 impl Drop for PicoBackend {
     fn drop(&mut self) {
         self.stop_worker();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use beak_core::trace::Trace;
+
+    #[test]
+    fn id4_load_store_candidates_use_read_write_selector_hook() {
+        let trace = PicoTrace::from_words(&[0x0000_2083]).expect("lw trace");
+        let hit = trace
+            .bucket_hits()
+            .iter()
+            .find(|hit| {
+                hit.bucket_id == semantic::exec::OP_SELECTOR_BINDING.id
+                    && hit.details.get("cell_id").and_then(|v| v.as_str()) == Some("id4.load")
+            })
+            .expect("id4 load hit")
+            .clone();
+
+        let backend = PicoBackend::new(8);
+        let candidates =
+            <PicoBackend as BenchmarkBackend>::semantic_injection_candidates(&backend, &[hit]);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].bucket_id, semantic::exec::OP_SELECTOR_BINDING.id);
+        assert_eq!(candidates[0].inject_kind, READ_WRITE_OP_SELECTOR_INJECT_KIND);
+    }
+
+    #[test]
+    fn cf5_candidates_use_ecall_argument_hook() {
+        let trace = PicoTrace::from_executed(&[PicoExecutedInsn {
+            step_idx: 0,
+            chunk: 0,
+            clk: 0,
+            pc: 0x1000,
+            next_pc: 0,
+            word: 0x0000_0073,
+            opcode: "ecall".to_string(),
+            a: 0,
+            b: 0,
+            c: 0,
+            memory: None,
+            ecall_syscall_id: Some(0),
+            ecall_operand_to_check: Some(0),
+        }])
+        .expect("ecall trace");
+        let hit = trace
+            .bucket_hits()
+            .iter()
+            .find(|hit| hit.bucket_id == semantic::control::ECALL_ARGUMENT_DECOMPOSITION.id)
+            .expect("cf5 hit")
+            .clone();
+
+        let backend = PicoBackend::new(8);
+        let candidates =
+            <PicoBackend as BenchmarkBackend>::semantic_injection_candidates(&backend, &[hit]);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].inject_kind, ECALL_ARG_INJECT_KIND);
+    }
+
+    #[test]
+    fn timestamp_monotonic_candidate_precedes_timestamped_helper_bucket() {
+        let trace = PicoTrace::from_executed(&[
+            PicoExecutedInsn {
+                step_idx: 0,
+                chunk: 1,
+                clk: 0,
+                pc: 0x1000,
+                next_pc: 0x1004,
+                word: 0x0400_0213,
+                opcode: "add".to_string(),
+                a: 64,
+                b: 0,
+                c: 64,
+                memory: None,
+                ecall_syscall_id: None,
+                ecall_operand_to_check: None,
+            },
+            PicoExecutedInsn {
+                step_idx: 1,
+                chunk: 1,
+                clk: 4,
+                pc: 0x1004,
+                next_pc: 0x1008,
+                word: 0x0010_0293,
+                opcode: "add".to_string(),
+                a: 1,
+                b: 0,
+                c: 1,
+                memory: None,
+                ecall_syscall_id: None,
+                ecall_operand_to_check: None,
+            },
+            PicoExecutedInsn {
+                step_idx: 2,
+                chunk: 1,
+                clk: 8,
+                pc: 0x1008,
+                next_pc: 0x100c,
+                word: 0x0052_2023,
+                opcode: "sw".to_string(),
+                a: 1,
+                b: 64,
+                c: 0,
+                memory: Some(1),
+                ecall_syscall_id: None,
+                ecall_operand_to_check: None,
+            },
+            PicoExecutedInsn {
+                step_idx: 3,
+                chunk: 1,
+                clk: 12,
+                pc: 0x100c,
+                next_pc: 0x1010,
+                word: 0x0002_2303,
+                opcode: "lw".to_string(),
+                a: 1,
+                b: 64,
+                c: 0,
+                memory: Some(1),
+                ecall_syscall_id: None,
+                ecall_operand_to_check: None,
+            },
+        ])
+        .expect("timestamp trace");
+
+        let backend = PicoBackend::new(8);
+        let candidates = <PicoBackend as BenchmarkBackend>::semantic_injection_candidates(
+            &backend,
+            trace.bucket_hits(),
+        );
+
+        assert!(candidates.iter().any(|candidate| {
+            candidate.bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id
+        }));
+        assert_eq!(candidates[0].bucket_id, semantic::time::MONOTONIC_ACCESS_ORDERING.id);
+        assert_eq!(candidates[0].inject_kind, TIMESTAMP_INJECT_KIND);
     }
 }

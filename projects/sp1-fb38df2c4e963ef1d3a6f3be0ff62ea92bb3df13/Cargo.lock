@@ -254,6 +254,7 @@ name = "beak-sp1-fb38df2c"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "fuzzer_utils",
  "p3-field",
  "serde",
  "serde_json",

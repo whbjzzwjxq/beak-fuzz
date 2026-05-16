@@ -8,13 +8,13 @@ use std::thread::JoinHandle;
 use beak_core::fuzz::benchmark::{
     BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
 };
-use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
+use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic};
 use serde::{Deserialize, Serialize};
 use sp1_core_executor::{ByteOpcode, ExecutionRecord, Executor, ExecutorMode, Opcode};
 use sp1_core_machine::{io::SP1Stdin, utils::run_test};
 use sp1_stark::{CpuProver, SP1CoreOpts};
 
-use crate::trace::{build_sp1_program, decode_word_to_sp1_instruction, Sp1Trace};
+use crate::trace::{Sp1Trace, build_sp1_program, decode_word_to_sp1_instruction};
 
 const MEMORY_EFFECT_INJECT_KIND: &str = "sp1.semantic.exec.memory_effect_binding";
 const MEMORY_ADDRESS_INJECT_KIND: &str = "sp1.semantic.memory.address_pointer_consistency";
@@ -90,11 +90,7 @@ fn base_inject_kind(kind: &str) -> &str {
 }
 
 fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
-    if variant.is_empty() {
-        kind.to_string()
-    } else {
-        format!("{kind}::{variant}")
-    }
+    if variant.is_empty() { kind.to_string() } else { format!("{kind}::{variant}") }
 }
 
 fn control_flow_family_for_opcode(opcode: Opcode) -> Option<&'static str> {
@@ -268,6 +264,19 @@ fn collect_observed_injection_sites(records: &[ExecutionRecord]) -> BTreeMap<Str
         for event in &record.memory_instr_events {
             record_memory_instr_sites(&mut sites, event.opcode, memory_hook_step);
             memory_hook_step = memory_hook_step.saturating_add(1);
+        }
+        for (syscall_event, _) in record.precompile_events.all_events() {
+            record_site(&mut sites, MEMORY_ADDRESS_INJECT_KIND, syscall_event.clk as u64);
+        }
+        for event in &record.global_memory_initialize_events {
+            if event.used != 0 {
+                record_site(&mut sites, MEMORY_ADDRESS_INJECT_KIND, event.timestamp as u64);
+            }
+        }
+        for event in &record.global_memory_finalize_events {
+            if event.used != 0 {
+                record_site(&mut sites, MEMORY_ADDRESS_INJECT_KIND, event.timestamp as u64);
+            }
         }
         for (lookup, mult) in &record.byte_lookups {
             if *mult == 0 {
@@ -536,10 +545,93 @@ impl Sp1Backend {
 
     fn memory_hook_step_from_hit(hit: &BucketHit) -> u64 {
         hit.details
-            .get("store_step_idx")
+            .get("syscall_clk")
             .and_then(|v| v.as_u64())
+            .or_else(|| hit.details.get("timestamp").and_then(|v| v.as_u64()))
+            .or_else(|| hit.details.get("store_step_idx").and_then(|v| v.as_u64()))
             .or_else(|| hit.details.get("memory_hook_step").and_then(|v| v.as_u64()))
             .unwrap_or_else(|| Self::step_from_hit(hit))
+    }
+
+    fn detail_str<'a>(hit: &'a BucketHit, key: &str) -> Option<&'a str> {
+        hit.details.get(key).and_then(|value| value.as_str())
+    }
+
+    fn detail_u64(hit: &BucketHit, key: &str) -> Option<u64> {
+        hit.details
+            .get(key)
+            .and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse::<u64>().ok()))
+    }
+
+    fn memory_address_inject_kind_from_hit(hit: &BucketHit) -> String {
+        match Self::detail_str(hit, "trace_source") {
+            Some("precompile_events") => {
+                let phase = Self::detail_str(hit, "precompile_phase");
+                let site = if hit.bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id {
+                    "precompile_global_alignment"
+                } else {
+                    match phase {
+                        Some("sha_compress.w_read") => "sha_compress_w_slice",
+                        Some("sha_compress.h_read") | Some("sha_compress.h_write") => {
+                            "sha_compress_h_slice"
+                        }
+                        Some(phase) if phase.starts_with("sha_extend.") => "sha_extend_w_slice",
+                        _ => "precompile_slice",
+                    }
+                };
+                let mut fields =
+                    vec!["site=".to_string() + site, "trace_source=precompile_events".to_string()];
+                if let Some(precompile) = Self::detail_str(hit, "precompile") {
+                    fields.push(format!("precompile={precompile}"));
+                }
+                if let Some(phase) = phase {
+                    fields.push(format!("phase={phase}"));
+                }
+                if let Some(ptr) = Self::detail_u64(hit, "effective_ptr") {
+                    fields.push(format!("effective_ptr={ptr}"));
+                }
+                if let Some(width) = Self::detail_u64(hit, "width") {
+                    fields.push(format!("width={width}"));
+                }
+                if let Some(slice_len_words) = Self::detail_u64(hit, "slice_len_words") {
+                    fields.push(format!("slice_len_words={slice_len_words}"));
+                }
+                if hit.details.get("is_read").and_then(|v| v.as_bool()) == Some(true) {
+                    fields.push("access=read".to_string());
+                } else if hit.details.get("is_write").and_then(|v| v.as_bool()) == Some(true) {
+                    fields.push("access=write".to_string());
+                }
+                inject_kind_with_variant(MEMORY_ADDRESS_INJECT_KIND, &fields.join(","))
+            }
+            Some("global_memory_initialize_event") | Some("global_memory_finalize_event") => {
+                let mut fields = vec!["site=global_event".to_string()];
+                if let Some(source) = Self::detail_str(hit, "trace_source") {
+                    fields.push(format!("trace_source={source}"));
+                }
+                if let Some(phase) = Self::detail_str(hit, "phase") {
+                    fields.push(format!("phase={phase}"));
+                }
+                if let Some(ptr) = Self::detail_u64(hit, "effective_ptr") {
+                    fields.push(format!("effective_ptr={ptr}"));
+                }
+                if let Some(event_idx) = Self::detail_u64(hit, "global_memory_event_idx") {
+                    fields.push(format!("event_idx={event_idx}"));
+                }
+                inject_kind_with_variant(MEMORY_ADDRESS_INJECT_KIND, &fields.join(","))
+            }
+            _ => inject_kind_with_variant(MEMORY_ADDRESS_INJECT_KIND, "site=addr_word"),
+        }
+    }
+
+    fn uses_detail_scheduled_memory_address_hook(inject_kind: &str) -> bool {
+        if base_inject_kind(inject_kind) != MEMORY_ADDRESS_INJECT_KIND {
+            return false;
+        }
+        inject_kind.contains("site=global_event")
+            || inject_kind.contains("site=precompile_global_alignment")
+            || inject_kind.contains("site=precompile_slice")
+            || inject_kind.contains("site=sha_compress_")
+            || inject_kind.contains("site=sha_extend_")
     }
 
     fn byte_lookup_step_from_hit(hit: &BucketHit) -> u64 {
@@ -652,7 +744,7 @@ impl Sp1Backend {
             };
             (
                 semantic_class.to_string(),
-                inject_kind_with_variant(MEMORY_ADDRESS_INJECT_KIND, "site=addr_word"),
+                Self::memory_address_inject_kind_from_hit(hit),
                 InjectionSchedule::Explicit(vec![anchor]),
             )
         } else if bucket_id == semantic::memory::LOAD_VALUE_BINDING.id
@@ -814,13 +906,16 @@ impl Sp1Backend {
         };
 
         let schedule_key = base_inject_kind(inject_kind.as_str());
-        let schedule = self
-            .last_observed_injection_sites
-            .get(schedule_key)
-            .map(|steps| {
-                InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor))
-            })
-            .unwrap_or(fallback_schedule);
+        let schedule = if Self::uses_detail_scheduled_memory_address_hook(inject_kind.as_str()) {
+            fallback_schedule
+        } else {
+            self.last_observed_injection_sites
+                .get(schedule_key)
+                .map(|steps| {
+                    InjectionSchedule::Explicit(Self::ordered_steps_around_anchor(steps, anchor))
+                })
+                .unwrap_or(fallback_schedule)
+        };
 
         Self::inject_kinds_for_base(inject_kind.as_str())
             .into_iter()
@@ -836,10 +931,15 @@ impl Sp1Backend {
 
     fn semantic_candidate_priority(candidate: &SemanticInjectionCandidate) -> u8 {
         let bucket_id = candidate.bucket_id.as_str();
-        if bucket_id == semantic::exec::MEMORY_EFFECT_BINDING.id {
+        if (bucket_id == semantic::memory::ADDRESS_ALIGNMENT_CONSISTENCY.id
+            || bucket_id == semantic::memory::ADDRESS_BOUNDARY_RANGE.id)
+            && Self::uses_detail_scheduled_memory_address_hook(candidate.inject_kind.as_str())
+        {
             0
-        } else if bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id {
+        } else if bucket_id == semantic::exec::MEMORY_EFFECT_BINDING.id {
             1
+        } else if bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id {
+            2
         } else if matches!(
             bucket_id,
             id if id == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id
@@ -850,9 +950,9 @@ impl Sp1Backend {
                 || id == semantic::decode::FORMAT_IMMEDIATE_REASSEMBLY.id
                 || id == semantic::exec::OP_SELECTOR_BINDING.id
         ) {
-            2
-        } else {
             3
+        } else {
+            4
         }
     }
 

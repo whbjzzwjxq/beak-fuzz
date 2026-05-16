@@ -4,7 +4,10 @@ import argparse
 from pathlib import Path
 
 from nexus_fuzzer.settings import NEXUS_BENCHMARK_COMMIT, resolve_nexus_commit
-from nexus_fuzzer.utils_install import clone_and_checkout_nexus
+from nexus_fuzzer.utils_install import (
+    clone_and_checkout_nexus,
+    clone_and_checkout_nexus_auxiliary_sources,
+)
 from zkvm_fuzzer_utils.snapshot_install import (
     apply_pass_pipeline,
     default_snapshot_out_root,
@@ -52,6 +55,10 @@ def _install(args: argparse.Namespace) -> int:
         dest=dest,
         commit_or_branch=resolved,
         zkvm_src=args.zkvm_src,
+    )
+    clone_and_checkout_nexus_auxiliary_sources(
+        nexus_install_path=dest,
+        commit_or_branch=resolved,
     )
     apply_pass_pipeline(
         package_name="nexus_fuzzer",
