@@ -4133,7 +4133,8 @@ def _patch_f038_loadstore_mem_as_witness_injection(openvm_install_path: Path) ->
         let beak_is_load = matches!(local_opcode, LOADW | LOADB | LOADH | LOADBU | LOADHU);
         let beak_is_store = matches!(local_opcode, STOREW | STOREH | STOREB);
         let mut beak_mem_as = e;
-        if fuzzer_utils::should_inject_witness("openvm.semantic.memory.address_space_consistency", beak_witness_step) {
+        let beak_address_space_step = beak_witness_step.saturating_add(1);
+        if fuzzer_utils::should_inject_witness("openvm.semantic.memory.address_space_consistency", beak_address_space_step) {
             let beak_variant =
                 fuzzer_utils::active_witness_variant("openvm.semantic.memory.address_space_consistency");
             let spec = beak_variant
@@ -4163,7 +4164,7 @@ def _patch_f038_loadstore_mem_as_witness_injection(openvm_install_path: Path) ->
             if selected_mem_as != old_mem_as {
                 eprintln!(
                     "[beak-witness-inject] kind=openvm.semantic.memory.address_space_consistency step={} site=loadstore_adapter mode={} old_mem_as={} new_mem_as={} is_load={} is_store={}",
-                    beak_witness_step,
+                    beak_address_space_step,
                     mode,
                     old_mem_as,
                     selected_mem_as,
@@ -4174,7 +4175,7 @@ def _patch_f038_loadstore_mem_as_witness_injection(openvm_install_path: Path) ->
             } else {
                 eprintln!(
                     "[beak-witness-inject] kind=openvm.semantic.memory.address_space_consistency step={} site=loadstore_adapter mode={} skip_noop old_mem_as={} is_load={} is_store={}",
-                    beak_witness_step,
+                    beak_address_space_step,
                     mode,
                     old_mem_as,
                     beak_is_load,

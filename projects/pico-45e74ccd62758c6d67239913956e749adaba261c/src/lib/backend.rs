@@ -579,13 +579,13 @@ impl PicoBackend {
 
     fn semantic_candidate_priority(candidate: &SemanticInjectionCandidate) -> u8 {
         let bucket_id = candidate.bucket_id.as_str();
-        if bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id {
+        if bucket_id == semantic::exec::OP_SELECTOR_BINDING.id {
             0
         } else if bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id {
             1
         } else if bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id {
             2
-        } else if bucket_id == semantic::exec::OP_SELECTOR_BINDING.id {
+        } else if bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id {
             3
         } else if bucket_id.starts_with("sem.decode.")
             || bucket_id.starts_with("sem.exec.")

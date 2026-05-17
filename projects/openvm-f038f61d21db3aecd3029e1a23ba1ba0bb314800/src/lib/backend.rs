@@ -176,8 +176,10 @@ pub fn run_backend_once(
     let t4 = Instant::now();
     let observed_injection_sites = fuzzer_utils::take_observed_witness_sites();
     let applied_injection_sites = fuzzer_utils::take_applied_witness_sites();
-    let injection_applied =
-        inject_kind
+    let injection_is_noop_probe =
+        inject_kind.map(|kind| kind.contains("mode=noop_probe")).unwrap_or(false);
+    let injection_applied = !injection_is_noop_probe
+        && inject_kind
             .and_then(|kind| applied_injection_sites.get(base_inject_kind(kind)))
             .map(|steps| {
                 if inject_step == u64::MAX {
@@ -409,14 +411,11 @@ impl OpenVmBackend {
     }
 
     fn o51_variant_specs() -> Vec<String> {
-        let mut specs = Vec::new();
-        specs.push("mode=bus_mem_as_other".to_string());
-        specs.push("mode=bus_mem_as_reg".to_string());
-        for rank in 0..32u32 {
-            specs.push(format!("mode=noop_probe,rank={rank}"));
-        }
-        specs.push("mode=bus_mem_as_zero".to_string());
-        specs
+        vec![
+            "mode=bus_mem_as_other".to_string(),
+            "mode=bus_mem_as_reg".to_string(),
+            "mode=bus_mem_as_zero".to_string(),
+        ]
     }
 
     fn inject_kinds_for_base(inject_kind: &str) -> Vec<String> {
@@ -454,7 +453,15 @@ impl OpenVmBackend {
         hit: &beak_core::trace::BucketHit,
     ) -> Vec<SemanticInjectionCandidate> {
         let bucket_id = hit.bucket_id.as_str();
-        let mut anchor = Self::step_from_hit(hit);
+        let mut anchor = if bucket_id == semantic::memory::ADDRESS_SPACE_CONSISTENCY.id {
+            hit.details
+                .get("step_idx")
+                .and_then(|v| v.as_u64())
+                .or_else(|| hit.details.get("op_idx").and_then(|v| v.as_u64()))
+                .unwrap_or(0)
+        } else {
+            Self::step_from_hit(hit)
+        };
         if bucket_id == semantic::memory::STORE_LOAD_PAYLOAD_FLOW.id {
             if let Some(store_step_idx) =
                 hit.details.get("store_step_idx").and_then(|value| value.as_u64())
