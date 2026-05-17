@@ -634,8 +634,6 @@ pub fn run_benchmark<B: BenchmarkBackend>(
 
     let take_n =
         if cfg.initial_limit == 0 { seeds.len() } else { cfg.initial_limit.min(seeds.len()) };
-    let only_bucket = std::env::var("BEAK_ONLY_BUCKET").ok().filter(|s| !s.is_empty());
-
     let mut bug_count = 0usize;
     let mut eval_id: u64 = 0;
     let mut mutation_corpus = Vec::<CorpusEntry>::new();
@@ -732,9 +730,6 @@ pub fn run_benchmark<B: BenchmarkBackend>(
         let mut attempted = HashSet::<(String, u64)>::new();
 
         for candidate in candidates {
-            if only_bucket.as_deref().is_some_and(|bucket| candidate.bucket_id != bucket) {
-                continue;
-            }
             let steps = candidate_steps(&cfg, &candidate);
             if steps.is_empty() {
                 continue;
@@ -937,9 +932,6 @@ pub fn run_benchmark<B: BenchmarkBackend>(
         let mut attempted = HashSet::<(String, u64)>::new();
 
         for candidate in candidates {
-            if only_bucket.as_deref().is_some_and(|bucket| candidate.bucket_id != bucket) {
-                continue;
-            }
             let steps = candidate_steps(&cfg, &candidate);
             if steps.is_empty() {
                 continue;
