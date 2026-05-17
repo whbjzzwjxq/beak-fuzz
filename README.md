@@ -147,7 +147,7 @@ CPU_SET=0-7 \
 VM_CORES=2 \
 PARALLEL_VMS=1 \
 RUN_ROOT=out/mutation-campaign/smoke \
-SOFT_TIMEOUT_SECONDS=120 \
+SOFT_TIMEOUT_SECONDS=600 \
 KILL_GRACE_SECONDS=10 \
 INITIAL_LIMIT=1 \
 MUTATION_ITERS=0 \
@@ -159,8 +159,19 @@ FAST_TEST=1 \
 python3 scripts/run_serial_install_injection.py
 ```
 
+On a completely fresh clone, the first smoke includes snapshot checkout and
+release builds, so `SOFT_TIMEOUT_SECONDS=600` is intentionally larger than the
+runtime of a warmed-cache smoke. If you only want to validate target dispatch,
+snapshot install, and timeout cleanup, a smaller value such as
+`SOFT_TIMEOUT_SECONDS=60` is acceptable and may produce `budget_reached`
+statuses before every VM emits JSONL artifacts.
+
 If snapshots are already installed and you only want to re-run the benchmark
 portion, add `--skip-install`.
+
+When validating this in Docker, prefer running the container with an init
+process, for example `docker run --init ...`, so killed compiler/prover process
+groups are reaped promptly.
 
 ### Full mutation campaign
 
