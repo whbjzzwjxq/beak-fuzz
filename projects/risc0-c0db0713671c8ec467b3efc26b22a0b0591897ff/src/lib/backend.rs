@@ -1,5 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{BufRead, BufReader, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
 use std::{cell::RefCell, rc::Rc};
 
 use beak_core::fuzz::benchmark::{
@@ -50,6 +54,57 @@ pub struct RunResponse {
     pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pub injection_applied: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerRequest {
+    pub request_id: u64,
+    pub words: Vec<u32>,
+    pub iteration: u64,
+    pub inject_kind: Option<String>,
+    pub inject_step: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerResponse {
+    pub request_id: u64,
+    pub final_regs: Option<[u32; 32]>,
+    pub micro_op_count: usize,
+    pub bucket_hits: Vec<BucketHit>,
+    pub trace_signals: Vec<TraceSignal>,
+    pub backend_error: Option<String>,
+    pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
+    pub injection_applied: bool,
+}
+
+impl WorkerResponse {
+    pub fn from_run_response(request_id: u64, resp: RunResponse) -> Self {
+        Self {
+            request_id,
+            final_regs: resp.final_regs,
+            micro_op_count: resp.micro_op_count,
+            bucket_hits: resp.bucket_hits,
+            trace_signals: resp.trace_signals,
+            backend_error: resp.backend_error,
+            observed_injection_sites: resp.observed_injection_sites,
+            injection_applied: resp.injection_applied,
+        }
+    }
+
+    pub fn error(request_id: u64, error: String) -> Self {
+        Self {
+            request_id,
+            final_regs: None,
+            micro_op_count: 0,
+            bucket_hits: Vec::new(),
+            trace_signals: Vec::new(),
+            backend_error: Some(error),
+            observed_injection_sites: BTreeMap::new(),
+            injection_applied: false,
+        }
+    }
+}
+
+const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
 
 fn base_inject_kind(kind: &str) -> &str {
     kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
@@ -472,11 +527,21 @@ pub fn run_backend_once(
     })
 }
 
+struct WorkerProcess {
+    child: Child,
+    stdin: ChildStdin,
+    responses_rx: Receiver<Result<WorkerResponse, String>>,
+    reader_thread: JoinHandle<()>,
+}
+
 pub struct Risc0Backend {
     max_instructions: usize,
     eval: BackendEval,
     last_observed_injection_sites: BTreeMap<String, Vec<u64>>,
+    current_iteration: u64,
+    next_request_id: u64,
     pending_injection: Option<BeakInjectionPlan>,
+    worker: Option<WorkerProcess>,
 }
 
 impl Risc0Backend {
@@ -485,7 +550,76 @@ impl Risc0Backend {
             max_instructions,
             eval: BackendEval::default(),
             last_observed_injection_sites: BTreeMap::new(),
+            current_iteration: 0,
+            next_request_id: 1,
             pending_injection: None,
+            worker: None,
+        }
+    }
+
+    fn start_worker(&mut self) -> Result<(), String> {
+        if self.worker.is_some() {
+            return Ok(());
+        }
+        let exe_path = std::env::current_exe()
+            .map_err(|e| format!("resolve current executable for worker failed: {e}"))?;
+        let mut child = Command::new(exe_path)
+            .arg("--worker-loop")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| format!("spawn backend worker failed: {e}"))?;
+
+        let stdin =
+            child.stdin.take().ok_or_else(|| "capture backend worker stdin failed".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "capture backend worker stdout failed".to_string())?;
+
+        let (tx, rx) = mpsc::channel::<Result<WorkerResponse, String>>();
+        let reader_thread = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() || !trimmed.starts_with(WORKER_RESPONSE_PREFIX) {
+                            continue;
+                        }
+                        let payload = &trimmed[WORKER_RESPONSE_PREFIX.len()..];
+                        let parsed = serde_json::from_str::<WorkerResponse>(payload).map_err(|e| {
+                            let mut preview = payload.chars().take(200).collect::<String>();
+                            if payload.chars().count() > 200 {
+                                preview.push_str("...");
+                            }
+                            format!("parse worker response failed: {e}; raw={preview:?}")
+                        });
+                        if tx.send(parsed).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("read worker response failed: {e}")));
+                        break;
+                    }
+                }
+            }
+        });
+
+        self.worker = Some(WorkerProcess { child, stdin, responses_rx: rx, reader_thread });
+        Ok(())
+    }
+
+    fn stop_worker(&mut self) {
+        if let Some(mut worker) = self.worker.take() {
+            let _ = worker.child.kill();
+            let _ = worker.child.wait();
+            drop(worker.stdin);
+            let _ = worker.reader_thread.join();
         }
     }
 
@@ -554,21 +688,57 @@ impl BenchmarkBackend for Risc0Backend {
     fn prepare_for_run(&mut self, _rng_seed: u64) {
         self.eval = BackendEval::default();
         self.last_observed_injection_sites.clear();
+        self.current_iteration = self.current_iteration.saturating_add(1);
     }
 
     fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
         self.eval = BackendEval::default();
-        let resp = match run_backend_once(
-            words,
-            self.pending_injection.as_ref().map(|plan| plan.kind.as_str()),
-            self.pending_injection.as_ref().map(|plan| plan.step).unwrap_or(0),
-        ) {
-            Ok(resp) => resp,
-            Err(err) => {
-                self.eval.backend_error = Some(err.clone());
-                return Err(err);
+        self.start_worker()?;
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let req = WorkerRequest {
+            request_id,
+            words: words.to_vec(),
+            iteration: self.current_iteration,
+            inject_kind: self.pending_injection.as_ref().map(|plan| plan.kind.clone()),
+            inject_step: self.pending_injection.as_ref().map(|plan| plan.step).unwrap_or(0),
+        };
+        {
+            let worker =
+                self.worker.as_mut().ok_or_else(|| "backend worker unavailable".to_string())?;
+            let mut payload = serde_json::to_vec(&req)
+                .map_err(|e| format!("serialize worker request failed: {e}"))?;
+            payload.push(b'\n');
+            worker
+                .stdin
+                .write_all(&payload)
+                .map_err(|e| format!("write worker request failed: {e}"))?;
+            worker.stdin.flush().map_err(|e| format!("flush worker request failed: {e}"))?;
+        }
+
+        let resp = loop {
+            let recv = {
+                let worker =
+                    self.worker.as_ref().ok_or_else(|| "backend worker unavailable".to_string())?;
+                worker.responses_rx.recv()
+            };
+            match recv {
+                Ok(Ok(resp)) if resp.request_id == request_id => break resp,
+                Ok(Ok(_)) => continue,
+                Ok(Err(e)) => {
+                    self.stop_worker();
+                    self.eval.backend_error = Some(e.clone());
+                    return Err(e);
+                }
+                Err(_) => {
+                    self.stop_worker();
+                    let msg = "backend worker disconnected".to_string();
+                    self.eval.backend_error = Some(msg.clone());
+                    return Err(msg);
+                }
             }
         };
+        self.stop_worker();
         self.last_observed_injection_sites = resp.observed_injection_sites;
         self.eval.final_regs = resp.final_regs;
         self.eval.micro_op_count = resp.micro_op_count;
@@ -594,6 +764,12 @@ impl BenchmarkBackend for Risc0Backend {
 
     fn semantic_injection_candidates(&self, hits: &[BucketHit]) -> Vec<SemanticInjectionCandidate> {
         hits.iter().flat_map(|hit| self.semantic_candidate_from_hit(hit)).collect()
+    }
+}
+
+impl Drop for Risc0Backend {
+    fn drop(&mut self) {
+        self.stop_worker();
     }
 }
 

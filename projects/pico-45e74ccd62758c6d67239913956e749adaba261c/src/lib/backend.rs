@@ -752,6 +752,7 @@ impl BenchmarkBackend for PicoBackend {
                 }
             }
         };
+        self.stop_worker();
         self.eval = BackendEval {
             micro_op_count: resp.micro_op_count,
             bucket_hits: resp.bucket_hits,

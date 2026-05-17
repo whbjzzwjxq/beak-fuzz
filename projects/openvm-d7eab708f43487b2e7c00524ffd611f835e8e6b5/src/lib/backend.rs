@@ -684,6 +684,7 @@ impl BenchmarkBackend for OpenVmBackend {
             }
         };
 
+        self.stop_worker();
         self.eval.micro_op_count = worker_resp.micro_op_count;
         self.eval.bucket_hits = worker_resp.bucket_hits;
         self.eval.trace_signals = worker_resp.trace_signals;
