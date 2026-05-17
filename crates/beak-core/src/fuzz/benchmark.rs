@@ -13,7 +13,7 @@ use crate::fuzz::seed::FuzzingSeed;
 use crate::fuzz::seed_mutation::SeedMutationEngine;
 use crate::rv32im::instruction::RV32IMInstruction;
 use crate::rv32im::oracle::{OracleConfig, RISCVOracle};
-use crate::trace::{BucketHit, sorted_signatures_from_hits, sorted_signatures_from_signals};
+use crate::trace::{sorted_signatures_from_hits, sorted_signatures_from_signals, BucketHit};
 
 pub use crate::fuzz::loop1::{BackendEval, DEFAULT_RNG_SEED};
 
@@ -343,10 +343,6 @@ fn is_reportable_exception(seed_meta: &serde_json::Value, stats: &EvalStats) -> 
             stats.backend_error.as_deref(),
             stats.oracle_error.as_deref(),
         )
-}
-
-fn semantic_search_solved(stats: &EvalStats) -> bool {
-    stats.phase == "semantic_search" && stats.underconstrained_candidate
 }
 
 fn is_baseline_mismatch(stats: &EvalStats) -> bool {
@@ -734,14 +730,10 @@ pub fn run_benchmark<B: BenchmarkBackend>(
 
         let candidates = backend.semantic_injection_candidates(&baseline.bucket_hits);
         let mut attempted = HashSet::<(String, u64)>::new();
-        let mut seed_semantic_solved = false;
 
         for candidate in candidates {
             if only_bucket.as_deref().is_some_and(|bucket| candidate.bucket_id != bucket) {
                 continue;
-            }
-            if seed_semantic_solved {
-                break;
             }
             let steps = candidate_steps(&cfg, &candidate);
             if steps.is_empty() {
@@ -797,10 +789,6 @@ pub fn run_benchmark<B: BenchmarkBackend>(
                     Some(attempt_index),
                 )? {
                     bug_count = bug_count.saturating_add(1);
-                    if semantic_search_solved(&injected) {
-                        seed_semantic_solved = true;
-                        break;
-                    }
                 }
                 if injected.semantic_injection_applied {
                     consecutive_noops = 0;
@@ -947,14 +935,10 @@ pub fn run_benchmark<B: BenchmarkBackend>(
 
         let candidates = backend.semantic_injection_candidates(&baseline.bucket_hits);
         let mut attempted = HashSet::<(String, u64)>::new();
-        let mut seed_semantic_solved = false;
 
         for candidate in candidates {
             if only_bucket.as_deref().is_some_and(|bucket| candidate.bucket_id != bucket) {
                 continue;
-            }
-            if seed_semantic_solved {
-                break;
             }
             let steps = candidate_steps(&cfg, &candidate);
             if steps.is_empty() {
@@ -1010,10 +994,6 @@ pub fn run_benchmark<B: BenchmarkBackend>(
                     Some(attempt_index),
                 )? {
                     bug_count = bug_count.saturating_add(1);
-                    if semantic_search_solved(&injected) {
-                        seed_semantic_solved = true;
-                        break;
-                    }
                 }
                 if injected.semantic_injection_applied {
                     consecutive_noops = 0;
@@ -1048,8 +1028,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        BackendEval, BenchmarkBackend, BenchmarkConfig, EvalStats, bug_kind, centered_steps,
-        eval_once, is_reportable_exception, sweep_steps,
+        bug_kind, centered_steps, eval_once, is_reportable_exception, run_benchmark, sweep_steps,
+        BackendEval, BenchmarkBackend, BenchmarkConfig, EvalStats, InjectionSchedule,
+        SemanticInjectionCandidate,
     };
     use crate::rv32im::oracle::OracleConfig;
     use serde_json::json;
@@ -1067,6 +1048,55 @@ mod tests {
 
         fn collect_eval(&mut self) -> BackendEval {
             BackendEval::default()
+        }
+    }
+
+    #[derive(Default)]
+    struct MultiCandidateBackend {
+        armed: Option<String>,
+    }
+
+    impl BenchmarkBackend for MultiCandidateBackend {
+        fn prove_and_read_final_regs(&mut self, _words: &[u32]) -> Result<[u32; 32], String> {
+            Ok([0; 32])
+        }
+
+        fn collect_eval(&mut self) -> BackendEval {
+            BackendEval {
+                semantic_injection_applied: self.armed.is_some(),
+                ..BackendEval::default()
+            }
+        }
+
+        fn clear_semantic_injection(&mut self) {
+            self.armed = None;
+        }
+
+        fn arm_semantic_injection(&mut self, kind: &str, _step: u64) -> Result<(), String> {
+            self.armed = Some(kind.to_string());
+            Ok(())
+        }
+
+        fn semantic_injection_candidates(
+            &self,
+            _hits: &[crate::trace::BucketHit],
+        ) -> Vec<SemanticInjectionCandidate> {
+            vec![
+                SemanticInjectionCandidate {
+                    bucket_id: "sem.exec.op_selector_binding".to_string(),
+                    trigger_signal_id: None,
+                    semantic_class: "semantic.exec.op_selector_binding".to_string(),
+                    inject_kind: "test.semantic.first".to_string(),
+                    schedule: InjectionSchedule::Exact(0),
+                },
+                SemanticInjectionCandidate {
+                    bucket_id: "sem.time.boundary_origin_consistency".to_string(),
+                    trigger_signal_id: None,
+                    semantic_class: "semantic.time.boundary_origin_consistency".to_string(),
+                    inject_kind: "test.semantic.second".to_string(),
+                    schedule: InjectionSchedule::Exact(0),
+                },
+            ]
         }
     }
 
@@ -1207,5 +1237,53 @@ mod tests {
 
         let stats = eval_once(&cfg, &mut backend, &[]);
         assert!(stats.eval_duration_ms >= 1);
+    }
+
+    #[test]
+    fn semantic_search_runs_all_candidates_after_first_underconstrained_bug() {
+        let root = std::env::temp_dir()
+            .join(format!("beak-benchmark-all-candidates-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let seeds_jsonl = root.join("seeds.jsonl");
+        std::fs::write(
+            &seeds_jsonl,
+            "{\"instructions\":[19],\"metadata\":{\"source\":\"unit\"}}\n",
+        )
+        .unwrap();
+
+        let mut cfg = test_config();
+        cfg.seeds_jsonl = seeds_jsonl;
+        cfg.out_dir = root.clone();
+        cfg.output_prefix = Some("all-candidates".to_string());
+        cfg.initial_limit = 1;
+        cfg.max_instructions = 1;
+        cfg.semantic_search_enabled = true;
+        cfg.semantic_max_trials_per_bucket = 1;
+
+        let outputs = run_benchmark(cfg, MultiCandidateBackend::default()).unwrap();
+        let bugs = std::fs::read_to_string(outputs.bugs_path).unwrap();
+        let records: Vec<serde_json::Value> =
+            bugs.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+
+        let buckets: Vec<_> = records
+            .iter()
+            .map(|record| {
+                record
+                    .pointer("/metadata/trigger_bucket_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            buckets,
+            vec![
+                "sem.exec.op_selector_binding".to_string(),
+                "sem.time.boundary_origin_consistency".to_string()
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
