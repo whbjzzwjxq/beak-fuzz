@@ -27,6 +27,7 @@ target
 # Fuzzing seed
 storage/fuzzing_seeds/*.jsonl
 !storage/fuzzing_seeds/initial.jsonl
+!storage/fuzzing_seeds/replay_mixed.jsonl
 storage/fuzzing_seeds/e2e-*-summary.json
 storage/fuzzing_seeds/.campaign-*.log
 storage/fuzzing_seeds/.profile-*.log

@@ -105,15 +105,21 @@ TARGETS: list[tuple[str, str]] = [
     ("openvm-d7eab708", "d7eab708f43487b2e7c00524ffd611f835e8e6b5"),
     ("openvm-f038f61d", "f038f61d21db3aecd3029e1a23ba1ba0bb314800"),
     ("pico-45e74ccd", "45e74ccd62758c6d67239913956e749adaba261c"),
+    ("risc0-6f038bd", "6f038bd11ed725d7025687d163977d93ac1f82f9"),
+    ("risc0-98387806", "98387806fe8348d87e32974468c6f35853356ad5"),
+    ("risc0-c0db0713", "c0db0713671c8ec467b3efc26b22a0b0591897ff"),
+    ("jolt-6c3b0b49", "6c3b0b49db0afceb967b33656176fa7a27e557b9"),
+    ("jolt-d67f5a2a", "d67f5a2a4f465891d9ab5039fd3f18b19c38fe3b"),
+    ("jolt-e9caa235", "e9caa23565dbb13019afe61a2c95f51d1999e286"),
+    ("nexus-41c6c608", "41c6c6080f46b97980053c47b078321225b4338a"),
+    ("nexus-636ccb36", "636ccb360d0f4ae657ae4bb64e1e275ccec8826"),
+    ("nexus-f1b895b8", "f1b895b868915fd4d0a794a5bc730e6cb8d840f6"),
+    ("nexus-f2ad1265", "f2ad12652c39dc516a116447a53f8557f64a7f7d"),
+    ("sp1-3561f006", "3561f0065dfe7d9f85144dd54bc5e9b10e5f7df1"),
     ("sp1-39ab52fc", "39ab52fce38172c9d23feed7248198dc14c164a9"),
     ("sp1-7f643da1", "7f643da16813af4c0fbaad4837cd7409386cf38c"),
     ("sp1-811a3f2c", "811a3f2c03914088c7c9e1774266934a3f9f5359"),
-    ("sp1-3561f006", "3561f0065dfe7d9f85144dd54bc5e9b10e5f7df1"),
     ("sp1-fb38df2c", "fb38df2c4e963ef1d3a6f3be0ff62ea92bb3df13"),
-    ("jolt-e9caa235", "e9caa23565dbb13019afe61a2c95f51d1999e286"),
-    ("nexus-636ccb36", "636ccb360d0f4ae657ae4bb64e1e275ccec8826"),
-    ("risc0-98387806", "98387806fe8348d87e32974468c6f35853356ad5"),
-    ("risc0-c0db0713", "c0db0713671c8ec467b3efc26b22a0b0591897ff"),
 ]
 TARGET_COMMITS = dict(TARGETS)
 
@@ -314,7 +320,7 @@ def target_project_dir(target_id: str) -> Path:
 
 
 def target_artifact_prefix(target_id: str) -> str | None:
-    if target_id in {"sp1-3561f006", "sp1-fb38df2c"}:
+    if target_id in {"sp1-fb38df2c"}:
         return None
     return f"benchmark-{vm_name(target_id)}-{target_id.split('-', 1)[1]}"
 
@@ -369,13 +375,6 @@ def build_run_cmd(target_id: str, config: Config) -> tuple[list[str], Path, dict
     env = config.command_env()
     env["CARGO_TARGET_DIR"] = str(project_dir / "target")
 
-    if target_id == "sp1-3561f006":
-        return (
-            command_prefix(config)
-            + ["cargo", "run", "--release", "-q", "--bin", "beak-fuzz", "--", "--json"],
-            project_dir,
-            env,
-        )
     if target_id == "sp1-fb38df2c":
         script = (
             "set -euo pipefail; "
