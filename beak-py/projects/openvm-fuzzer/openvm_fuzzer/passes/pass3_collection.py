@@ -10,6 +10,7 @@ from pathlib import Path
 
 from openvm_fuzzer.settings import (
     OPENVM_BENCHMARK_336F_COMMIT,
+    OPENVM_BENCHMARK_BF11_COMMIT,
     OPENVM_BENCHMARK_F038_COMMIT,
     OPENVM_BENCHMARK_REGZERO_COMMIT,
     OPNEVM_BENCHMARK_REGZERO_ALIAS,
@@ -30,6 +31,18 @@ def _insert_after(contents: str, *, anchor: str, insert: str, guard: str) -> str
         raise RuntimeError(f"anchor not found for injection: {anchor!r}")
     pos = idx + len(anchor)
     return contents[:pos] + insert + contents[pos:]
+
+
+def _insert_after_any(contents: str, *, anchors: tuple[str, ...], insert: str, guard: str) -> str:
+    if guard in contents:
+        return contents
+    missing = []
+    for anchor in anchors:
+        try:
+            return _insert_after(contents, anchor=anchor, insert=insert, guard=guard)
+        except RuntimeError:
+            missing.append(anchor)
+    raise RuntimeError(f"anchors not found for injection: {missing!r}")
 
 
 def _insert_before(contents: str, *, anchor: str, insert: str, guard: str) -> str:
@@ -118,6 +131,19 @@ def _patch_regzero_record_arena_emit_chip_row(openvm_install_path: Path) -> None
                 let row_end = row_start + width;
                 let data = format!("{:?}", &self.trace_buffer[row_start..row_end]);
                 fuzzer_utils::emit_padding_chip_row(&data);
+                if fuzzer_utils::should_inject_witness(
+                    "openvm.semantic.row.padding_interaction_send",
+                    emitted as u64,
+                ) {
+                    eprintln!(
+                        "[beak-witness-inject] kind=openvm.semantic.row.padding_interaction_send step={} row_idx={} rows_used={} height={}",
+                        emitted,
+                        rows_used + emitted,
+                        rows_used,
+                        height
+                    );
+                    self.trace_buffer[row_start] += F::ONE;
+                }
                 emitted += 1;
             }
         }
@@ -928,7 +954,9 @@ def _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path: Path) -> None
         p.write_text(c)
 
 
-def _patch_regzero_system_connector_emit_chip_row(openvm_install_path: Path) -> None:
+def _patch_regzero_system_connector_emit_chip_row(
+    openvm_install_path: Path, *, program_row_slice_returns_option: bool = False
+) -> None:
     # connector/mod.rs
     connector = openvm_install_path / "crates" / "vm" / "src" / "system" / "connector" / "mod.rs"
     if connector.exists():
@@ -986,6 +1014,11 @@ def _patch_regzero_system_connector_emit_chip_row(openvm_install_path: Path) -> 
     if program.exists():
         _ensure_use_fuzzer_utils(program)
         c = program.read_text()
+        row_slice_stmt = (
+            "let Some(row) = cached.trace.row_slice(i) else { continue; };"
+            if program_row_slice_returns_option
+            else "let row = cached.trace.row_slice(i);"
+        )
         try:
             c = _insert_after(
                 c,
@@ -1000,7 +1033,7 @@ def _patch_regzero_system_connector_emit_chip_row(openvm_install_path: Path) -> 
                 continue;
             }
             // ProgramExecutionCols: [pc, opcode, a, b, c, d, e, f, g]
-            let row = cached.trace.row_slice(i);
+            __BEAK_PROGRAM_ROW_SLICE_STMT__
             fuzzer_utils::fuzzer_assert_eq!(std::mem::size_of_val(&row[0]), std::mem::size_of::<BabyBear>());
             fuzzer_utils::fuzzer_assert_eq!(std::mem::align_of_val(&row[0]), std::mem::align_of::<BabyBear>());
             let as_babybear = |j: usize| -> &BabyBear { unsafe { &*(&row[j] as *const _ as *const BabyBear) } };
@@ -1017,7 +1050,7 @@ def _patch_regzero_system_connector_emit_chip_row(openvm_install_path: Path) -> 
             fuzzer_utils::emit_program_chip_row(opcode_u32, operands, freq);
         }
         // BEAK-INSERT-END
-""",
+""".replace("__BEAK_PROGRAM_ROW_SLICE_STMT__", row_slice_stmt),
             )
         except RuntimeError:
             pass
@@ -1185,11 +1218,219 @@ def _patch_regzero_program_trace_zero_register_injection(openvm_install_path: Pa
                 );
                 row.a += F::from_canonical_u32(1);
             }
+            if fuzzer_utils::should_inject_witness(
+                "openvm.semantic.decode.operand_index_routing",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.decode.operand_index_routing step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.b += F::from_canonical_u32(1);
+            }
+            if fuzzer_utils::should_inject_witness(
+                "openvm.semantic.exec.dest_binding",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.exec.dest_binding step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.a += F::from_canonical_u32(1);
+            }
+            if fuzzer_utils::should_inject_witness(
+                "openvm.semantic.decode.field_range",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.decode.field_range step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.a += F::from_canonical_u32(32);
+            }
+            if fuzzer_utils::should_inject_witness(
+                "openvm.semantic.decode.immediate_sign_extension",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.decode.immediate_sign_extension step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.c += F::from_canonical_u32(1);
+            }
+            if fuzzer_utils::should_inject_witness(
+                "openvm.semantic.decode.upper_immediate_materialization",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.decode.upper_immediate_materialization step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.c += F::from_canonical_u32(1);
+            }
+            if fuzzer_utils::should_inject_witness(
+                "openvm.semantic.exec.op_selector_binding",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.exec.op_selector_binding step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.opcode += F::from_canonical_u32(1);
+            }
+            if fuzzer_utils::should_inject_witness(
+                "openvm.semantic.decode.format_immediate_reassembly",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.decode.format_immediate_reassembly step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.c += F::from_canonical_u32(1);
+            }
             // BEAK-INSERT-END
         });
 """
     if "// BEAK-INSERT: guard.regzero.program_trace.zero_register_immutability" not in c and old in c:
         c = c.replace(old, new, 1)
+    old_bf11 = r"""    rows.par_chunks_mut(width)
+        .zip(instructions)
+        .for_each(|(row, (pc, instruction))| {
+            let row: &mut ProgramExecutionCols<F> = row.borrow_mut();
+            *row = ProgramExecutionCols {
+                pc: F::from_u32(pc),
+                opcode: instruction.opcode.to_field(),
+                a: instruction.a,
+                b: instruction.b,
+                c: instruction.c,
+                d: instruction.d,
+                e: instruction.e,
+                f: instruction.f,
+                g: instruction.g,
+            };
+        });
+"""
+    new_bf11 = r"""    rows.par_chunks_mut(width)
+        .zip(instructions.into_par_iter().enumerate())
+        .for_each(|(row, (i, (pc, instruction)))| {
+            let row: &mut ProgramExecutionCols<F> = row.borrow_mut();
+            *row = ProgramExecutionCols {
+                pc: F::from_u32(pc),
+                opcode: instruction.opcode.to_field(),
+                a: instruction.a,
+                b: instruction.b,
+                c: instruction.c,
+                d: instruction.d,
+                e: instruction.e,
+                f: instruction.f,
+                g: instruction.g,
+            };
+
+            // BEAK-INSERT: guard.regzero.program_trace.zero_register_immutability
+            let beak_program_step = i as u64;
+            if fuzzer_utils::should_inject_witness(
+                "openvm.semantic.decode.zero_register_immutability",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.decode.zero_register_immutability step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.a += F::ONE;
+            }
+            if fuzzer_utils::should_inject_witness(
+                "openvm.semantic.decode.operand_index_routing",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.decode.operand_index_routing step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.b += F::ONE;
+            }
+            if fuzzer_utils::should_inject_witness(
+                "openvm.semantic.exec.dest_binding",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.exec.dest_binding step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.a += F::ONE;
+            }
+            if fuzzer_utils::should_inject_witness(
+                "openvm.semantic.decode.field_range",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.decode.field_range step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.a += F::from_u32(32);
+            }
+            if fuzzer_utils::should_inject_witness(
+                "openvm.semantic.decode.immediate_sign_extension",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.decode.immediate_sign_extension step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.c += F::ONE;
+            }
+            if fuzzer_utils::should_inject_witness(
+                "openvm.semantic.decode.upper_immediate_materialization",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.decode.upper_immediate_materialization step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.c += F::ONE;
+            }
+            if fuzzer_utils::should_inject_witness(
+                "openvm.semantic.exec.op_selector_binding",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.exec.op_selector_binding step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.opcode += F::ONE;
+            }
+            if fuzzer_utils::should_inject_witness(
+                "openvm.semantic.decode.format_immediate_reassembly",
+                beak_program_step,
+            ) {
+                eprintln!(
+                    "[beak-witness-inject] kind=openvm.semantic.decode.format_immediate_reassembly step={} pc={}",
+                    beak_program_step,
+                    pc
+                );
+                row.c += F::ONE;
+            }
+            // BEAK-INSERT-END
+        });
+"""
+    if (
+        "// BEAK-INSERT: guard.regzero.program_trace.zero_register_immutability" not in c
+        and old_bf11 in c
+    ):
+        c = c.replace(old_bf11, new_bf11, 1)
     path.write_text(c)
 
 
@@ -4491,7 +4732,10 @@ def _patch_regzero_semantic_witness_injection(openvm_install_path: Path) -> None
     core_hooks = [
         (
             openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "base_alu" / "core.rs",
-            "        core_row.a = a.map(F::from_canonical_u8);\n",
+            (
+                "        core_row.a = a.map(F::from_canonical_u8);\n",
+                "        core_row.a = a.map(F::from_u8);\n",
+            ),
             "// BEAK-INSERT: guard.regzero.base_alu.semantic_injection",
             r"""
 
@@ -4518,7 +4762,10 @@ def _patch_regzero_semantic_witness_injection(openvm_install_path: Path) -> None
         ),
         (
             openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "shift" / "core.rs",
-            "        core_row.a = a.map(F::from_canonical_u8);\n",
+            (
+                "        core_row.a = a.map(F::from_canonical_u8);\n",
+                "        core_row.a = a.map(F::from_u8);\n",
+            ),
             "// BEAK-INSERT: guard.regzero.shift.semantic_injection",
             r"""
 
@@ -4561,7 +4808,10 @@ def _patch_regzero_semantic_witness_injection(openvm_install_path: Path) -> None
         ),
         (
             openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "divrem" / "core.rs",
-            "        core_row.b = record.b.map(F::from_canonical_u8);\n",
+            (
+                "        core_row.b = record.b.map(F::from_canonical_u8);\n",
+                "        core_row.b = record.b.map(F::from_u8);\n",
+            ),
             "// BEAK-INSERT: guard.regzero.divrem.semantic_injection",
             r"""
 
@@ -4588,7 +4838,10 @@ def _patch_regzero_semantic_witness_injection(openvm_install_path: Path) -> None
         ),
         (
             openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "mul" / "core.rs",
-            "        core_row.a = a.map(F::from_canonical_u8);\n",
+            (
+                "        core_row.a = a.map(F::from_canonical_u8);\n",
+                "        core_row.a = a.map(F::from_u8);\n",
+            ),
             "// BEAK-INSERT: guard.regzero.mul.semantic_injection",
             r"""
 
@@ -4606,7 +4859,10 @@ def _patch_regzero_semantic_witness_injection(openvm_install_path: Path) -> None
         ),
         (
             openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "mulh" / "core.rs",
-            "        core_row.a = a.map(F::from_canonical_u32);\n",
+            (
+                "        core_row.a = a.map(F::from_canonical_u32);\n",
+                "        core_row.a = a.map(F::from_u32);\n",
+            ),
             "// BEAK-INSERT: guard.regzero.mulh.semantic_injection",
             r"""
 
@@ -4633,7 +4889,10 @@ def _patch_regzero_semantic_witness_injection(openvm_install_path: Path) -> None
         ),
         (
             openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "auipc" / "core.rs",
-            "        core_row.rd_data = rd_data.map(F::from_canonical_u8);\n",
+            (
+                "        core_row.rd_data = rd_data.map(F::from_canonical_u8);\n",
+                "        core_row.rd_data = rd_data.map(F::from_u8);\n",
+            ),
             "// BEAK-INSERT: guard.regzero.auipc.semantic_injection",
             r"""
 
@@ -4656,7 +4915,10 @@ def _patch_regzero_semantic_witness_injection(openvm_install_path: Path) -> None
         _ensure_use_fuzzer_utils(path)
         c = path.read_text()
         try:
-            c = _insert_after(c, anchor=anchor, guard=guard, insert=insert)
+            if isinstance(anchor, tuple):
+                c = _insert_after_any(c, anchors=anchor, guard=guard, insert=insert)
+            else:
+                c = _insert_after(c, anchor=anchor, guard=guard, insert=insert)
         except RuntimeError:
             pass
         path.write_text(c)
@@ -4664,28 +4926,40 @@ def _patch_regzero_semantic_witness_injection(openvm_install_path: Path) -> None
     control_hooks = [
         (
             openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "branch_eq" / "core.rs",
-            "        core_row.a = record.a.map(F::from_canonical_u8);\n",
+            (
+                "        core_row.a = record.a.map(F::from_canonical_u8);\n",
+                "        core_row.a = record.a.map(F::from_u8);\n",
+            ),
             "// BEAK-INSERT: guard.regzero.branch_eq.semantic_injection",
             "branch_eq",
             "core_row.cmp_result = F::ONE - core_row.cmp_result;",
         ),
         (
             openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "branch_lt" / "core.rs",
-            "        core_row.a = record.a.map(F::from_canonical_u8);\n",
+            (
+                "        core_row.a = record.a.map(F::from_canonical_u8);\n",
+                "        core_row.a = record.a.map(F::from_u8);\n",
+            ),
             "// BEAK-INSERT: guard.regzero.branch_lt.semantic_injection",
             "branch_lt",
             "core_row.cmp_result = F::ONE - core_row.cmp_result;",
         ),
         (
             openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "jal_lui" / "core.rs",
-            "        core_row.imm = F::from_canonical_u32(record.imm);\n",
+            (
+                "        core_row.imm = F::from_canonical_u32(record.imm);\n",
+                "        core_row.imm = F::from_u32(record.imm);\n",
+            ),
             "// BEAK-INSERT: guard.regzero.jal_lui.semantic_injection",
             "jal",
             "if record.is_jal { core_row.rd_data[0] += F::ONE; }",
         ),
         (
             openvm_install_path / "extensions" / "rv32im" / "circuit" / "src" / "jalr" / "core.rs",
-            "        core_row.imm = F::from_canonical_u16(record.imm);\n",
+            (
+                "        core_row.imm = F::from_canonical_u16(record.imm);\n",
+                "        core_row.imm = F::from_u16(record.imm);\n",
+            ),
             "// BEAK-INSERT: guard.regzero.jalr.semantic_injection",
             "jalr",
             "core_row.rd_data[0] += F::ONE;\n            core_row.imm_sign = F::ONE - core_row.imm_sign;",
@@ -4708,9 +4982,12 @@ def _patch_regzero_semantic_witness_injection(openvm_install_path: Path) -> None
             {mutation}
         }}
         // BEAK-INSERT-END
-"""
+        """
         try:
-            c = _insert_after(c, anchor=anchor, guard=guard, insert=insert)
+            if isinstance(anchor, tuple):
+                c = _insert_after_any(c, anchors=anchor, guard=guard, insert=insert)
+            else:
+                c = _insert_after(c, anchor=anchor, guard=guard, insert=insert)
         except RuntimeError:
             pass
         path.write_text(c)
@@ -4884,9 +5161,12 @@ def _patch_regzero_memory_deep_instrumentation(openvm_install_path: Path) -> Non
         _ensure_use_fuzzer_utils(loadstore_adapter)
         c = loadstore_adapter.read_text()
         try:
-            c = _insert_after(
+            c = _insert_after_any(
                 c,
-                anchor="        adapter_row.mem_ptr_limbs = ptr_limbs.map(F::from_canonical_u32);\n",
+                anchors=(
+                    "        adapter_row.mem_ptr_limbs = ptr_limbs.map(F::from_canonical_u32);\n",
+                    "        adapter_row.mem_ptr_limbs = ptr_limbs.map(F::from_u32);\n",
+                ),
                 guard="// BEAK-INSERT: guard.regzero.loadstore.adapter.memory_injection",
                 insert=r"""
         // BEAK-INSERT: guard.regzero.loadstore.adapter.memory_injection
@@ -4923,6 +5203,13 @@ def _patch_regzero_memory_deep_instrumentation(openvm_install_path: Path) -> Non
         buffer.prev_timestamp = F::from_canonical_u32(prev_timestamp);
     }
 """
+        old_fill_bf11 = r"""    pub fn fill(&self, prev_timestamp: u32, timestamp: u32, buffer: &mut MemoryBaseAuxCols<F>) {
+        self.generate_timestamp_lt(prev_timestamp, timestamp, &mut buffer.timestamp_lt_aux);
+        // Safety: even if prev_timestamp were obtained by transmute_ref from
+        // `buffer.prev_timestamp`, this should still work because it is a direct assignment
+        buffer.prev_timestamp = F::from_u32(prev_timestamp);
+    }
+"""
         new_fill = r"""    pub fn fill(&self, prev_timestamp: u32, timestamp: u32, buffer: &mut MemoryBaseAuxCols<F>) {
         self.generate_timestamp_lt(prev_timestamp, timestamp, &mut buffer.timestamp_lt_aux);
         let beak_witness_step = fuzzer_utils::next_witness_step();
@@ -4941,8 +5228,14 @@ def _patch_regzero_memory_deep_instrumentation(openvm_install_path: Path) -> Non
         buffer.prev_timestamp = F::from_canonical_u32(beak_prev_timestamp);
     }
 """
+        new_fill_bf11 = new_fill.replace(
+            "F::from_canonical_u32(beak_prev_timestamp)",
+            "F::from_u32(beak_prev_timestamp)",
+        )
         if old_fill in c:
             c = c.replace(old_fill, new_fill, 1)
+        if old_fill_bf11 in c:
+            c = c.replace(old_fill_bf11, new_fill_bf11, 1)
         if "// BEAK-INSERT: guard.regzero.memory.lifecycle.finalization" not in c:
             c = c.replace(
                 "                TouchedMemory::Persistent(final_memory),\n",
@@ -5059,6 +5352,19 @@ def _patch_regzero_lookup_multiplicity_instrumentation(openvm_install_path: Path
         RowMajorMatrix::new(rows, NUM_BITWISE_OP_LOOKUP_COLS)
     }
 """
+    old_bf11 = r"""    /// Generates trace and resets all internal counters to 0.
+    pub fn generate_trace<F: Field>(&self) -> RowMajorMatrix<F> {
+        let mut rows = F::zero_vec(self.count_range.len() * NUM_BITWISE_OP_LOOKUP_COLS);
+        for (n, row) in rows.chunks_mut(NUM_BITWISE_OP_LOOKUP_COLS).enumerate() {
+            let cols: &mut BitwiseOperationLookupCols<F> = row.borrow_mut();
+            cols.mult_range =
+                F::from_u32(self.count_range[n].swap(0, std::sync::atomic::Ordering::SeqCst));
+            cols.mult_xor =
+                F::from_u32(self.count_xor[n].swap(0, std::sync::atomic::Ordering::SeqCst));
+        }
+        RowMajorMatrix::new(rows, NUM_BITWISE_OP_LOOKUP_COLS)
+    }
+"""
     new = r"""    /// Generates trace and resets all internal counters to 0.
     pub fn generate_trace<F: Field>(&self) -> RowMajorMatrix<F> {
         let mut rows = F::zero_vec(self.count_range.len() * NUM_BITWISE_OP_LOOKUP_COLS);
@@ -5112,655 +5418,25 @@ def _patch_regzero_lookup_multiplicity_instrumentation(openvm_install_path: Path
         RowMajorMatrix::new(rows, NUM_BITWISE_OP_LOOKUP_COLS)
     }
 """
+    new_bf11 = new.replace("F::from_canonical_u32", "F::from_u32")
     if old in c:
         c = c.replace(old, new, 1)
+    if old_bf11 in c:
+        c = c.replace(old_bf11, new_bf11, 1)
     lookup.write_text(c)
 
-
-# def _patch_audit_integration_api_for_microops(openvm_install_path: Path) -> None:
-#     """
-#     Audit snapshots (336/f038) have a slightly different `integration_api.rs` layout (multi-line
-#     `postprocess` assignment). Patch it in-place to emit adapter/core ChipRow micro-ops.
-#     """
-
-#     integration_api = openvm_install_path / "crates" / "vm" / "src" / "arch" / "integration_api.rs"
-#     if not integration_api.exists():
-#         return
-
-#     contents = integration_api.read_text()
-#     if 'fuzzer_utils::emit_chip_row_json("openvm"' in contents:
-#         # Already injected.
-#         return
-
-#     # Ensure we can call fuzzer_utils even if assert-rewrite didn't touch this file.
-#     if "use fuzzer_utils;" not in contents:
-#         header_end = contents.find("\n\n")
-#         if header_end > 0:
-#             contents = contents[:header_end] + "\nuse fuzzer_utils;\n" + contents[header_end:]
-
-#     # Ensure serde_json::json is available.
-#     if "use serde_json::json;" not in contents:
-#         # Accept both `use serde::{Deserialize, Serialize};` and
-#         # `use serde::{de::DeserializeOwned, Deserialize, Serialize};` variants.
-#         contents, n = re.subn(
-#             r"^use serde::\{[^}]*\};\s*$",
-#             lambda m: m.group(0) + "\nuse serde_json::json;",
-#             contents,
-#             count=1,
-#             flags=re.MULTILINE,
-#         )
-#         if n == 0:
-#             raise RuntimeError("unable to locate serde import to append serde_json::json")
-
-#     # Insert after the multi-line postprocess assignment (ending at `?;`).
-#     m = re.search(
-#         r"(let\s+\(to_state,\s*write_record\)\s*=\s*\n\s*self\.adapter\s*\n\s*\.postprocess\([\s\S]*?\)\?\s*;)",
-#         contents,
-#         flags=re.MULTILINE,
-#     )
-#     if not m:
-#         raise RuntimeError("unable to locate adapter postprocess assignment in integration_api.rs")
-
-#     insert = r"""
-
-#         if fuzzer_utils::is_trace_logging() {
-#             // NOTE: We emit ChipRow-style records, i.e. per-chip payloads, using the
-#             // `{"type":"chip_row","data":{...}}` JSON envelope emitted by fuzzer_utils.
-#             let gates = json!({"is_real": 1}).to_string();
-
-#             let adapter_chip = get_air_name(self.adapter.air());
-#             let adapter_locals = json!({
-#                 "from_pc": from_state.pc,
-#                 "to_pc": to_state.pc,
-#                 "from_timestamp": from_state.timestamp,
-#                 "to_timestamp": to_state.timestamp,
-#                 "payload_json": json!({
-#                     "adapter_read": &read_record,
-#                     "adapter_write": &write_record,
-#                 })
-#                 .to_string(),
-#             })
-#             .to_string();
-#             // integration_api spans many extensions; default to explicit "custom" unless a given
-#             // injection site can name a more specific kind without heuristics.
-#             fuzzer_utils::emit_chip_row_json(
-#                 "openvm",
-#                 &adapter_chip,
-#                 "custom",
-#                 &gates,
-#                 &adapter_locals,
-#             );
-
-#             let core_chip = get_air_name(self.core.air());
-#             let core_locals = json!({
-#                 "from_pc": from_state.pc,
-#                 "payload_json": json!({ "core": &core_record }).to_string(),
-#             })
-#             .to_string();
-#             fuzzer_utils::emit_chip_row_json("openvm", &core_chip, "custom", &gates, &core_locals);
-#         }
-# """
-#     pos = m.end()
-#     contents = contents[:pos] + insert + contents[pos:]
-#     integration_api.write_text(contents)
-
-
-# def _patch_integration_api_microops(*, openvm_install_path: Path, commit_or_branch: str) -> None:
-#     resolved_commit = resolve_openvm_commit(commit_or_branch)
-
-#     integration_api = openvm_install_path / "crates" / "vm" / "src" / "arch" / "integration_api.rs"
-#     if not integration_api.exists():
-#         return
-
-#     # 87f006-style (typed micro-ops) does not instrument integration_api.rs.
-#     if resolved_commit == OPENVM_BENCHMARK_REGZERO_COMMIT:
-#         return
-
-#     if resolved_commit in {OPENVM_BENCHMARK_336F_COMMIT, OPENVM_BENCHMARK_F038_COMMIT}:
-#         _patch_audit_integration_api_for_microops(openvm_install_path)
-#         return
-
-#     contents = integration_api.read_text()
-
-#     # Ensure we can call fuzzer_utils even if assert-rewrite didn't touch this file.
-#     if "use fuzzer_utils;" not in contents:
-#         header_end = contents.find("\n\n")
-#         if header_end > 0:
-#             integration_api.write_text(
-#                 contents[:header_end] + "\nuse fuzzer_utils;\n" + contents[header_end:]
-#             )
-#             contents = integration_api.read_text()
-
-#     # Ensure serde_json::json is available.
-#     if "use serde_json::json;" not in contents:
-#         replace_in_file(
-#             integration_api,
-#             [
-#                 (
-#                     r"use serde::\{de::DeserializeOwned, Deserialize, Serialize\};",
-#                     "use serde::{de::DeserializeOwned, Deserialize, Serialize};\nuse serde_json::json;",
-#                 )
-#             ],
-#         )
-#         contents = integration_api.read_text()
-
-#     # Repair a prior bad injection that left a literal `\1` line in the file.
-#     if "\n\\1\n" in contents:
-#         integration_api.write_text(contents.replace("\n\\1\n", "\n"))
-#         contents = integration_api.read_text()
-
-#     if 'fuzzer_utils::emit_chip_row_json("openvm"' in contents:
-#         return
-
-#     replace_in_file(
-#         integration_api,
-#         [
-#             (
-#                 r"^(\s*self\.adapter\s*\.postprocess\(\s*memory,\s*instruction,\s*from_state,\s*output,\s*&read_record\s*\)\?\s*;)\s*$",
-#                 r"""\1
-
-#         if fuzzer_utils::is_trace_logging() {
-#             // NOTE: We emit ChipRow-style records, i.e. per-chip payloads, using the
-#             // `{"type":"chip_row","data":{...}}` JSON envelope emitted by fuzzer_utils.
-#             let gates = json!({"is_real": 1}).to_string();
-
-#             let adapter_chip = get_air_name(self.adapter.air());
-#             let adapter_locals = json!({
-#                 "from_pc": from_state.pc,
-#                 "to_pc": to_state.pc,
-#                 "from_timestamp": from_state.timestamp,
-#                 "to_timestamp": to_state.timestamp,
-#                 "payload_json": json!({
-#                     "adapter_read": &read_record,
-#                     "adapter_write": &write_record,
-#                 })
-#                 .to_string(),
-#             })
-#             .to_string();
-#             // integration_api spans many extensions; default to explicit "custom" unless a given
-#             // injection site can name a more specific kind without heuristics.
-#             fuzzer_utils::emit_chip_row_json(
-#                 "openvm",
-#                 &adapter_chip,
-#                 "custom",
-#                 &gates,
-#                 &adapter_locals,
-#             );
-
-#             let core_chip = get_air_name(self.core.air());
-#             let core_locals = json!({
-#                 "from_pc": from_state.pc,
-#                 "payload_json": json!({ "core": &core_record }).to_string(),
-#             })
-#             .to_string();
-#             fuzzer_utils::emit_chip_row_json("openvm", &core_chip, "custom", &gates, &core_locals);
-#         }""",
-#             ),
-#         ],
-#         flags=re.MULTILINE,
-#     )
-
-
-# def _patch_audit_integration_api_for_padding_samples(openvm_install_path: Path) -> None:
-#     """
-#     Audit snapshots (336/f038) build padded traces in `VmChipWrapper::generate_air_proof_input`.
-
-#     Sample a few padding rows (which are all-zero) as inactive ChipRows (is_real=0) and emit an
-#     effectful Interaction anchored to them. This enables InactiveRowEffectsBucket without dumping
-#     every padding row.
-#     """
-
-#     integration_api = openvm_install_path / "crates" / "vm" / "src" / "arch" / "integration_api.rs"
-#     if not integration_api.exists():
-#         return
-
-#     contents = integration_api.read_text()
-#     # Repair older insertion that passed `&str` to `update_hints` (signature expects `&String`).
-#     if 'update_hints(0, "PADDING", "PADDING")' in contents:
-#         contents = contents.replace(
-#             'fuzzer_utils::update_hints(0, "PADDING", "PADDING");',
-#             'let hint = "PADDING".to_string();\n            fuzzer_utils::update_hints(0, &hint, &hint);',
-#         )
-#         integration_api.write_text(contents)
-#         contents = integration_api.read_text()
-
-#     # Repair older insertion that borrowed `self` after `self.records` was moved.
-#     if 'let chip = format!("VmChipWrapper{}", self.air_name());' in contents:
-#         contents = contents.replace(
-#             'let chip = format!("VmChipWrapper{}", self.air_name());',
-#             'let chip = "VmChipWrapper".to_string();',
-#         )
-#         integration_api.write_text(contents)
-#         contents = integration_api.read_text()
-
-#     # Repair older insertion that references `beak_padding_chip` without declaration.
-#     if "let chip = beak_padding_chip.clone();" in contents:
-#         contents = contents.replace(
-#             "let chip = beak_padding_chip.clone();",
-#             'let chip = "VmChipWrapper".to_string();',
-#         )
-#         integration_api.write_text(contents)
-#         contents = integration_api.read_text()
-
-#     if "PaddingSample" in contents:
-#         return
-
-#     # Ensure we can call fuzzer_utils even if assert-rewrite didn't touch this file.
-#     if "use fuzzer_utils;" not in contents:
-#         header_end = contents.find("\n\n")
-#         if header_end > 0:
-#             contents = contents[:header_end] + "\nuse fuzzer_utils;\n" + contents[header_end:]
-
-#     # Ensure serde_json::json is available (we emit small JSON payloads).
-#     if "use serde_json::json;" not in contents:
-#         contents, n = re.subn(
-#             r"^use serde::\{[^}]*\};\s*$",
-#             lambda m: m.group(0) + "\nuse serde_json::json;",
-#             contents,
-#             count=1,
-#             flags=re.MULTILINE,
-#         )
-#         if n == 0:
-#             # Best-effort: insert after the last `use` in the header.
-#             header_end = contents.find("\n\n")
-#             if header_end > 0:
-#                 contents = (
-#                     contents[:header_end] + "\nuse serde_json::json;\n" + contents[header_end:]
-#                 )
-
-#     # Insert after finalize, where `height/num_records/width` are in scope and padding rows exist.
-#     anchor = "self.core.finalize(&mut trace, num_records);"
-#     insert = r"""
-
-#         // beak-fuzz: sample a few inactive (padding) rows for op-agnostic inactive-row analysis.
-#         if fuzzer_utils::is_trace_logging() && height > num_records {
-#             let hint = "PADDING".to_string();
-#             fuzzer_utils::update_hints(0, &hint, &hint);
-#             fuzzer_utils::inc_step();
-
-#             let chip = "VmChipWrapper".to_string();
-#             let max_samples: usize = 3;
-#             let mut emitted: usize = 0;
-#             while emitted < max_samples && (num_records + emitted) < height {
-#                 let row_idx = num_records + emitted;
-#                 let gates = json!({"is_real": 0}).to_string();
-#                 let locals = json!({
-#                     "chip": chip,
-#                     "row_idx": row_idx,
-#                     "real_rows": num_records,
-#                     "total_rows": height,
-#                     "width": width,
-#                 })
-#                 .to_string();
-#                 fuzzer_utils::emit_chip_row_json("openvm", &chip, "memory", &gates, &locals);
-#                 let anchor_row_id = fuzzer_utils::get_last_row_id();
-#                 let payload = json!({"chip": chip, "row_idx": row_idx}).to_string();
-#                 fuzzer_utils::emit_interaction_json(
-#                     "PaddingSample",
-#                     "send",
-#                     "inactive_row",
-#                     &anchor_row_id,
-#                     &payload,
-#                     1,
-#                     "const",
-#                 );
-#                 emitted += 1;
-#             }
-#         }
-# """
-
-#     if anchor not in contents:
-#         # Older/variant layouts: don't fail hard; just skip.
-#         integration_api.write_text(contents)
-#         return
-#     contents = contents.replace(anchor, anchor + insert)
-#     integration_api.write_text(contents)
-
-
-# def _patch_padding_samples(*, openvm_install_path: Path, commit_or_branch: str) -> None:
-#     resolved_commit = resolve_openvm_commit(commit_or_branch)
-
-#     if resolved_commit in {OPENVM_BENCHMARK_336F_COMMIT, OPENVM_BENCHMARK_F038_COMMIT}:
-#         _patch_audit_integration_api_for_padding_samples(openvm_install_path)
-
-#     # 87f006-style: do not sample padding rows in regzero.
-
-
-# def _patch_audit_segment_rs_for_microops(openvm_install_path: Path) -> None:
-#     """
-#     Audit snapshots (336/f038) predate our template overwrite approach.
-#     Patch `crates/vm/src/arch/segment.rs` in-place to emit ChipRow + Interaction micro-ops.
-#     """
-
-#     segment_rs = openvm_install_path / "crates" / "vm" / "src" / "arch" / "segment.rs"
-#     if not segment_rs.exists():
-#         logger.info("segment.rs not found; skipping audit segment patch: %s", segment_rs)
-#         return
-
-#     contents = segment_rs.read_text()
-
-#     # Ensure imports used by the injected blocks.
-#     if "use serde_json::json;" not in contents:
-#         # Prefer inserting after the top-level `use crate::{ ... };` block.
-#         m = re.search(r"\nuse crate::\{[\s\S]*?\};\n", contents, flags=re.MULTILINE)
-#         if m:
-#             pos = m.end()
-#             contents = contents[:pos] + "use serde_json::json;\n" + contents[pos:]
-#         else:
-#             # Best-effort: insert after the last `use` line in the header.
-#             header_end = contents.find("\n\n")
-#             if header_end > 0:
-#                 header = contents[:header_end]
-#                 if "use serde_json::json;" not in header:
-#                     contents = (
-#                         contents[:header_end] + "\nuse serde_json::json;\n" + contents[header_end:]
-#                     )
-
-#     if "use crate::system::memory::online::MemoryLogEntry;" not in contents:
-#         # Insert after existing `use crate::{ ... system::memory::MemoryImage, ... };` block if present.
-#         m = re.search(r"use crate::\{[\s\S]*?system::memory::MemoryImage,[\s\S]*?\};", contents)
-#         if m:
-#             insert_pos = m.end()
-#             contents = (
-#                 contents[:insert_pos]
-#                 + "\nuse crate::system::memory::online::MemoryLogEntry;\n"
-#                 + contents[insert_pos:]
-#             )
-
-#     # Ensure `use fuzzer_utils;` is present somewhere (assert-rewrite usually adds it, but be robust).
-#     if "use fuzzer_utils;" not in contents:
-#         header_end = contents.find("\n\n")
-#         if header_end > 0:
-#             contents = contents[:header_end] + "\nuse fuzzer_utils;\n" + contents[header_end:]
-
-#     # ProgramChip + ProgramBus emission (pc -> opcode/operands).
-#     contents = _insert_after(
-#         contents,
-#         anchor="let (instruction, debug_info) = program_chip.get_instruction(pc)?;",
-#         guard='"ProgramBus"',
-#         insert=r"""
-
-#                 // Program-table semantics: the program bus constrains that (pc -> opcode/operands).
-#                 // Emit a ChipRow so op-level analyses can include this "system" chip alongside
-#                 // the instruction's adapter/core chips.
-#                 if fuzzer_utils::is_trace_logging() {
-#                     let gates = json!({"is_real": 1}).to_string();
-#                     let locals = json!({
-#                         "pc": pc,
-#                         "opcode": instruction.opcode.as_usize(),
-#                         "operands": [
-#                             instruction.a.as_canonical_u32(),
-#                             instruction.b.as_canonical_u32(),
-#                             instruction.c.as_canonical_u32(),
-#                             instruction.d.as_canonical_u32(),
-#                             instruction.e.as_canonical_u32(),
-#                             instruction.f.as_canonical_u32(),
-#                             instruction.g.as_canonical_u32(),
-#                         ],
-#                     })
-#                     .to_string();
-#                     let chip = "ProgramChip".to_string();
-#                     fuzzer_utils::emit_chip_row_json("openvm", &chip, "program", &gates, &locals);
-
-#                     // Program-table interaction: lookup (pc -> opcode/operands).
-#                     let anchor_row_id = fuzzer_utils::get_last_row_id();
-#                     let payload = json!({
-#                         "pc": pc,
-#                         "opcode": instruction.opcode.as_usize(),
-#                         "operands": [
-#                             instruction.a.as_canonical_u32(),
-#                             instruction.b.as_canonical_u32(),
-#                             instruction.c.as_canonical_u32(),
-#                             instruction.d.as_canonical_u32(),
-#                             instruction.e.as_canonical_u32(),
-#                             instruction.f.as_canonical_u32(),
-#                             instruction.g.as_canonical_u32(),
-#                         ],
-#                     })
-#                     .to_string();
-#                     fuzzer_utils::emit_interaction_json(
-#                         "ProgramBus",
-#                         "recv",
-#                         "program",
-#                         &anchor_row_id,
-#                         &payload,
-#                         1,
-#                         "gates.is_real",
-#                     );
-#                 }
-# """,
-#     )
-
-#     # Memory log snapshot + prev state before execute.
-#     contents = _insert_after(
-#         contents,
-#         anchor="if let Some(executor) = chip_complex.inventory.get_mut_executor(&opcode) {",
-#         guard="let mem_log_start =",
-#         insert=r"""
-
-#                         // Snapshot memory logs to attribute memory chips per instruction.
-#                         let mem_log_start = memory_controller.get_memory_logs().len();
-
-#                         let prev_pc = pc;
-#                         let prev_timestamp = timestamp;
-# """,
-#     )
-
-#     # Post-exec memory chips + boundary + execution-bus + per-step increment.
-#     contents = _insert_after(
-#         contents,
-#         anchor="timestamp = next_state.timestamp;",
-#         guard="ExecutionBus",
-#         insert=r"""
-
-#                         // Emit memory-related chips as ChipRow markers.
-#                         //
-#                         // NOTE: During execution, OpenVM accumulates *memory logs* in online memory.
-#                         // Those logs are later replayed in `finalize()` to populate memory trace
-#                         // chips (Boundary, AccessAdapter<N>, ...). We attribute per-instruction
-#                         // "memory chips involved" based on the newly-added memory-log entries here.
-#                         if fuzzer_utils::is_trace_logging() {
-#                             let gates = json!({"is_real": 1}).to_string();
-#                             let logs = memory_controller.get_memory_logs();
-#                             let new_logs = logs.iter().skip(mem_log_start);
-
-#                             let mut boundary_spaces: Vec<u32> = Vec::new();
-#                             let mut access_count: u32 = 0;
-
-#                             for (i, entry) in new_logs.enumerate() {
-#                                 let record_id = (mem_log_start + i) as u32;
-#                                 match entry {
-#                                     MemoryLogEntry::Read { address_space, pointer, len } => {
-#                                         access_count += 1;
-#                                         if *address_space != 0
-#                                             && !boundary_spaces.contains(address_space)
-#                                         {
-#                                             boundary_spaces.push(*address_space);
-#                                         }
-#                                         let chip = format!("AccessAdapter<{}>", len);
-#                                         let locals = json!({
-#                                             "record_id": record_id,
-#                                             "op": "read",
-#                                             "address_space": address_space,
-#                                             "pointer": pointer,
-#                                             "len": len,
-#                                         })
-#                                         .to_string();
-#                                         fuzzer_utils::emit_chip_row_json(
-#                                             "openvm",
-#                                             &chip,
-#                                             "memory",
-#                                             &gates,
-#                                             &locals,
-#                                         );
-
-#                                         let anchor_row_id = fuzzer_utils::get_last_row_id();
-#                                         let payload = json!({
-#                                             "record_id": record_id,
-#                                             "op": "read",
-#                                             "address_space": address_space,
-#                                             "pointer": pointer,
-#                                             "len": len,
-#                                         })
-#                                         .to_string();
-#                                         fuzzer_utils::emit_interaction_json(
-#                                             "MemoryBus",
-#                                             "send",
-#                                             "memory",
-#                                             &anchor_row_id,
-#                                             &payload,
-#                                             1,
-#                                             "gates.is_real",
-#                                         );
-#                                     }
-#                                     MemoryLogEntry::Write { address_space, pointer, data } => {
-#                                         access_count += 1;
-#                                         if *address_space != 0
-#                                             && !boundary_spaces.contains(address_space)
-#                                         {
-#                                             boundary_spaces.push(*address_space);
-#                                         }
-#                                         let len = data.len() as u32;
-#                                         let chip = format!("AccessAdapter<{}>", len);
-#                                         let locals = json!({
-#                                             "record_id": record_id,
-#                                             "op": "write",
-#                                             "address_space": address_space,
-#                                             "pointer": pointer,
-#                                             "len": len,
-#                                         })
-#                                         .to_string();
-#                                         fuzzer_utils::emit_chip_row_json(
-#                                             "openvm",
-#                                             &chip,
-#                                             "memory",
-#                                             &gates,
-#                                             &locals,
-#                                         );
-
-#                                         let anchor_row_id = fuzzer_utils::get_last_row_id();
-#                                         let payload = json!({
-#                                             "record_id": record_id,
-#                                             "op": "write",
-#                                             "address_space": address_space,
-#                                             "pointer": pointer,
-#                                             "len": len,
-#                                         })
-#                                         .to_string();
-#                                         fuzzer_utils::emit_interaction_json(
-#                                             "MemoryBus",
-#                                             "send",
-#                                             "memory",
-#                                             &anchor_row_id,
-#                                             &payload,
-#                                             1,
-#                                             "gates.is_real",
-#                                         );
-#                                     }
-#                                     MemoryLogEntry::IncrementTimestampBy(_) => {}
-#                                 }
-#                             }
-
-#                             // Boundary: constrain which address spaces are accessed.
-#                             if access_count > 0 {
-#                                 let chip = "Boundary".to_string();
-#                                 let locals = json!({
-#                                     "access_count": access_count,
-#                                     "address_spaces": boundary_spaces,
-#                                 })
-#                                 .to_string();
-#                                 fuzzer_utils::emit_chip_row_json("openvm", &chip, "memory", &gates, &locals);
-#                                 let anchor_row_id = fuzzer_utils::get_last_row_id();
-#                                 let payload = json!({
-#                                     "access_count": access_count,
-#                                     "address_spaces": boundary_spaces,
-#                                 })
-#                                 .to_string();
-#                                 fuzzer_utils::emit_interaction_json(
-#                                     "Boundary",
-#                                     "send",
-#                                     "memory",
-#                                     &anchor_row_id,
-#                                     &payload,
-#                                     1,
-#                                     "gates.is_real",
-#                                 );
-#                             }
-#                         }
-
-#                         // Execution-bus semantics: (pc,timestamp) transitions are constrained via
-#                         // the execution bus (checked by the connector air). We record the edge as
-#                         // a ChipRow so buckets can reason about next_pc / timestamp changes.
-#                         if fuzzer_utils::is_trace_logging() {
-#                             let gates = json!({"is_real": 1}).to_string();
-#                             let locals = json!({
-#                                 "from_pc": prev_pc,
-#                                 "to_pc": pc,
-#                                 "from_timestamp": prev_timestamp,
-#                                 "to_timestamp": timestamp,
-#                                 "opcode": opcode.as_usize(),
-#                             })
-#                             .to_string();
-#                             let chip = "VmConnectorAir".to_string();
-#                             fuzzer_utils::emit_chip_row_json("openvm", &chip, "connector", &gates, &locals);
-
-#                             let anchor_row_id = fuzzer_utils::get_last_row_id();
-#                             let recv_payload = json!({
-#                                 "pc": prev_pc,
-#                                 "timestamp": prev_timestamp,
-#                             })
-#                             .to_string();
-#                             fuzzer_utils::emit_interaction_json(
-#                                 "ExecutionBus",
-#                                 "recv",
-#                                 "global",
-#                                 &anchor_row_id,
-#                                 &recv_payload,
-#                                 1,
-#                                 "gates.is_real",
-#                             );
-#                             let send_payload = json!({
-#                                 "pc": pc,
-#                                 "timestamp": timestamp,
-#                             })
-#                             .to_string();
-#                             fuzzer_utils::emit_interaction_json(
-#                                 "ExecutionBus",
-#                                 "send",
-#                                 "global",
-#                                 &anchor_row_id,
-#                                 &send_payload,
-#                                 1,
-#                                 "gates.is_real",
-#                             );
-#                         }
-# """,
-#     )
-
-#     # Per-op step increment (needed so bucket code gets `op_spans`).
-#     contents = _insert_before(
-#         contents,
-#         anchor="(opcode, dsl_instr.cloned())",
-#         guard="beak_fuzz_op_step_v1",
-#         insert=r"""
-
-#                 // beak_fuzz_op_step_v1
-#                 // Advance "op index" for micro-op grouping.
-#                 fuzzer_utils::print_trace_info();
-#                 fuzzer_utils::inc_step();
-# """,
-#     )
-
-#     segment_rs.write_text(contents)
 
 
 def apply(*, openvm_install_path: Path, commit_or_branch: str) -> None:
     commit = resolve_openvm_commit(commit_or_branch)
-    if commit == OPENVM_BENCHMARK_REGZERO_COMMIT:
+    if commit in {OPENVM_BENCHMARK_REGZERO_COMMIT, OPENVM_BENCHMARK_BF11_COMMIT}:
         _patch_regzero_record_arena_emit_chip_row(openvm_install_path)
         _patch_regzero_interpreter_preflight_emit_instruction(openvm_install_path)
         _patch_regzero_rv32im_cores_emit_chip_row(openvm_install_path)
-        _patch_regzero_system_connector_emit_chip_row(openvm_install_path)
+        _patch_regzero_system_connector_emit_chip_row(
+            openvm_install_path,
+            program_row_slice_returns_option=(commit == OPENVM_BENCHMARK_BF11_COMMIT),
+        )
         _patch_regzero_program_trace_zero_register_injection(openvm_install_path)
         _patch_regzero_semantic_witness_injection(openvm_install_path)
         _patch_memory_access_emit_support(openvm_install_path)

@@ -48,6 +48,7 @@ struct ExecutedInstruction {
     rs1_val: Option<u32>,
     rs2_val: Option<u32>,
     rd_val: Option<u32>,
+    ecall_args: Option<[u32; 8]>,
 }
 
 fn base_details(
@@ -164,6 +165,12 @@ fn instr_details(
     }
     if let Some(rd_val) = insn.rd_val {
         details.insert("rd_val".to_string(), json!(rd_val));
+    }
+    if let Some(args) = insn.ecall_args {
+        for (idx, value) in args.iter().enumerate() {
+            details.insert(format!("a{idx}"), json!(value));
+        }
+        details.insert("syscall_code".to_string(), json!(args[7]));
     }
     details
 }
@@ -817,6 +824,10 @@ fn emit_control_buckets(
     idx: usize,
 ) {
     let insn = &instructions[idx];
+    let ecall_row_idx = instructions[..idx]
+        .iter()
+        .filter(|prev| matches!(prev.mnemonic.as_str(), "ecall" | "ebreak"))
+        .count() as u64;
     if is_branch(&insn.mnemonic) {
         let taken = insn.next_pc != insn.pc.wrapping_add(4);
         let rs1 = insn.rs1_val.unwrap_or(0);
@@ -909,6 +920,40 @@ fn emit_control_buckets(
             }
         }
         "ecall" => {
+            if let Some(args) = insn.ecall_args {
+                let syscall_code = args[7];
+                let cell_id = match syscall_code {
+                    0x201 => "cf5.halt",
+                    0x400 => "cf5.io_read",
+                    0x200 => "cf5.io_write",
+                    _ => "cf5.precompile",
+                };
+                let mut details = instr_details("cf5", cell_id, insn);
+                details.insert("syscall_code".to_string(), json!(syscall_code));
+                details.insert("ecall_row_idx".to_string(), json!(ecall_row_idx));
+                bucket_hits.push(BucketHit::semantic(
+                    semantic::control::ECALL_ARGUMENT_DECOMPOSITION,
+                    details,
+                ));
+                if args[1] == 0 {
+                    push_instr_hit(
+                        bucket_hits,
+                        semantic::control::ECALL_ARGUMENT_DECOMPOSITION,
+                        "cf5",
+                        "cf5.arg_zero",
+                        insn,
+                    );
+                }
+                if args[1] >= 0xffff_0000 {
+                    push_instr_hit(
+                        bucket_hits,
+                        semantic::control::ECALL_ARGUMENT_DECOMPOSITION,
+                        "cf5",
+                        "cf5.arg_max",
+                        insn,
+                    );
+                }
+            }
             push_instr_hit(
                 bucket_hits,
                 semantic::control::ECALL_WORD_VALIDITY,
@@ -1179,20 +1224,34 @@ fn emit_private_memory_finalization_hits(
     loads: &[ExecutedMemoryAccess],
     stores: &[(ExecutedMemoryAccess, u32)],
 ) {
-    let real_rows = memory_instruction_rows(loads, stores);
-    if real_rows == 0 {
-        return;
-    }
-    let padding_row_idx = real_rows as u64;
     let (private_start, private_end) = default_private_memory_range();
+    let private_byte_addresses =
+        private_memory_boundary_addresses(loads, stores, private_start, private_end);
+    let store_byte_addresses = stores
+        .iter()
+        .flat_map(|(store, _)| {
+            (0..u32::from(store.size_bytes)).filter_map(|byte_offset| {
+                store
+                    .address
+                    .checked_add(byte_offset)
+                    .filter(|address| *address >= private_start && *address < private_end)
+            })
+        })
+        .collect::<BTreeSet<_>>();
     for (store, prev_value) in stores {
         if store.address < private_start || store.address >= private_end {
             continue;
         }
+        let Some(boundary_row_idx) =
+            private_memory_boundary_row_idx(&private_byte_addresses, private_start, store.address)
+        else {
+            continue;
+        };
         let mut details = base_details("me11", "me11.written_cells", store);
         details.insert("trace_source".to_string(), json!("prover2.private_memory_boundary"));
-        details.insert("step_idx".to_string(), json!(padding_row_idx));
-        details.insert("padding_row_idx".to_string(), json!(padding_row_idx));
+        details.insert("step_idx".to_string(), json!(boundary_row_idx));
+        details.insert("private_boundary_row_idx".to_string(), json!(boundary_row_idx));
+        details.insert("boundary_row_idx".to_string(), json!(boundary_row_idx));
         details.insert("table_name".to_string(), json!("private_memory_boundary"));
         details.insert("source_last_access".to_string(), json!(true));
         details.insert("initial_value".to_string(), json!(prev_value & 0xff));
@@ -1205,6 +1264,79 @@ fn emit_private_memory_finalization_hits(
         );
         bucket_hits.push(BucketHit::semantic(semantic::memory::FINALIZATION_CONSISTENCY, details));
     }
+
+    let mut emitted_read_only_addresses = BTreeSet::new();
+    for load in loads {
+        let loaded_private_bytes = (0..u32::from(load.size_bytes))
+            .filter_map(|byte_offset| {
+                load.address
+                    .checked_add(byte_offset)
+                    .filter(|address| *address >= private_start && *address < private_end)
+            })
+            .collect::<Vec<_>>();
+        let Some(&first_address) = loaded_private_bytes.first() else {
+            continue;
+        };
+        if loaded_private_bytes.iter().any(|address| store_byte_addresses.contains(address)) {
+            continue;
+        }
+        if !emitted_read_only_addresses.insert(first_address) {
+            continue;
+        }
+        let Some(boundary_row_idx) =
+            private_memory_boundary_row_idx(&private_byte_addresses, private_start, first_address)
+        else {
+            continue;
+        };
+        let mut details = base_details("me11", "me11.read_only_cells", load);
+        details.insert("trace_source".to_string(), json!("prover2.private_memory_boundary"));
+        details.insert("step_idx".to_string(), json!(boundary_row_idx));
+        details.insert("private_boundary_row_idx".to_string(), json!(boundary_row_idx));
+        details.insert("boundary_row_idx".to_string(), json!(boundary_row_idx));
+        details.insert("table_name".to_string(), json!("private_memory_boundary"));
+        details.insert("source_last_access".to_string(), json!(true));
+        details.insert("final_address".to_string(), json!(first_address));
+        details.insert("initial_value".to_string(), json!(load.value & 0xff));
+        details.insert("final_value".to_string(), json!(load.value & 0xff));
+        details.insert("final_timestamp".to_string(), json!(load.timestamp));
+        details.insert("was_initial".to_string(), json!(true));
+        details.insert("changed_from_initial".to_string(), json!(false));
+        details.insert("read_only".to_string(), json!(true));
+        bucket_hits.push(BucketHit::semantic(semantic::memory::FINALIZATION_CONSISTENCY, details));
+    }
+}
+
+fn private_memory_boundary_addresses(
+    loads: &[ExecutedMemoryAccess],
+    stores: &[(ExecutedMemoryAccess, u32)],
+    private_start: u32,
+    private_end: u32,
+) -> BTreeSet<u32> {
+    let mut addresses = BTreeSet::new();
+    for access in loads.iter().chain(stores.iter().map(|(store, _)| store)) {
+        for byte_offset in 0..u32::from(access.size_bytes) {
+            let Some(address) = access.address.checked_add(byte_offset) else {
+                continue;
+            };
+            if address >= private_start && address < private_end {
+                addresses.insert(address);
+            }
+        }
+    }
+    addresses
+}
+
+fn private_memory_boundary_row_idx(
+    private_byte_addresses: &BTreeSet<u32>,
+    private_start: u32,
+    address: u32,
+) -> Option<u64> {
+    if address < private_start || !private_byte_addresses.contains(&address) {
+        return None;
+    }
+    let sentinel_rows = if private_byte_addresses.contains(&private_start) { 0 } else { 1 };
+    let preceding_accesses = private_byte_addresses.range(..address).count();
+    Some((sentinel_rows + preceding_accesses) as u64)
 }
 
 fn push_memory_hit(
@@ -1266,6 +1398,20 @@ impl NexusTrace {
                     rs1_val,
                     rs2_val,
                     rd_val: step.result,
+                    ecall_args: if decoded.mnemonic == "ecall" {
+                        Some([
+                            regs.read(Register::X10),
+                            regs.read(Register::X11),
+                            regs.read(Register::X12),
+                            regs.read(Register::X13),
+                            regs.read(Register::X14),
+                            regs.read(Register::X15),
+                            regs.read(Register::X16),
+                            regs.read(Register::X17),
+                        ])
+                    } else {
+                        None
+                    },
                 });
 
                 for record in &step.memory_records {

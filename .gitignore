@@ -38,6 +38,9 @@ scripts/__pycache__/
 # Local run artifacts
 out/
 logs/
+worker-results/
+projects/*/out/
+projects/*/logs/
 
 # Local Codex/agent run dumps, prompts, lead notes, and process sentinels.
 agent_runs/

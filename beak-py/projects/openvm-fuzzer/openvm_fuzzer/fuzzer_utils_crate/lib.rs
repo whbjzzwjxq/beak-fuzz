@@ -2043,7 +2043,7 @@ pub fn random_mod_of_u32_array<const LEN: usize>(elements: &[u32; LEN]) -> [u32;
 }
 
 pub fn random_mutate_field_element<F: Field + PrimeField32>(element: F, rng: &mut StdRng) -> F {
-    F::from_canonical_u32(internal_random_mod_of_u32(element.as_canonical_u32(), rng))
+    F::from_u32(internal_random_mod_of_u32(element.as_canonical_u32(), rng))
 }
 
 pub fn random_mutate_instruction<F: Field + PrimeField32>(

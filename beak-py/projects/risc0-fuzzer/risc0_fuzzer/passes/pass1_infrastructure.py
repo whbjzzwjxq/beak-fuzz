@@ -14,8 +14,13 @@ def apply(*, risc0_install_path: Path, commit_or_branch: str) -> None:
     prove_dir.mkdir(parents=True, exist_ok=True)
 
     witgen_mod = prove_dir / "witgen" / "mod.rs"
+    flat_prove_rs = risc0_install_path / "risc0" / "circuit" / "rv32im" / "src" / "prove.rs"
     beak_src = asset_root / "risc0" / "circuit" / "rv32im" / "src" / "prove" / "beak.rs"
-    if not commit_or_branch.startswith("98387806") and witgen_mod.exists():
+    if flat_prove_rs.exists():
+        beak_src = (
+            asset_root / "risc0" / "circuit" / "rv32im" / "src" / "prove" / "beak_m3.rs"
+        )
+    elif not commit_or_branch.startswith("98387806") and witgen_mod.exists():
         witgen_mod_contents = witgen_mod.read_text(encoding="utf-8")
         if "pub struct PreflightResults" not in witgen_mod_contents:
             beak_src = (
@@ -24,10 +29,16 @@ def apply(*, risc0_install_path: Path, commit_or_branch: str) -> None:
 
     shutil.copyfile(beak_src, prove_dir / "beak.rs")
 
-    mod_rs = prove_dir / "mod.rs"
+    mod_rs = flat_prove_rs if flat_prove_rs.exists() else prove_dir / "mod.rs"
     contents = mod_rs.read_text(encoding="utf-8")
     marker = "pub mod beak;\n"
     if marker in contents:
+        return
+
+    anchor = "mod preflight;\n"
+    if anchor in contents:
+        contents = contents.replace(anchor, anchor + marker, 1)
+        mod_rs.write_text(contents, encoding="utf-8")
         return
 
     anchor = "#[cfg(test)]\nmod tests;\n"

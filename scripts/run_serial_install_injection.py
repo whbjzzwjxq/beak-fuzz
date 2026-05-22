@@ -10,6 +10,7 @@ import csv
 import json
 import os
 import queue
+import re
 import select
 import shutil
 import signal
@@ -26,6 +27,8 @@ BEAK_ROOT = SCRIPT_DIR.parent
 STORAGE_DIR = BEAK_ROOT / "storage" / "fuzzing_seeds"
 IO_LOCK = threading.Lock()
 INSTALL_LOCK = threading.Lock()
+BUG_KIND_RE = re.compile(r'"kind"\s*:\s*"((?:\\.|[^"\\])*)"')
+BUG_SEMANTIC_CLASS_RE = re.compile(r'"semantic_class"\s*:\s*(null|"((?:\\.|[^"\\])*)")')
 
 
 class ProcessReaper:
@@ -322,7 +325,11 @@ def target_project_dir(target_id: str) -> Path:
 def target_artifact_prefix(target_id: str) -> str | None:
     if target_id in {"sp1-fb38df2c"}:
         return None
-    return f"benchmark-{vm_name(target_id)}-{target_id.split('-', 1)[1]}"
+    suffix = target_id.split("-", 1)[1]
+    commit = TARGET_COMMITS.get(target_id, "")
+    if len(suffix) < 8 and commit.startswith(suffix):
+        suffix = commit[:8]
+    return f"benchmark-{vm_name(target_id)}-{suffix}"
 
 
 def experiment_class(target_id: str) -> str:
@@ -408,14 +415,19 @@ def build_run_cmd(target_id: str, config: Config) -> tuple[list[str], Path, dict
                 str(config.oracle_precheck_max_steps),
             ]
         )
+    if target_id != "jolt-d67f5a2a":
+        run_args.extend(
+            [
+                "--semantic-window-before",
+                str(config.semantic_window_before),
+                "--semantic-window-after",
+                str(config.semantic_window_after),
+                "--semantic-step-stride",
+                str(config.semantic_step_stride),
+            ],
+        )
     run_args.extend(
         [
-            "--semantic-window-before",
-            str(config.semantic_window_before),
-            "--semantic-window-after",
-            str(config.semantic_window_after),
-            "--semantic-step-stride",
-            str(config.semantic_step_stride),
             "--semantic-max-trials-per-bucket",
             str(config.semantic_max_trials),
         ],
@@ -595,10 +607,9 @@ def run_target(target_id: str, config: Config, skip_install: bool) -> bool:
     return False
 
 
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
+def iter_jsonl(path: Path):
     if not path.exists():
-        return records
+        return
     with path.open("r", encoding="utf-8") as f:
         for line_no, line in enumerate(f, 1):
             line = line.strip()
@@ -607,10 +618,16 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
             try:
                 value = json.loads(line)
             except json.JSONDecodeError as exc:
-                records.append({"__parse_error__": f"{path}:{line_no}: {exc}"})
+                yield {"__parse_error__": f"{path}:{line_no}: {exc}"}
                 continue
             if isinstance(value, dict):
-                records.append(value)
+                yield value
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for rec in iter_jsonl(path):
+        records.append(rec)
     return records
 
 
@@ -668,6 +685,34 @@ def concise_bug(rec: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def json_string_value(raw: str | None) -> Any:
+    if raw is None or raw == "null":
+        return None
+    return json.loads(raw)
+
+
+def bug_fields_from_line(line: str) -> tuple[str, str]:
+    kind_match = BUG_KIND_RE.search(line)
+    class_match = BUG_SEMANTIC_CLASS_RE.search(line)
+    kind = json_string_value(f'"{kind_match.group(1)}"') if kind_match else "unknown"
+    semantic_class = "__non_semantic__"
+    if class_match:
+        raw = class_match.group(1)
+        semantic_class = json_string_value(raw) or "__non_semantic__"
+    return str(kind), str(semantic_class)
+
+
+def parse_bug_for_summary(path: Path, line_no: int, line: str, item: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        value = json.loads(line)
+    except json.JSONDecodeError as exc:
+        item["warnings"].append(f"{path}:{line_no}: {exc}")
+        return None
+    if not isinstance(value, dict):
+        return None
+    return concise_bug(value)
+
+
 def json_objects_from_log(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -692,7 +737,7 @@ def json_objects_from_log(path: Path) -> list[dict[str, Any]]:
 
 def summarize_jsonl_artifacts(item: dict[str, Any]) -> None:
     for path_s in item["artifacts"].get("runs", []):
-        for rec in read_jsonl(Path(path_s)):
+        for rec in iter_jsonl(Path(path_s)):
             if "__parse_error__" in rec:
                 item["warnings"].append(rec["__parse_error__"])
                 continue
@@ -709,24 +754,43 @@ def summarize_jsonl_artifacts(item: dict[str, Any]) -> None:
                     item["run_counts"]["semantic_noop"] += 1
 
     for path_s in item["artifacts"].get("bugs", []):
-        for rec in read_jsonl(Path(path_s)):
-            if "__parse_error__" in rec:
-                item["warnings"].append(rec["__parse_error__"])
-                continue
-            md = rec.get("metadata") or {}
-            semantic_class = md.get("semantic_class") or "__non_semantic__"
-            kind = md.get("kind") or "unknown"
-            inc(item["bug_counts_by_class"], semantic_class)
-            inc(item["bug_counts_by_kind"], kind)
-            bug = concise_bug(rec)
-            if item["first_bug_overall"] is None:
-                item["first_bug_overall"] = bug
-            item["first_bug_by_class"].setdefault(semantic_class, bug)
-            if kind == "underconstrained_candidate":
-                inc(item["underconstrained_counts_by_class"], semantic_class)
-                if item["first_underconstrained_overall"] is None:
-                    item["first_underconstrained_overall"] = bug
-                item["first_underconstrained_by_class"].setdefault(semantic_class, bug)
+        path = Path(path_s)
+        if not path.exists():
+            continue
+        with path.open("r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    kind, semantic_class = bug_fields_from_line(line)
+                except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                    item["warnings"].append(f"{path}:{line_no}: {exc}")
+                    continue
+                inc(item["bug_counts_by_class"], semantic_class)
+                inc(item["bug_counts_by_kind"], kind)
+                need_bug = (
+                    item["first_bug_overall"] is None
+                    or semantic_class not in item["first_bug_by_class"]
+                    or (
+                        kind == "underconstrained_candidate"
+                        and (
+                            item["first_underconstrained_overall"] is None
+                            or semantic_class not in item["first_underconstrained_by_class"]
+                        )
+                    )
+                )
+                bug = parse_bug_for_summary(path, line_no, line, item) if need_bug else None
+                if bug is not None and item["first_bug_overall"] is None:
+                    item["first_bug_overall"] = bug
+                if bug is not None:
+                    item["first_bug_by_class"].setdefault(semantic_class, bug)
+                if kind == "underconstrained_candidate":
+                    inc(item["underconstrained_counts_by_class"], semantic_class)
+                    if bug is not None and item["first_underconstrained_overall"] is None:
+                        item["first_underconstrained_overall"] = bug
+                    if bug is not None:
+                        item["first_underconstrained_by_class"].setdefault(semantic_class, bug)
 
 
 def summarize_bespoke(item: dict[str, Any]) -> None:

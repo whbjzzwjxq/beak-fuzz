@@ -15,7 +15,8 @@ def _executor_asset_name(contents: str) -> str:
 
 
 def apply(*, risc0_install_path: Path, commit_or_branch: str) -> None:
-    _ = commit_or_branch
+    if commit_or_branch.startswith("10fa9788"):
+        return
     executor_rs = (
         risc0_install_path / "risc0" / "circuit" / "rv32im" / "src" / "execute" / "rv32im.rs"
     )
@@ -33,4 +34,3 @@ def apply(*, risc0_install_path: Path, commit_or_branch: str) -> None:
         / _executor_asset_name(contents)
     )
     shutil.copyfile(asset, executor_rs)
-

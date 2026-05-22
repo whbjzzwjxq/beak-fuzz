@@ -23,17 +23,18 @@ const IMM_SIGNEXT_INJECT_KIND: &str = "nexus.semantic.decode.immediate_sign_exte
 const UPPER_IMM_INJECT_KIND: &str = "nexus.semantic.decode.upper_immediate_materialization";
 const FORMAT_IMM_INJECT_KIND: &str = "nexus.semantic.decode.format_immediate_reassembly";
 const OP_SELECTOR_INJECT_KIND: &str = "nexus.semantic.exec.op_selector_binding";
-const ALU_IMM_INJECT_KIND: &str = "nexus.semantic.alu.immediate_limb_consistency";
 const SHIFT_INJECT_KIND: &str = "nexus.semantic.alu.shift_mod32";
 const CMP_BOOL_INJECT_KIND: &str = "nexus.semantic.alu.comparison_booleanity";
 const SUB_BORROW_INJECT_KIND: &str = "nexus.semantic.alu.subtraction_borrow_chain";
 const CMP_AUX_INJECT_KIND: &str = "nexus.semantic.alu.comparison_auxiliary_chain";
 const CONTROL_FLOW_INJECT_KIND: &str = "nexus.semantic.exec.control_flow_binding";
 const ENTRYPOINT_INJECT_KIND: &str = "nexus.semantic.control.entrypoint_binding";
+const ECALL_ARGUMENT_INJECT_KIND: &str = "nexus.semantic.control.ecall_argument_decomposition";
 const ECALL_WORD_INJECT_KIND: &str = "nexus.semantic.control.ecall_word_validity";
 const TIME_BOUNDARY_INJECT_KIND: &str = "nexus.semantic.time.boundary_origin_consistency";
 const ADDRESS_ALIGNMENT_INJECT_KIND: &str = "nexus.semantic.memory.address_alignment_consistency";
 const LOAD_VALUE_INJECT_KIND: &str = "nexus.semantic.memory.load_value_binding";
+const INITIAL_VALUE_INJECT_KIND: &str = "nexus.semantic.memory.initial_value_binding";
 const ADDRESS_POINTER_INJECT_KIND: &str = "nexus.semantic.memory.address_pointer_consistency";
 const ADDRESS_PROGRESSION_INJECT_KIND: &str =
     "nexus.semantic.memory.address_progression_consistency";
@@ -41,8 +42,8 @@ const TIME_MONOTONIC_INJECT_KIND: &str = "nexus.semantic.time.monotonic_access_o
 const FLOW_PAYLOAD_INJECT_KIND: &str = "nexus.semantic.memory.store_load_payload_flow";
 const WRITE_PAYLOAD_INJECT_KIND: &str = "nexus.semantic.memory.write_payload_consistency";
 const KIND_SELECTOR_INJECT_KIND: &str = "nexus.semantic.memory.kind_selector_consistency";
-const PADDING_INTERACTION_INJECT_KIND: &str = "nexus.semantic.row.padding_interaction_send";
 const FINALIZATION_INJECT_KIND: &str = "nexus.semantic.memory.finalization_consistency";
+const PADDING_INTERACTION_INJECT_KIND: &str = "nexus.semantic.row.padding_interaction_send";
 const BEAK_NEXUS_INJECT_KIND_ENV: &str = "BEAK_NEXUS_INJECT_KIND";
 const BEAK_NEXUS_INJECT_STEP_ENV: &str = "BEAK_NEXUS_INJECT_STEP";
 const BEAK_NEXUS_INJECTION_APPLIED_ENV: &str = "BEAK_NEXUS_INJECTION_APPLIED";
@@ -97,13 +98,6 @@ fn record_site(sites: &mut BTreeMap<String, Vec<u64>>, kind: &str, step: u64) {
     }
 }
 
-fn is_i_alu_mnemonic(mnemonic: &str) -> bool {
-    matches!(
-        mnemonic,
-        "addi" | "slti" | "sltiu" | "xori" | "ori" | "andi" | "slli" | "srli" | "srai"
-    )
-}
-
 fn is_shift_mnemonic(mnemonic: &str) -> bool {
     matches!(mnemonic, "sll" | "slli" | "srl" | "srli" | "sra" | "srai")
 }
@@ -116,6 +110,10 @@ fn is_supported_sub_borrow_mnemonic(mnemonic: &str) -> bool {
     matches!(mnemonic, "sub" | "slt" | "slti" | "sltu" | "sltiu")
 }
 
+fn is_control_flow_mnemonic(mnemonic: &str) -> bool {
+    matches!(mnemonic, "beq" | "bne" | "blt" | "bge" | "bltu" | "bgeu" | "jal" | "jalr")
+}
+
 fn is_format_imm_mnemonic(mnemonic: &str) -> bool {
     matches!(mnemonic, "sb" | "sh" | "sw" | "beq" | "bne" | "blt" | "bge" | "bltu" | "bgeu" | "jal")
 }
@@ -123,6 +121,7 @@ fn is_format_imm_mnemonic(mnemonic: &str) -> bool {
 fn collect_observed_injection_sites(trace: &UniformTrace) -> BTreeMap<String, Vec<u64>> {
     let mut sites = BTreeMap::<String, Vec<u64>>::new();
     let mut flat_step = 0u64;
+    let mut ecall_row_idx = 0u64;
     for block in &trace.blocks {
         for step in &block.steps {
             if let Some(decoded) = RV32IMInstruction::decode_with_pc(step.raw_instruction, step.pc)
@@ -144,9 +143,6 @@ fn collect_observed_injection_sites(trace: &UniformTrace) -> BTreeMap<String, Ve
                 if is_format_imm_mnemonic(mnemonic) {
                     record_site(&mut sites, FORMAT_IMM_INJECT_KIND, flat_step);
                 }
-                if is_i_alu_mnemonic(mnemonic) {
-                    record_site(&mut sites, ALU_IMM_INJECT_KIND, flat_step);
-                }
                 if is_shift_mnemonic(mnemonic) {
                     record_site(&mut sites, SHIFT_INJECT_KIND, flat_step);
                 }
@@ -157,9 +153,15 @@ fn collect_observed_injection_sites(trace: &UniformTrace) -> BTreeMap<String, Ve
                 if is_supported_sub_borrow_mnemonic(mnemonic) {
                     record_site(&mut sites, SUB_BORROW_INJECT_KIND, flat_step);
                 }
-                record_site(&mut sites, CONTROL_FLOW_INJECT_KIND, flat_step);
+                if is_control_flow_mnemonic(mnemonic) {
+                    record_site(&mut sites, CONTROL_FLOW_INJECT_KIND, flat_step);
+                }
                 if mnemonic == "ecall" {
                     record_site(&mut sites, ECALL_WORD_INJECT_KIND, flat_step);
+                    record_site(&mut sites, ECALL_ARGUMENT_INJECT_KIND, ecall_row_idx);
+                }
+                if matches!(mnemonic, "ecall" | "ebreak") {
+                    ecall_row_idx = ecall_row_idx.saturating_add(1);
                 }
                 if flat_step == 0 {
                     record_site(&mut sites, ENTRYPOINT_INJECT_KIND, flat_step);
@@ -396,7 +398,6 @@ impl BenchmarkBackend for NexusBackend {
 }
 
 fn candidate_from_hit(hit: &BucketHit) -> Option<SemanticInjectionCandidate> {
-    let mnemonic = detail_str(hit, "mnemonic");
     let (inject_kind, semantic_class) = match hit.bucket_id.as_str() {
         "sem.decode.zero_register_immutability" => {
             (ZERO_REG_INJECT_KIND, "semantic.decode.zero_register_immutability")
@@ -419,23 +420,31 @@ fn candidate_from_hit(hit: &BucketHit) -> Option<SemanticInjectionCandidate> {
             (OP_SELECTOR_INJECT_KIND, "semantic.exec.op_selector_binding")
         }
         "sem.alu.immediate_limb_consistency" => {
-            (ALU_IMM_INJECT_KIND, "semantic.alu.immediate_limb_consistency")
+            // The f2ad hook named for this bucket mutates execution/add::AVal,
+            // not the immediate/op_c decomposition source, so keep AL1 bucket-only.
+            return None;
         }
-        "sem.alu.shift_mod32" if mnemonic.is_some_and(is_shift_mnemonic) => {
-            (SHIFT_INJECT_KIND, "semantic.alu.shift_mod32")
-        }
-        "sem.alu.comparison_booleanity" if mnemonic.is_some_and(is_comparison_mnemonic) => {
+        "sem.alu.shift_mod32" => (SHIFT_INJECT_KIND, "semantic.alu.shift_mod32"),
+        "sem.alu.comparison_booleanity" => {
             (CMP_BOOL_INJECT_KIND, "semantic.alu.comparison_booleanity")
         }
-        "sem.alu.subtraction_borrow_chain"
-            if mnemonic.is_some_and(is_supported_sub_borrow_mnemonic) =>
-        {
+        "sem.alu.subtraction_borrow_chain" => {
+            if !detail_str(hit, "mnemonic").is_some_and(is_supported_sub_borrow_mnemonic) {
+                return None;
+            }
             (SUB_BORROW_INJECT_KIND, "semantic.alu.subtraction_borrow_chain")
         }
-        "sem.alu.comparison_auxiliary_chain" if mnemonic.is_some_and(is_comparison_mnemonic) => {
+        "sem.alu.comparison_auxiliary_chain" => {
+            if !detail_str(hit, "mnemonic").is_some_and(is_comparison_mnemonic) {
+                return None;
+            }
             (CMP_AUX_INJECT_KIND, "semantic.alu.comparison_auxiliary_chain")
         }
         "sem.exec.control_flow_binding" => {
+            let obligation_id = detail_str(hit, "obligation_id")?;
+            if !matches!(obligation_id, "cf1" | "cf2" | "cf3") {
+                return None;
+            }
             (CONTROL_FLOW_INJECT_KIND, "semantic.exec.control_flow_binding")
         }
         "sem.control.entrypoint_binding" => {
@@ -443,6 +452,13 @@ fn candidate_from_hit(hit: &BucketHit) -> Option<SemanticInjectionCandidate> {
         }
         "sem.control.ecall_word_validity" => {
             (ECALL_WORD_INJECT_KIND, "semantic.control.ecall_word_validity")
+        }
+        "sem.control.ecall_argument_decomposition" => {
+            let cell_id = detail_str(hit, "cell_id")?;
+            if matches!(cell_id, "cf5.arg_zero" | "cf5.arg_max") {
+                return None;
+            }
+            (ECALL_ARGUMENT_INJECT_KIND, "semantic.control.ecall_argument_decomposition")
         }
         "sem.time.boundary_origin_consistency" => {
             (TIME_BOUNDARY_INJECT_KIND, "semantic.time.boundary_origin_consistency")
@@ -452,6 +468,13 @@ fn candidate_from_hit(hit: &BucketHit) -> Option<SemanticInjectionCandidate> {
         }
         "sem.memory.load_value_binding" => {
             (LOAD_VALUE_INJECT_KIND, "semantic.memory.load_value_binding")
+        }
+        "sem.memory.initial_value_binding" => {
+            let cell_id = detail_str(hit, "cell_id")?;
+            if !matches!(cell_id, "me7.bss_zero" | "me7.data_loaded") {
+                return None;
+            }
+            (INITIAL_VALUE_INJECT_KIND, "semantic.memory.initial_value_binding")
         }
         "sem.memory.address_boundary_range" => {
             (ADDRESS_POINTER_INJECT_KIND, "semantic.memory.address_boundary_range")
@@ -471,11 +494,15 @@ fn candidate_from_hit(hit: &BucketHit) -> Option<SemanticInjectionCandidate> {
         "sem.memory.kind_selector_consistency" => {
             (KIND_SELECTOR_INJECT_KIND, "semantic.memory.kind_selector_consistency")
         }
+        "sem.memory.finalization_consistency" => {
+            let cell_id = detail_str(hit, "cell_id")?;
+            if !matches!(cell_id, "me11.written_cells" | "me11.read_only_cells") {
+                return None;
+            }
+            (FINALIZATION_INJECT_KIND, "semantic.memory.finalization_consistency")
+        }
         "sem.row.padding_interaction_send" => {
             (PADDING_INTERACTION_INJECT_KIND, "semantic.row.padding_interaction_send")
-        }
-        "sem.memory.finalization_consistency" => {
-            (FINALIZATION_INJECT_KIND, "semantic.memory.finalization_consistency")
         }
         "sem.row.table_power2_boundary" => {
             // Bucket-only for now: Nexus RamInitFinal table sizing has no safe witness hook yet.
@@ -483,15 +510,32 @@ fn candidate_from_hit(hit: &BucketHit) -> Option<SemanticInjectionCandidate> {
         }
         _ => return None,
     };
-    let step = if matches!(
-        hit.bucket_id.as_str(),
-        "sem.row.padding_interaction_send" | "sem.memory.finalization_consistency"
-    ) {
-        detail_u64(hit, "padding_row_idx").or_else(|| detail_u64(hit, "step_idx"))?
-    } else {
-        detail_u64(hit, "store_step_idx")
+    let step = match hit.bucket_id.as_str() {
+        "sem.row.padding_interaction_send" => {
+            detail_u64(hit, "padding_row_idx").or_else(|| detail_u64(hit, "step_idx"))?
+        }
+        "sem.alu.shift_mod32"
+        | "sem.alu.immediate_limb_consistency"
+        | "sem.alu.comparison_booleanity"
+        | "sem.alu.subtraction_borrow_chain"
+        | "sem.alu.comparison_auxiliary_chain"
+        | "sem.exec.control_flow_binding" => detail_u64(hit, "timestamp")?,
+        "sem.memory.address_alignment_consistency"
+        | "sem.memory.load_value_binding"
+        | "sem.memory.initial_value_binding"
+        | "sem.memory.address_boundary_range"
+        | "sem.memory.address_progression_consistency"
+        | "sem.time.monotonic_access_ordering"
+        | "sem.memory.store_load_payload_flow"
+        | "sem.memory.write_payload_consistency"
+        | "sem.memory.kind_selector_consistency" => detail_u64(hit, "timestamp")?,
+        "sem.memory.finalization_consistency" => detail_u64(hit, "private_boundary_row_idx")
+            .or_else(|| detail_u64(hit, "boundary_row_idx"))
+            .or_else(|| detail_u64(hit, "step_idx"))?,
+        "sem.control.ecall_argument_decomposition" => detail_u64(hit, "ecall_row_idx")
             .or_else(|| detail_u64(hit, "op_idx"))
-            .or_else(|| detail_u64(hit, "step_idx"))?
+            .or_else(|| detail_u64(hit, "step_idx"))?,
+        _ => detail_u64(hit, "op_idx").or_else(|| detail_u64(hit, "step_idx"))?,
     };
     Some(SemanticInjectionCandidate {
         bucket_id: hit.bucket_id.clone(),
@@ -502,12 +546,12 @@ fn candidate_from_hit(hit: &BucketHit) -> Option<SemanticInjectionCandidate> {
     })
 }
 
-fn detail_str<'a>(hit: &'a BucketHit, key: &str) -> Option<&'a str> {
-    hit.details.get(key).and_then(|value| value.as_str())
-}
-
 fn detail_u64(hit: &BucketHit, key: &str) -> Option<u64> {
     hit.details.get(key).and_then(|value| {
         value.as_u64().or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
     })
+}
+
+fn detail_str<'a>(hit: &'a BucketHit, key: &str) -> Option<&'a str> {
+    hit.details.get(key).and_then(|value| value.as_str())
 }

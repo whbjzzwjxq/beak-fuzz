@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from jolt_fuzzer.settings import JOLT_DORY_SHORT_TRACE_COMMIT, JOLT_READWRITE_SIZING_COMMIT
+from jolt_fuzzer.settings import (
+    JOLT_DORY_SHORT_TRACE_COMMIT,
+    JOLT_LATEST_OBLIGATIONS_COMMIT,
+    JOLT_READWRITE_SIZING_COMMIT,
+)
 
 
 def apply(*, jolt_install_path: Path, commit_or_branch: str) -> None:
@@ -13,12 +17,135 @@ def apply(*, jolt_install_path: Path, commit_or_branch: str) -> None:
         # uniformly across the older Dory-era tree.
         return
 
+    if commit_or_branch == JOLT_LATEST_OBLIGATIONS_COMMIT:
+        _patch_latest_host_program_trace_injection(jolt_install_path)
+        return
+
     _ = commit_or_branch
     _patch_host_trace_injection(jolt_install_path)
     _patch_read_write_memory_injection(jolt_install_path)
     _patch_bytecode_injection(jolt_install_path)
     _patch_instruction_lookup_injection(jolt_install_path)
     _patch_vm_padding_injection(jolt_install_path)
+
+
+def _patch_latest_host_program_trace_injection(jolt_install_path: Path) -> None:
+    host_program = jolt_install_path / "jolt-core" / "src" / "host" / "program.rs"
+    c = host_program.read_text()
+
+    if "// BEAK-INSERT: jolt.latest.host_program.trace_injection_helpers" not in c:
+        helper_anchor = "use tracing::info;\n"
+        helpers = r'''
+const BEAK_JOLT_LATEST_INJECT_KIND_ENV: &str = "BEAK_JOLT_WITNESS_INJECT_KIND";
+const BEAK_JOLT_LATEST_INJECT_STEP_ENV: &str = "BEAK_JOLT_WITNESS_INJECT_STEP";
+const BEAK_JOLT_LATEST_INJECT_APPLIED_ENV: &str = "BEAK_JOLT_WITNESS_INJECTION_APPLIED";
+const BEAK_JOLT_LATEST_ALU_COMPARISON_AUX_KIND: &str = "jolt.semantic.alu.comparison_auxiliary_chain";
+const BEAK_JOLT_LATEST_ALU_COMPARISON_BOOL_KIND: &str = "jolt.semantic.alu.comparison_booleanity";
+const BEAK_JOLT_LATEST_ALU_IMM_KIND: &str = "jolt.semantic.alu.immediate_limb_consistency";
+const BEAK_JOLT_LATEST_ALU_SHIFT_KIND: &str = "jolt.semantic.alu.shift_mod32";
+const BEAK_JOLT_LATEST_ALU_SUB_KIND: &str = "jolt.semantic.alu.subtraction_borrow_chain";
+const BEAK_JOLT_LATEST_BRANCH_KIND: &str = "jolt.semantic.control.branch_signedness";
+const BEAK_JOLT_LATEST_DECODE_FIELD_KIND: &str = "jolt.semantic.decode.field_range";
+const BEAK_JOLT_LATEST_DECODE_FORMAT_IMM_KIND: &str = "jolt.semantic.decode.format_immediate_reassembly";
+const BEAK_JOLT_LATEST_DECODE_IMM_SIGN_KIND: &str = "jolt.semantic.decode.immediate_sign_extension";
+const BEAK_JOLT_LATEST_DECODE_UPPER_IMM_KIND: &str = "jolt.semantic.decode.upper_immediate_materialization";
+const BEAK_JOLT_LATEST_DEST_KIND: &str = "jolt.semantic.exec.dest_binding";
+const BEAK_JOLT_LATEST_ENTRYPOINT_KIND: &str = "jolt.semantic.control.entrypoint_binding";
+const BEAK_JOLT_LATEST_LINK_KIND: &str = "jolt.semantic.control.link_register";
+const BEAK_JOLT_LATEST_SOURCE_KIND: &str = "jolt.semantic.exec.source_operand_binding";
+const BEAK_JOLT_LATEST_ZERO_REGISTER_KIND: &str = "jolt.semantic.decode.zero_register_immutability";
+
+// BEAK-INSERT: jolt.latest.host_program.trace_injection_helpers
+fn beak_latest_base_inject_kind(kind: &str) -> &str {
+    kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
+}
+
+fn beak_latest_inject_step_matches(configured_step: u64, candidate_step: u64) -> bool {
+    configured_step == u64::MAX || configured_step == candidate_step
+}
+
+fn beak_latest_cycle_matches_kind(base_kind: &str, cycle: &Cycle) -> bool {
+    match base_kind {
+        BEAK_JOLT_LATEST_ZERO_REGISTER_KIND => cycle
+            .rd_write()
+            .map(|(rd, _, _)| rd == 0)
+            .unwrap_or(false),
+        BEAK_JOLT_LATEST_SOURCE_KIND => cycle.rs1_read().is_some() || cycle.rs2_read().is_some(),
+        BEAK_JOLT_LATEST_DEST_KIND => cycle.rd_write().is_some(),
+        BEAK_JOLT_LATEST_ENTRYPOINT_KIND
+        | BEAK_JOLT_LATEST_DECODE_FIELD_KIND
+        | BEAK_JOLT_LATEST_DECODE_IMM_SIGN_KIND
+        | BEAK_JOLT_LATEST_DECODE_UPPER_IMM_KIND
+        | BEAK_JOLT_LATEST_DECODE_FORMAT_IMM_KIND
+        | BEAK_JOLT_LATEST_ALU_IMM_KIND
+        | BEAK_JOLT_LATEST_ALU_SHIFT_KIND
+        | BEAK_JOLT_LATEST_ALU_COMPARISON_BOOL_KIND
+        | BEAK_JOLT_LATEST_ALU_SUB_KIND
+        | BEAK_JOLT_LATEST_ALU_COMPARISON_AUX_KIND
+        | BEAK_JOLT_LATEST_BRANCH_KIND
+        | BEAK_JOLT_LATEST_LINK_KIND => true,
+        _ => false,
+    }
+}
+
+fn beak_latest_apply_trace_injection(trace: &mut Vec<Cycle>) {
+    let Ok(kind) = std::env::var(BEAK_JOLT_LATEST_INJECT_KIND_ENV) else {
+        return;
+    };
+    let base_kind = beak_latest_base_inject_kind(&kind);
+    let inject_step = std::env::var(BEAK_JOLT_LATEST_INJECT_STEP_ENV)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    for candidate_step in 0..trace.len() {
+        if !beak_latest_inject_step_matches(inject_step, candidate_step as u64) {
+            continue;
+        }
+        if !beak_latest_cycle_matches_kind(base_kind, &trace[candidate_step]) {
+            continue;
+        }
+        trace.remove(candidate_step);
+        std::env::set_var(BEAK_JOLT_LATEST_INJECT_APPLIED_ENV, "1");
+        return;
+    }
+}
+// BEAK-INSERT-END
+'''
+        if helper_anchor not in c:
+            raise RuntimeError("Jolt latest host/program helper anchor not found")
+        c = c.replace(helper_anchor, helper_anchor + helpers + "\n", 1)
+
+    if "// BEAK-INSERT: jolt.latest.host_program.apply_trace_injection" not in c:
+        old_trace = """        let (lazy_trace, trace, memory, jolt_device, _advice_tape) = guest::program::trace(
+            &elf_contents,
+            self.elf.as_ref(),
+            inputs,
+            untrusted_advice,
+            trusted_advice,
+            &memory_config,
+            None,
+        );
+        (lazy_trace, trace, memory, jolt_device)
+"""
+        new_trace = """        let (lazy_trace, mut trace, memory, jolt_device, _advice_tape) = guest::program::trace(
+            &elf_contents,
+            self.elf.as_ref(),
+            inputs,
+            untrusted_advice,
+            trusted_advice,
+            &memory_config,
+            None,
+        );
+        // BEAK-INSERT: jolt.latest.host_program.apply_trace_injection
+        beak_latest_apply_trace_injection(&mut trace);
+        // BEAK-INSERT-END
+        (lazy_trace, trace, memory, jolt_device)
+"""
+        if old_trace not in c:
+            raise RuntimeError("Jolt latest host/program trace return anchor not found")
+        c = c.replace(old_trace, new_trace, 1)
+
+    host_program.write_text(c)
 
 
 def _patch_read_write_memory_injection(jolt_install_path: Path) -> None:

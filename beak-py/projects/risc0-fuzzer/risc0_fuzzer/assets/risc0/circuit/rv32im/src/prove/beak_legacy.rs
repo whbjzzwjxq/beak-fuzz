@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     execute::{
-        platform::{ecall_minor, major, LOOKUP_TABLE_CYCLES, MACHINE_REGS_ADDR, RESERVED_CYCLES},
+        platform::{ecall_minor, major, LOOKUP_TABLE_CYCLES, MACHINE_REGS_ADDR},
         segment::Segment,
     },
     zirgen::{
@@ -112,7 +112,7 @@ pub fn collect_preflight_trace_records(segment: &Segment) -> Result<BeakPrefligh
 
     Ok(BeakPreflightTraceRecords {
         table_split_cycle: trace.table_split_cycle as u64,
-        padding_start_row: trace.table_split_cycle as u64 + RESERVED_CYCLES as u64,
+        padding_start_row: trace.table_split_cycle as u64 + LOOKUP_TABLE_CYCLES as u64,
         total_rows: trace.cycles.len() as u64,
         lookup_table_rows: LOOKUP_TABLE_CYCLES as u64,
         txns,

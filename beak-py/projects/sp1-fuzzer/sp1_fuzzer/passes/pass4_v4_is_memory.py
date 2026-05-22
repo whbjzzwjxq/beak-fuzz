@@ -130,6 +130,14 @@ def _execution_record_candidates(sp1_install_path: Path) -> list[Path]:
     return out
 
 
+def _executor_tracing_candidates(sp1_install_path: Path) -> list[Path]:
+    out: list[Path] = []
+    for path in [sp1_install_path / "crates" / "core" / "executor" / "src" / "tracing.rs"]:
+        if path.exists():
+            out.append(path)
+    return out
+
+
 def _syscall_context_candidates(sp1_install_path: Path) -> list[Path]:
     out: list[Path] = []
     for path in [
@@ -589,10 +597,15 @@ def _patch_v4_memory_instructions(path: Path) -> None:
 
 def _patch_v4_syscall_instr_padding(path: Path) -> None:
     contents = _ensure_fuzzer_utils_import(path, path.read_text())
+    latest_syscall_shape = "impl<M: TrustMode> SyscallInstrsChip<M> {\n" in contents
 
     helper_guard = "// BEAK-INSERT: sp1.v4.syscall_instr_padding_semantic_injection.helpers"
     if helper_guard not in contents:
-        helper_anchor = "impl SyscallInstrsChip {\n"
+        helper_anchor = (
+            "impl<M: TrustMode> SyscallInstrsChip<M> {\n"
+            if latest_syscall_shape
+            else "impl SyscallInstrsChip {\n"
+        )
         helper_insert = """// BEAK-INSERT: sp1.v4.syscall_instr_padding_semantic_injection.helpers
     fn beak_syscall_instr_padding_injection_kind(step: u64) -> Option<String> {
         fuzzer_utils::matching_injection_kind(
@@ -608,21 +621,88 @@ def _patch_v4_syscall_instr_padding(path: Path) -> None:
     }
 
     fn beak_mutate_syscall_instr_padding_row<F: PrimeField32>(
-        cols: &mut SyscallInstrColumns<F>,
+        cols: &mut {SYSCALL_COLS},
     ) {
-        cols.op_a_access.prev_value[1] = F::one();
+        {MUTATE_PADDING_ROW}
     }
     // BEAK-INSERT-END
 
 """
+        if latest_syscall_shape:
+            helper_insert = helper_insert.replace("{SYSCALL_COLS}", "SyscallInstrColumns<F, M>")
+            helper_insert = helper_insert.replace(
+                "{MUTATE_PADDING_ROW}",
+                "cols.is_real = F::one();\n        cols.next_pc[0] = F::one();",
+            )
+        else:
+            helper_insert = helper_insert.replace("{SYSCALL_COLS}", "SyscallInstrColumns<F>")
+            helper_insert = helper_insert.replace(
+                "{MUTATE_PADDING_ROW}",
+                "cols.op_a_access.prev_value[1] = F::one();",
+            )
         contents = _insert_after_once(contents, helper_anchor, helper_insert, helper_guard)
 
     guard = "// BEAK-INSERT: sp1.v4.syscall_instr_padding_semantic_injection.row"
-    anchor = """                    if idx < input.syscall_events.len() {
+    if latest_syscall_shape:
+        anchor = """        let values = unsafe {
+            core::slice::from_raw_parts_mut(buffer_ptr, num_event_rows * width)
+        };
+"""
+        insert = """        let values = unsafe {
+            core::slice::from_raw_parts_mut(buffer_ptr, num_event_rows * width)
+        };
+
+        // BEAK-INSERT: sp1.v4.syscall_instr_padding_semantic_injection.row
+        if padded_nb_rows > num_event_rows {
+            let padding_row = unsafe {
+                core::slice::from_raw_parts_mut(
+                    buffer_ptr.add(num_event_rows * width),
+                    width,
+                )
+            };
+            let cols: &mut SyscallInstrColumns<F, M> = padding_row.borrow_mut();
+            if let Some(beak_kind) =
+                Self::beak_syscall_instr_padding_injection_kind(num_event_rows as u64)
+            {
+                if Self::beak_syscall_instr_padding_kind_matches(beak_kind.as_str()) {
+                    Self::beak_mutate_syscall_instr_padding_row(cols);
+                }
+            }
+        }
+        // BEAK-INSERT-END
+"""
+        contents = _insert_after_once(contents, anchor, insert[len(anchor):], guard)
+        one_line_anchor = (
+            "        let values = unsafe { core::slice::from_raw_parts_mut(buffer_ptr, "
+            "num_event_rows * width) };\n"
+        )
+        one_line_insert = """
+        // BEAK-INSERT: sp1.v4.syscall_instr_padding_semantic_injection.row
+        if padded_nb_rows > num_event_rows {
+            let padding_row = unsafe {
+                core::slice::from_raw_parts_mut(
+                    buffer_ptr.add(num_event_rows * width),
+                    width,
+                )
+            };
+            let cols: &mut SyscallInstrColumns<F, M> = padding_row.borrow_mut();
+            if let Some(beak_kind) =
+                Self::beak_syscall_instr_padding_injection_kind(num_event_rows as u64)
+            {
+                if Self::beak_syscall_instr_padding_kind_matches(beak_kind.as_str()) {
+                    Self::beak_mutate_syscall_instr_padding_row(cols);
+                }
+            }
+        }
+        // BEAK-INSERT-END
+"""
+        contents = _insert_after_once(contents, one_line_anchor, one_line_insert, guard)
+    else:
+        anchor = """                    if idx < input.syscall_events.len() {
                         let event = &input.syscall_events[idx];
                         self.event_to_row(event, cols, &mut blu);
                     }"""
-    insert = """
+        insert = """
 
                     // BEAK-INSERT: sp1.v4.syscall_instr_padding_semantic_injection.row
                     if idx >= input.syscall_events.len() {
@@ -635,13 +715,16 @@ def _patch_v4_syscall_instr_padding(path: Path) -> None:
                         }
                     }
                     // BEAK-INSERT-END"""
-    contents = _insert_after_once(contents, anchor, insert, guard)
+        contents = _insert_after_once(contents, anchor, insert, guard)
 
     path.write_text(contents)
 
 
 def _patch_v4_sha_extend_precompile(path: Path) -> None:
-    contents = _ensure_fuzzer_utils_import(path, path.read_text())
+    contents = path.read_text()
+    if "cols.w_ptr = [" in contents or ".access_timestamp" in contents:
+        return
+    contents = _ensure_fuzzer_utils_import(path, contents)
 
     helper_guard = "// BEAK-INSERT: sp1.v4.sha_extend_precompile_address_injection.helpers"
     if helper_guard not in contents:
@@ -759,7 +842,10 @@ def _patch_v4_sha_extend_precompile(path: Path) -> None:
 
 
 def _patch_v4_sha_compress_precompile(path: Path) -> None:
-    contents = _ensure_fuzzer_utils_import(path, path.read_text())
+    contents = path.read_text()
+    if "cols.w_ptr = [" in contents or ".access_timestamp" in contents:
+        return
+    contents = _ensure_fuzzer_utils_import(path, contents)
 
     helper_guard = "// BEAK-INSERT: sp1.v4.sha_compress_precompile_address_injection.helpers"
     if helper_guard not in contents:
@@ -950,7 +1036,65 @@ def _patch_v4_sha_compress_precompile(path: Path) -> None:
 
 
 def _patch_v4_memory_global(path: Path) -> None:
-    contents = _ensure_fuzzer_utils_import(path, path.read_text())
+    contents = path.read_text()
+    contents = _ensure_fuzzer_utils_import(path, contents)
+    contents = contents.replace(
+        '            "sp1.semantic.memory.finalization_consistency" => {\n'
+        "                if !matches!(self.kind, MemoryChipType::Finalize) {\n"
+        "                    return false;\n"
+        "                }\n"
+        "            }\n"
+        "            _ => return false,\n",
+        '            "sp1.semantic.memory.finalization_consistency" => {\n'
+        "                if !matches!(self.kind, MemoryChipType::Finalize) {\n"
+        "                    return false;\n"
+        "                }\n"
+        "            }\n"
+        '            "sp1.semantic.memory.initial_value_binding" => {\n'
+        "                if !matches!(self.kind, MemoryChipType::Initialize) {\n"
+        "                    return false;\n"
+        "                }\n"
+        "            }\n"
+        "            _ => return false,\n",
+    )
+    contents = contents.replace(
+        '            "sp1.semantic.memory.finalization_consistency",\n'
+        "        ]\n",
+        '            "sp1.semantic.memory.finalization_consistency",\n'
+        '            "sp1.semantic.memory.initial_value_binding",\n'
+        "        ]\n",
+    )
+    contents = contents.replace(
+        '            "sp1.semantic.memory.finalization_consistency" => {\n'
+        "                let site =\n"
+        '                    fuzzer_utils::injection_variant_value(inject_kind, "site").unwrap_or("value");\n'
+        "                match site {\n"
+        '                    "timestamp" => {\n'
+        "                        event.timestamp = event.timestamp.wrapping_add(1);\n"
+        "                    }\n"
+        "                    _ => {\n"
+        "                        event.value = event.value.wrapping_add(1);\n"
+        "                    }\n"
+        "                }\n"
+        "            }\n"
+        "            _ => {\n",
+        '            "sp1.semantic.memory.finalization_consistency" => {\n'
+        "                let site =\n"
+        '                    fuzzer_utils::injection_variant_value(inject_kind, "site").unwrap_or("value");\n'
+        "                match site {\n"
+        '                    "timestamp" => {\n'
+        "                        event.timestamp = event.timestamp.wrapping_add(1);\n"
+        "                    }\n"
+        "                    _ => {\n"
+        "                        event.value = event.value.wrapping_add(1);\n"
+        "                    }\n"
+        "                }\n"
+        "            }\n"
+        '            "sp1.semantic.memory.initial_value_binding" => {\n'
+        "                event.value = event.value.wrapping_add(1);\n"
+        "            }\n"
+        "            _ => {\n",
+    )
 
     helper_guard = "// BEAK-INSERT: sp1.v4.global_memory_address_injection.helpers"
     if helper_guard not in contents:
@@ -960,7 +1104,142 @@ def _patch_v4_memory_global(path: Path) -> None:
         Self { kind }
     }
 """
-        helper_insert = """
+        latest_limb_shape = "MemoryInitializeFinalizeEvent { addr, value, timestamp }" in contents
+        if latest_limb_shape:
+            helper_insert = """
+    // BEAK-INSERT: sp1.v4.global_memory_address_injection.helpers
+    fn beak_base_injection_kind(inject_kind: &str) -> &str {
+        inject_kind
+            .split_once("::")
+            .map(|(base, _)| base)
+            .unwrap_or(inject_kind)
+    }
+
+    fn beak_variant_u32(inject_kind: &str, key: &str) -> Option<u32> {
+        fuzzer_utils::injection_variant_value(inject_kind, key)?.parse().ok()
+    }
+
+    fn beak_variant_u64(inject_kind: &str, key: &str) -> Option<u64> {
+        fuzzer_utils::injection_variant_value(inject_kind, key)?.parse().ok()
+    }
+
+    fn beak_global_phase(&self) -> &'static str {
+        match self.kind {
+            MemoryChipType::Initialize => "initialize",
+            MemoryChipType::Finalize => "finalize",
+        }
+    }
+
+    fn beak_global_trace_source(&self) -> &'static str {
+        match self.kind {
+            MemoryChipType::Initialize => "global_memory_initialize_event",
+            MemoryChipType::Finalize => "global_memory_finalize_event",
+        }
+    }
+
+    fn beak_global_event_matches(
+        &self,
+        event: &MemoryInitializeFinalizeEvent,
+        event_idx: u64,
+        inject_kind: &str,
+    ) -> bool {
+        match Self::beak_base_injection_kind(inject_kind) {
+            "sp1.semantic.memory.address_pointer_consistency" => {
+                if fuzzer_utils::injection_variant_value(inject_kind, "site")
+                    != Some("global_event")
+                {
+                    return false;
+                }
+            }
+            "sp1.semantic.memory.finalization_consistency" => {
+                if !matches!(self.kind, MemoryChipType::Finalize) {
+                    return false;
+                }
+            }
+            "sp1.semantic.memory.initial_value_binding" => {
+                if !matches!(self.kind, MemoryChipType::Initialize) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        if let Some(phase) = fuzzer_utils::injection_variant_value(inject_kind, "phase") {
+            if phase != self.beak_global_phase() {
+                return false;
+            }
+        }
+        if let Some(source) = fuzzer_utils::injection_variant_value(inject_kind, "trace_source") {
+            if source != self.beak_global_trace_source() {
+                return false;
+            }
+        }
+        if let Some(ptr) = Self::beak_variant_u64(inject_kind, "effective_ptr") {
+            if ptr != event.addr {
+                return false;
+            }
+        }
+        if let Some(target_event_idx) = Self::beak_variant_u64(inject_kind, "event_idx") {
+            if target_event_idx != event_idx {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn beak_global_injection_kind_for_event(event_timestamp: u64) -> Option<String> {
+        [
+            "sp1.semantic.memory.address_pointer_consistency",
+            "sp1.semantic.memory.finalization_consistency",
+            "sp1.semantic.memory.initial_value_binding",
+        ]
+        .iter()
+        .find_map(|kind| fuzzer_utils::matching_injection_kind(kind, event_timestamp))
+    }
+
+    fn beak_mutate_global_event(
+        event: &mut MemoryInitializeFinalizeEvent,
+        inject_kind: &str,
+    ) {
+        match Self::beak_base_injection_kind(inject_kind) {
+            "sp1.semantic.memory.finalization_consistency" => {
+                let site =
+                    fuzzer_utils::injection_variant_value(inject_kind, "site").unwrap_or("value");
+                match site {
+                    "timestamp" => {
+                        event.timestamp = event.timestamp.wrapping_add(1);
+                    }
+                    _ => {
+                        event.value = event.value.wrapping_add(1);
+                    }
+                }
+            }
+            "sp1.semantic.memory.initial_value_binding" => {
+                event.value = event.value.wrapping_add(1);
+            }
+            _ => {
+                event.addr = event.addr.wrapping_add(1);
+            }
+        }
+    }
+
+    fn beak_apply_global_injection(
+        &self,
+        memory_events: &mut [MemoryInitializeFinalizeEvent],
+    ) {
+        for (event_idx, event) in memory_events.iter_mut().enumerate() {
+            if let Some(beak_kind) =
+                Self::beak_global_injection_kind_for_event(event.timestamp)
+            {
+                if self.beak_global_event_matches(event, event_idx as u64, beak_kind.as_str()) {
+                    Self::beak_mutate_global_event(event, beak_kind.as_str());
+                }
+            }
+        }
+    }
+    // BEAK-INSERT-END
+"""
+        else:
+            helper_insert = """
     // BEAK-INSERT: sp1.v4.global_memory_address_injection.helpers
     fn beak_global_address_injection_kind(step: u64) -> Option<String> {
         fuzzer_utils::matching_injection_kind(
@@ -1174,8 +1453,22 @@ def _patch_v4_memory_global(path: Path) -> None:
 """
         contents = _insert_after_once(contents, helper_anchor, helper_insert, helper_guard)
 
-    guard = "// BEAK-INSERT: sp1.v4.global_memory_address_injection.row"
-    insert = """
+    if "self.beak_apply_global_injection(&mut memory_events);" not in contents:
+        anchor = """        let mut memory_events = match self.kind {
+            MemoryChipType::Initialize => input.global_memory_initialize_events.clone(),
+            MemoryChipType::Finalize => input.global_memory_finalize_events.clone(),
+        };
+"""
+        if anchor in contents and "MemoryInitializeFinalizeEvent { addr, value, timestamp }" in contents:
+            contents = contents.replace(
+                anchor,
+                anchor + "        self.beak_apply_global_injection(&mut memory_events);\n",
+                2,
+            )
+
+    if "MemoryInitializeFinalizeEvent { addr, value, timestamp }" not in contents:
+        guard = "// BEAK-INSERT: sp1.v4.global_memory_address_injection.row"
+        insert = """
 
                 // BEAK-INSERT: sp1.v4.global_memory_address_injection.row
                 if used != 0 {
@@ -1186,11 +1479,11 @@ def _patch_v4_memory_global(path: Path) -> None:
                     }
                 }
                 // BEAK-INSERT-END"""
-    anchor = "                cols.is_real = F::from_canonical_u32(used);"
-    contents = _insert_after_once(contents, anchor, insert, guard)
+        anchor = "                cols.is_real = F::from_canonical_u32(used);"
+        contents = _insert_after_once(contents, anchor, insert, guard)
 
     apply_guard = "self.beak_apply_global_address_injection(&mut memory_events);"
-    if apply_guard not in contents:
+    if apply_guard not in contents and "MemoryInitializeFinalizeEvent { addr, value, timestamp }" not in contents:
         anchor = """        let mut memory_events = match self.kind {
             MemoryChipType::Initialize => input.global_memory_initialize_events.clone(),
             MemoryChipType::Finalize => input.global_memory_finalize_events.clone(),
@@ -1231,21 +1524,42 @@ def _patch_v4_byte_record(path: Path) -> None:
 
     helper_guard = "// BEAK-INSERT: sp1.v4.byte_record_semantic_injection.helpers"
     if helper_guard not in contents:
+        legacy_event_shape = "pub fn new(opcode: ByteOpcode, a1: u16, a2: u8, b: u8, c: u8)" in contents
         helper_anchor = """impl ByteLookupEvent {
     /// Creates a new `ByteLookupEvent`.
     #[must_use]
-    pub fn new(opcode: ByteOpcode, a1: u16, a2: u8, b: u8, c: u8) -> Self {
+"""
+        if legacy_event_shape:
+            helper_anchor += """    pub fn new(opcode: ByteOpcode, a1: u16, a2: u8, b: u8, c: u8) -> Self {
         Self { opcode, a1, a2, b, c }
     }
 }
 """
-        helper_insert = """
+            helper_insert = """
 // BEAK-INSERT: sp1.v4.byte_record_semantic_injection.helpers
 fn beak_byte_lookup_step(blu_event: ByteLookupEvent) -> u64 {
     let row = if blu_event.opcode != ByteOpcode::U16Range {
         (((blu_event.b as u16) << 8) + blu_event.c as u16) as u64
     } else {
         blu_event.a1 as u64
+    };
+    row.saturating_mul(NUM_BYTE_OPS as u64).saturating_add(blu_event.opcode as u64)
+}
+// BEAK-INSERT-END
+"""
+        else:
+            helper_anchor += """    pub fn new(opcode: ByteOpcode, a: u16, b: u8, c: u8) -> Self {
+        Self { opcode, a, b, c }
+    }
+}
+"""
+            helper_insert = """
+// BEAK-INSERT: sp1.v4.byte_record_semantic_injection.helpers
+fn beak_byte_lookup_step(blu_event: ByteLookupEvent) -> u64 {
+    let row = if blu_event.opcode == ByteOpcode::Range {
+        blu_event.a as u64
+    } else {
+        (((blu_event.b as u16) << 8) + blu_event.c as u16) as u64
     };
     row.saturating_mul(NUM_BYTE_OPS as u64).saturating_add(blu_event.opcode as u64)
 }
@@ -1282,7 +1596,13 @@ def _patch_v4_execution_record(path: Path) -> None:
 
     helper_guard = "// BEAK-INSERT: sp1.v4.execution_record_byte_semantic_injection.helpers"
     helper_anchor = "impl ByteRecord for ExecutionRecord {\n"
-    helper_insert = """// BEAK-INSERT: sp1.v4.execution_record_byte_semantic_injection.helpers
+    byte_event_path = path.parent / "events" / "byte.rs"
+    legacy_event_shape = (
+        byte_event_path.exists()
+        and "pub a1: u16" in byte_event_path.read_text()
+    )
+    if legacy_event_shape:
+        helper_insert = """// BEAK-INSERT: sp1.v4.execution_record_byte_semantic_injection.helpers
 fn beak_execution_record_byte_lookup_step(blu_event: ByteLookupEvent) -> u64 {
     let row = if blu_event.opcode != crate::ByteOpcode::U16Range {
         (((blu_event.b as u16) << 8) + blu_event.c as u16) as u64
@@ -1290,6 +1610,32 @@ fn beak_execution_record_byte_lookup_step(blu_event: ByteLookupEvent) -> u64 {
         blu_event.a1 as u64
     };
     row.saturating_mul(9).saturating_add(blu_event.opcode as u64)
+}
+
+fn beak_execution_record_byte_lookup_count(blu_event: ByteLookupEvent, count: usize) -> usize {
+    let beak_step = beak_execution_record_byte_lookup_step(blu_event);
+    if fuzzer_utils::should_inject_witness(
+        "sp1.semantic.lookup.boolean_multiplicity",
+        beak_step,
+    ) {
+        count.saturating_add(1)
+    } else {
+        count
+    }
+}
+// BEAK-INSERT-END
+
+"""
+    else:
+        helper_insert = """// BEAK-INSERT: sp1.v4.execution_record_byte_semantic_injection.helpers
+fn beak_execution_record_byte_lookup_step(blu_event: ByteLookupEvent) -> u64 {
+    let row = if blu_event.opcode == crate::ByteOpcode::Range {
+        blu_event.a as u64
+    } else {
+        (((blu_event.b as u16) << 8) + blu_event.c as u16) as u64
+    };
+    row.saturating_mul(crate::events::NUM_BYTE_OPS as u64)
+        .saturating_add(blu_event.opcode as u64)
 }
 
 fn beak_execution_record_byte_lookup_count(blu_event: ByteLookupEvent, count: usize) -> usize {
@@ -1325,6 +1671,448 @@ fn beak_execution_record_byte_lookup_count(blu_event: ByteLookupEvent, count: us
                 // BEAK-INSERT-END"""
     if map_guard not in contents and map_anchor in contents:
         contents = contents.replace(map_anchor, map_insert, 1)
+
+    path.write_text(contents)
+
+
+def _patch_v4_executor_tracing(path: Path) -> None:
+    contents = _ensure_fuzzer_utils_import(path, path.read_text())
+
+    helper_guard = "// BEAK-INSERT: sp1.v4.executor_tracing_semantic_injection.helpers"
+    helper_anchor = "impl<M: ExecutionMode> TracingVM<'_, M> {\n"
+    helper_insert = """    // BEAK-INSERT: sp1.v4.executor_tracing_semantic_injection.helpers
+    fn beak_instruction_semantic_injection_kind(step: u64) -> Option<String> {
+        [
+            "sp1.semantic.decode.zero_register_immutability",
+            "sp1.semantic.decode.operand_index_routing",
+            "sp1.semantic.exec.dest_binding",
+            "sp1.semantic.decode.field_range",
+            "sp1.semantic.decode.immediate_sign_extension",
+            "sp1.semantic.decode.upper_immediate_materialization",
+            "sp1.semantic.decode.format_immediate_reassembly",
+            "sp1.semantic.exec.op_selector_binding",
+            "sp1.semantic.control.ecall_word_validity",
+            "sp1.semantic.exec.memory_effect_binding",
+        ]
+        .iter()
+        .find_map(|kind| fuzzer_utils::matching_injection_kind(kind, step))
+    }
+
+    fn beak_alu_semantic_injection_kind(opcode: Opcode, step: u64) -> Option<String> {
+        let kinds: &[&str] = match opcode {
+            Opcode::ADD | Opcode::ADDI | Opcode::XOR | Opcode::OR | Opcode::AND => {
+                &["sp1.semantic.alu.immediate_limb_consistency"]
+            }
+            Opcode::SUB => &["sp1.semantic.alu.subtraction_borrow_chain"],
+            Opcode::SLL | Opcode::SLLW | Opcode::SRL | Opcode::SRA | Opcode::SRLW | Opcode::SRAW => &[
+                "sp1.semantic.alu.immediate_limb_consistency",
+                "sp1.semantic.alu.shift_mod32",
+            ],
+            Opcode::SLT | Opcode::SLTU => &[
+                "sp1.semantic.alu.immediate_limb_consistency",
+                "sp1.semantic.alu.comparison_booleanity",
+                "sp1.semantic.alu.subtraction_borrow_chain",
+                "sp1.semantic.alu.comparison_auxiliary_chain",
+            ],
+            Opcode::DIV | Opcode::DIVU | Opcode::REM | Opcode::REMU | Opcode::DIVW | Opcode::DIVUW | Opcode::REMUW | Opcode::REMW => &[
+                "sp1.semantic.arithmetic.special_case_consistency",
+                "sp1.semantic.arithmetic.division_remainder_bound",
+            ],
+            Opcode::MUL | Opcode::MULH | Opcode::MULHU | Opcode::MULHSU | Opcode::MULW => &[
+                "sp1.semantic.arithmetic.product_decomposition",
+                "sp1.semantic.arithmetic.signed_unsigned_product_correction",
+            ],
+            _ => &[],
+        };
+        kinds.iter().find_map(|kind| fuzzer_utils::matching_injection_kind(kind, step))
+    }
+
+    fn beak_memory_semantic_injection_kind(step: u64) -> Option<String> {
+        [
+            "sp1.semantic.memory.address_pointer_consistency",
+            "sp1.semantic.memory.value_payload_consistency",
+            "sp1.semantic.memory.store_load_payload_flow",
+            "sp1.semantic.memory.kind_selector_consistency",
+            "sp1.semantic.time.monotonic_access_ordering",
+        ]
+        .iter()
+        .find_map(|kind| fuzzer_utils::matching_injection_kind(kind, step))
+    }
+
+    fn beak_control_semantic_injection_kind(step: u64) -> Option<String> {
+        fuzzer_utils::matching_injection_kind(
+            "sp1.semantic.exec.control_flow_binding",
+            step,
+        )
+    }
+
+    fn beak_boundary_origin_semantic_injection_kind(step: u64) -> Option<String> {
+        fuzzer_utils::matching_injection_kind(
+            "sp1.semantic.time.boundary_origin_consistency",
+            step,
+        )
+    }
+
+    fn beak_mutate_instruction_event(
+        inject_kind: &str,
+        opcode: &mut Opcode,
+        a: &mut u64,
+        b: &mut u64,
+        c: &mut u64,
+        op_a_0: &mut bool,
+    ) {
+        let site = fuzzer_utils::injection_variant_value(inject_kind, "site").unwrap_or("auto");
+        match site {
+            "opcode" => {
+                *opcode = if *opcode == Opcode::ADD { Opcode::SUB } else { Opcode::ADD };
+            }
+            "instruction_op_b" | "op_b_access" => {
+                *b = b.wrapping_add(1);
+            }
+            "instruction_op_c" | "op_c_access" => {
+                *c = c.wrapping_add(1);
+            }
+            "instruction_op_a" | "op_a_access" | _ => {
+                *a = a.wrapping_add(1);
+                *op_a_0 = false;
+            }
+        }
+    }
+
+    fn beak_mutate_memory_event(inject_kind: &str, event: &mut MemInstrEvent) {
+        let site = fuzzer_utils::injection_variant_value(inject_kind, "site").unwrap_or("auto");
+        match site {
+            "addr_word" | "kind_selector" => {
+                event.b = event.b.wrapping_add(1);
+            }
+            "prev_clk" => match &mut event.mem_access {
+                MemoryRecordEnum::Read(record) => {
+                    record.prev_timestamp = record.prev_timestamp.wrapping_add(1);
+                }
+                MemoryRecordEnum::Write(record) => {
+                    record.prev_timestamp = record.prev_timestamp.wrapping_add(1);
+                }
+            },
+            "access_value" | _ => match &mut event.mem_access {
+                MemoryRecordEnum::Read(record) => {
+                    record.value = record.value.wrapping_add(1);
+                }
+                MemoryRecordEnum::Write(record) => {
+                    record.value = record.value.wrapping_add(1);
+                }
+            },
+        }
+    }
+
+    fn beak_mutate_boundary_origin_event(inject_kind: &str, clk: &mut u64, pc: &mut u64) {
+        let site = fuzzer_utils::injection_variant_value(inject_kind, "site").unwrap_or("clk");
+        match site {
+            "pc" => {
+                *pc = pc.wrapping_add(4);
+            }
+            _ => {
+                *clk = clk.wrapping_add(1);
+            }
+        }
+    }
+    // BEAK-INSERT-END
+
+"""
+    if helper_guard not in contents and helper_anchor in contents:
+        contents = contents.replace(helper_anchor, helper_anchor + helper_insert, 1)
+
+    mem_guard = "// BEAK-INSERT: sp1.v4.executor_tracing_semantic_injection.mem"
+    mem_anchor = """        let event = MemInstrEvent {
+            clk: self.core.clk(),
+            pc: self.core.pc(),
+            opcode,
+            a,
+            b,
+            c,
+            op_a_0,
+            // SAFETY: We explicity populate the memory of the record on the following callsites:
+            // - `execute_load`
+            // - `execute_store`
+            mem_access: unsafe { record.memory.unwrap_unchecked() },
+        };
+"""
+    mem_insert = """        let mut event = MemInstrEvent {
+            clk: self.core.clk(),
+            pc: self.core.pc(),
+            opcode,
+            a,
+            b,
+            c,
+            op_a_0,
+            // SAFETY: We explicity populate the memory of the record on the following callsites:
+            // - `execute_load`
+            // - `execute_store`
+            mem_access: unsafe { record.memory.unwrap_unchecked() },
+        };
+        // BEAK-INSERT: sp1.v4.executor_tracing_semantic_injection.mem
+        let beak_instruction_step = fuzzer_utils::next_executor_step();
+        if let Some(beak_kind) =
+            Self::beak_instruction_semantic_injection_kind(beak_instruction_step)
+        {
+            Self::beak_mutate_instruction_event(
+                beak_kind.as_str(),
+                &mut event.opcode,
+                &mut event.a,
+                &mut event.b,
+                &mut event.c,
+                &mut event.op_a_0,
+            );
+        }
+        let beak_memory_step = fuzzer_utils::next_witness_step();
+        if let Some(beak_kind) = Self::beak_memory_semantic_injection_kind(beak_memory_step) {
+            Self::beak_mutate_memory_event(beak_kind.as_str(), &mut event);
+        }
+        if let Some(beak_kind) =
+            Self::beak_boundary_origin_semantic_injection_kind(beak_instruction_step)
+        {
+            Self::beak_mutate_boundary_origin_event(
+                beak_kind.as_str(),
+                &mut event.clk,
+                &mut event.pc,
+            );
+        }
+        // BEAK-INSERT-END
+"""
+    if mem_guard not in contents and mem_anchor in contents:
+        contents = contents.replace(mem_anchor, mem_insert, 1)
+
+    alu_guard = "// BEAK-INSERT: sp1.v4.executor_tracing_semantic_injection.alu"
+    alu_anchor = """        let opcode = instruction.opcode;
+        let event = AluEvent { clk: self.core.clk(), pc: self.core.pc(), opcode, a, b, c, op_a_0 };
+"""
+    alu_insert = """        let opcode = instruction.opcode;
+        let mut event = AluEvent { clk: self.core.clk(), pc: self.core.pc(), opcode, a, b, c, op_a_0 };
+        // BEAK-INSERT: sp1.v4.executor_tracing_semantic_injection.alu
+        let beak_instruction_step = fuzzer_utils::next_executor_step();
+        if let Some(beak_kind) =
+            Self::beak_instruction_semantic_injection_kind(beak_instruction_step)
+        {
+            Self::beak_mutate_instruction_event(
+                beak_kind.as_str(),
+                &mut event.opcode,
+                &mut event.a,
+                &mut event.b,
+                &mut event.c,
+                &mut event.op_a_0,
+            );
+        }
+        let beak_chip_step = event.pc / 4;
+        if let Some(beak_kind) =
+            Self::beak_alu_semantic_injection_kind(event.opcode, beak_chip_step)
+        {
+            Self::beak_mutate_instruction_event(
+                beak_kind.as_str(),
+                &mut event.opcode,
+                &mut event.a,
+                &mut event.b,
+                &mut event.c,
+                &mut event.op_a_0,
+            );
+        }
+        let opcode = event.opcode;
+        let op_a_0 = event.op_a_0;
+        if let Some(beak_kind) =
+            Self::beak_boundary_origin_semantic_injection_kind(beak_instruction_step)
+        {
+            Self::beak_mutate_boundary_origin_event(
+                beak_kind.as_str(),
+                &mut event.clk,
+                &mut event.pc,
+            );
+        }
+        // BEAK-INSERT-END
+"""
+    if alu_guard not in contents and alu_anchor in contents:
+        contents = contents.replace(alu_anchor, alu_insert, 1)
+
+    jal_guard = "// BEAK-INSERT: sp1.v4.executor_tracing_semantic_injection.jal"
+    jal_anchor = """        let event = JumpEvent {
+            clk: self.core.clk(),
+            pc: self.core.pc(),
+            next_pc,
+            opcode: instruction.opcode,
+            a,
+            b,
+            c,
+            op_a_0,
+        };
+"""
+    jal_insert = """        let mut event = JumpEvent {
+            clk: self.core.clk(),
+            pc: self.core.pc(),
+            next_pc,
+            opcode: instruction.opcode,
+            a,
+            b,
+            c,
+            op_a_0,
+        };
+        // BEAK-INSERT: sp1.v4.executor_tracing_semantic_injection.jal
+        let beak_instruction_step = fuzzer_utils::next_executor_step();
+        if let Some(beak_kind) =
+            Self::beak_instruction_semantic_injection_kind(beak_instruction_step)
+        {
+            Self::beak_mutate_instruction_event(
+                beak_kind.as_str(),
+                &mut event.opcode,
+                &mut event.a,
+                &mut event.b,
+                &mut event.c,
+                &mut event.op_a_0,
+            );
+        }
+        if let Some(beak_kind) = Self::beak_control_semantic_injection_kind(beak_instruction_step) {
+            event.next_pc = event.next_pc.wrapping_add(4);
+            Self::beak_mutate_instruction_event(
+                beak_kind.as_str(),
+                &mut event.opcode,
+                &mut event.a,
+                &mut event.b,
+                &mut event.c,
+                &mut event.op_a_0,
+            );
+        }
+        if let Some(beak_kind) =
+            Self::beak_boundary_origin_semantic_injection_kind(beak_instruction_step)
+        {
+            Self::beak_mutate_boundary_origin_event(
+                beak_kind.as_str(),
+                &mut event.clk,
+                &mut event.pc,
+            );
+        }
+        // BEAK-INSERT-END
+"""
+    if jal_guard not in contents and jal_anchor in contents:
+        contents = contents.replace(jal_anchor, jal_insert, 1)
+
+    jalr_guard = "// BEAK-INSERT: sp1.v4.executor_tracing_semantic_injection.jalr"
+    if jalr_guard not in contents and jal_anchor in contents:
+        contents = contents.replace(
+            jal_anchor,
+            jal_insert.replace(jal_guard, jalr_guard),
+            1,
+        )
+
+    branch_guard = "// BEAK-INSERT: sp1.v4.executor_tracing_semantic_injection.branch"
+    branch_anchor = """        let event = BranchEvent {
+            clk: self.core.clk(),
+            pc: self.core.pc(),
+            next_pc,
+            opcode: instruction.opcode,
+            a,
+            b,
+            c,
+            op_a_0,
+        };
+"""
+    branch_insert = jal_insert.replace("JumpEvent", "BranchEvent").replace(
+        jal_guard,
+        branch_guard,
+    )
+    if branch_guard not in contents and branch_anchor in contents:
+        contents = contents.replace(branch_anchor, branch_insert, 1)
+
+    utype_guard = "// BEAK-INSERT: sp1.v4.executor_tracing_semantic_injection.utype"
+    utype_anchor = """        let event = UTypeEvent {
+            clk: self.core.clk(),
+            pc: self.core.pc(),
+            opcode: instruction.opcode,
+            a,
+            b,
+            c,
+            op_a_0,
+        };
+"""
+    utype_insert = """        let mut event = UTypeEvent {
+            clk: self.core.clk(),
+            pc: self.core.pc(),
+            opcode: instruction.opcode,
+            a,
+            b,
+            c,
+            op_a_0,
+        };
+        // BEAK-INSERT: sp1.v4.executor_tracing_semantic_injection.utype
+        let beak_instruction_step = fuzzer_utils::next_executor_step();
+        if let Some(beak_kind) =
+            Self::beak_instruction_semantic_injection_kind(beak_instruction_step)
+        {
+            Self::beak_mutate_instruction_event(
+                beak_kind.as_str(),
+                &mut event.opcode,
+                &mut event.a,
+                &mut event.b,
+                &mut event.c,
+                &mut event.op_a_0,
+            );
+        }
+        if let Some(beak_kind) =
+            Self::beak_boundary_origin_semantic_injection_kind(beak_instruction_step)
+        {
+            Self::beak_mutate_boundary_origin_event(
+                beak_kind.as_str(),
+                &mut event.clk,
+                &mut event.pc,
+            );
+        }
+        // BEAK-INSERT-END
+"""
+    if utype_guard not in contents and utype_anchor in contents:
+        contents = contents.replace(utype_anchor, utype_insert, 1)
+
+    syscall_guard = "// BEAK-INSERT: sp1.v4.executor_tracing_semantic_injection.syscall"
+    syscall_anchor = """        let syscall_event = self.syscall_event(
+            clk,
+            syscall_code,
+            arg1,
+            arg2,
+            next_pc,
+            exit_code,
+            sig_return_pc_record,
+            trap_result,
+            trap_error,
+        );
+"""
+    syscall_insert = """        let mut syscall_event = self.syscall_event(
+            clk,
+            syscall_code,
+            arg1,
+            arg2,
+            next_pc,
+            exit_code,
+            sig_return_pc_record,
+            trap_result,
+            trap_error,
+        );
+        // BEAK-INSERT: sp1.v4.executor_tracing_semantic_injection.syscall
+        let beak_instruction_step = fuzzer_utils::next_executor_step();
+        if let Some(_beak_kind) =
+            Self::beak_instruction_semantic_injection_kind(beak_instruction_step)
+        {
+            syscall_event.arg1 = syscall_event.arg1.wrapping_add(1);
+        }
+        if let Some(_beak_kind) = Self::beak_control_semantic_injection_kind(beak_instruction_step) {
+            syscall_event.next_pc = syscall_event.next_pc.wrapping_add(4);
+        }
+        if let Some(beak_kind) =
+            Self::beak_boundary_origin_semantic_injection_kind(beak_instruction_step)
+        {
+            Self::beak_mutate_boundary_origin_event(
+                beak_kind.as_str(),
+                &mut syscall_event.clk,
+                &mut syscall_event.pc,
+            );
+        }
+        // BEAK-INSERT-END
+"""
+    if syscall_guard not in contents and syscall_anchor in contents:
+        contents = contents.replace(syscall_anchor, syscall_insert, 1)
 
     path.write_text(contents)
 
@@ -1742,6 +2530,8 @@ def apply(*, sp1_install_path: Path, commit_or_branch: str) -> None:
         _patch_v4_byte_record(path)
     for path in _execution_record_candidates(sp1_install_path):
         _patch_v4_execution_record(path)
+    for path in _executor_tracing_candidates(sp1_install_path):
+        _patch_v4_executor_tracing(path)
     for path in _syscall_context_candidates(sp1_install_path):
         _patch_v4_syscall_context(path)
     for path in _byte_trace_candidates(sp1_install_path):

@@ -369,6 +369,31 @@ OpenVM-336 Control verifier smoke:
   enumeration, segment-boundary metadata, JALR pre-mask target evidence, raw
   ECALL/syscall visibility, or boolean lookup multiplicity rows.
 
+### openvm-bf11b4a5 (latest)
+
+- Round8 PD1 audit: `pd1` remains `bucket_emitted`. The normal tracegen path
+  emits `sem.row.padding_interaction_send` for the BaseAlu padding candidate,
+  but no reachable normal padding interaction mutation hook is mapped.
+- Focused smoke
+  `FAST_TEST=1 cargo run -q --bin beak-trace -- --bin "00100093 02100113 002091b3" --print-buckets`
+  matched registers and emitted 37 hits including
+  `sem.row.padding_interaction_send`.
+- Direct replays with the same seed and
+  `--inject-kind openvm.semantic.row.padding_interaction_send --inject-step 0`
+  and `--inject-step 18446744073709551615` both matched registers and reported
+  `semantic_injection_applied = false`.
+- Backend status: `projects/openvm-bf11b4a5f79d20fa14d01f78b41d54df4acd0ee0/src/lib/backend.rs`
+  does not create a `semantic::row::PADDING_INTERACTION_SEND` candidate, so
+  normal semantic search will not treat the record-arena sample hook as valid
+  PD1 mapping evidence.
+- Inspected hook candidates: the installed
+  `crates/vm/src/arch/record_arena.rs` sample hook is a record-arena padding
+  row/proxy path and is not reached by the normal tracegen-focused candidate
+  flow. The 336 BaseAlu hook mutates a real padding row and balances the ghost
+  read through memory final-merge/access-adapter state; bf11 has no adapted
+  same-semantics balancing hook in the current pass. Do not broaden bf11 PD1 to
+  the record-arena sample path.
+
 ### pico-45e74ccd
 
 - Status: full-completion pass applied for currently observable Pico trace
@@ -449,6 +474,63 @@ OpenVM-336 Control verifier smoke:
   rather than the transpiled ECALL selector. `pd1` and broader `bu2`-`bu6` need
   prover table, padding row, transcript, or LogUp/cumsum visibility not exposed
   by the current Pico runner.
+
+### pico-22b0aae (latest)
+
+- Round11 baseline repair: the ordinary Beak RV32 inline memory proof path is
+  meaningful for Pico-valid guarded memory addresses. The old low-address
+  focused seeds such as `10000093 0000a183`,
+  `10000093 07f00113 0020a023`, and
+  `10000093 07f00113 0020a023 0000a183` are invalid baseline evidence because
+  they access addresses below the `MemoryReadWrite` stack guard
+  `addr[1] + addr[2] != 0`. Replacement store/load smokes at address
+  `0x10000` prove/verify and match registers:
+  `cargo run -q --bin beak-trace -- --bin "00010337 00100293 00532023" --print-buckets`,
+  `cargo run -q --bin beak-trace -- --bin "00010337 00032283" --print-buckets`,
+  and
+  `cargo run -q --bin beak-trace -- --bin "00010337 00100293 00532023 00032283" --print-buckets`.
+- Status impact: existing Pico 22b0 memory hooks for `me1`, `me2`, `me3`,
+  `me4`, `me6`, `me9`, `me10`, and `ts2.same-address` now have a meaningful
+  non-injected baseline seed, but still are not strict Beak Good. Ordinary
+  semantic search on
+  `cargo run -q --bin beak-fuzz -- --bin "00010337 00100293 00532023 00032283" --semantic-window-before 0 --semantic-window-after 0 --semantic-max-trials-per-bucket 1`
+  completed with `bug_records=0`; the memory hooks applied and were rejected by
+  proof/lookup checks, so the rows remain mapped/focused evidence rather than
+  verified strict evidence.
+- Round16 added the 22b0 `MemoryInitializeFinalize` companion patch for
+  `pico.semantic.memory.timestamped_load_path`, adapting the existing
+  finalization timestamp-balancing hook to 64-bit Pico memory addresses. Focused
+  replay still reported `semantic_injection_applied=true` with
+  `backend_error = prove/verify panic: Regional cumulative sum is not zero`,
+  and ordinary `beak-fuzz` again completed with `bug_records=0`; do not promote
+  Pico `ts2.same-address` or memory hooks to strict Beak Good.
+- Round23 audited alternate Pico 22b0 memory/table/global lookup mutation
+  points. `MemoryReadWrite`, `MemoryInitializeFinalize`, `MemoryLocal`, and
+  `Global` rows remain separate interaction participants; no standalone
+  same-semantics selector, table-size, or global-lookup row hook was found.
+  `MemoryLocal` / `Global` balancing would require a new coordinated
+  multi-table design, not a ready strict evidence path. Keep Pico memory/time
+  hooks mapped/focused only until ordinary `beak-fuzz` reports
+  `underconstrained_candidate=true`.
+- Round48 promoted Pico 22b0 `ts2.same-address` to strict Beak Good. The
+  install pass now patches the 22b0 `MemoryLocal` main/extra-record path and
+  the `MemoryReadWrite::extra_record` path for
+  `pico.semantic.memory.timestamped_load_path`, in addition to the existing
+  `MemoryReadWrite` main trace and `MemoryInitializeFinalize` companion hook.
+  Baseline:
+  `cargo run -q --bin beak-trace -- --bin "00010337 00100293 00532023 00032283" --print-buckets`
+  proved/verified, matched registers, and emitted
+  `sem.time.monotonic_access_ordering`. Focused replay with
+  `--inject-kind pico.semantic.memory.timestamped_load_path --inject-step 0`
+  printed `UNDERCONSTRAINED CANDIDATE DETECTED`. Ordinary e2e:
+  `cargo run -q --bin beak-fuzz -- --bin "00010337 00100293 00532023 00032283" --semantic-window-before 0 --semantic-window-after 0 --semantic-max-trials-per-bucket 1 --mutation-iters 0`
+  wrote `bug_records=1`; the bug record has
+  `trigger_bucket_id=sem.time.monotonic_access_ordering`,
+  `inject_kind=pico.semantic.memory.timestamped_load_path`, `inject_step=1`,
+  `semantic_injection_applied=true`, `backend_error=null`, and
+  `underconstrained_candidate=true`. Other Pico 22b0 memory hooks remain
+  mapped/focused evidence unless their ordinary e2e replay separately reports
+  `underconstrained_candidate=true`.
 
 ### sp1-7f643da1
 
@@ -776,6 +858,104 @@ OpenVM-336 Control verifier smoke:
   evidence, segment boundaries, bus multiplicity rows, or padding lifecycle
   rows with stable row anchors.
 
+### nexus-f2ad126
+
+- Round7 mapping: `me7.bss_zero/data_loaded` now maps
+  `sem.memory.initial_value_binding` to a reachable same-semantics prover2
+  hook in `prover2/machine/src/components/read_write_memory/trace.rs`. The
+  hook fires only for load rows whose previous RAM timestamp is zero and
+  mutates `Ram1ValPrev`. Focused smoke
+  `cargo run -q --bin beak-trace -- --bin "000020b7 0000a183" --inject-kind nexus.semantic.memory.initial_value_binding --inject-step 2 --print-buckets`
+  emitted `sem.memory.initial_value_binding`, printed
+  `BEAK_NEXUS_SEMANTIC_INJECTION_APPLIED kind=nexus.semantic.memory.initial_value_binding step=2 site=read_write_memory.ram1_val_prev_initial`,
+  and reported `injection_applied = true`. Semantic-search smoke with the same
+  seed also mapped the observed bucket to the hook and recorded
+  `trigger_bucket_id=sem.memory.initial_value_binding`,
+  `inject_kind=nexus.semantic.memory.initial_value_binding`, and
+  `semantic_injection_applied=true`.
+- Round9 repaired the ordinary f2ad memory proof baseline by moving the memory
+  seed into the Nexus prover2 private-memory region:
+  `cargo run -q --bin beak-trace -- --bin "000810b7 00808093 0000a183" --print-buckets`
+  emitted `sem.memory.initial_value_binding`,
+  `sem.row.padding_interaction_send`, and
+  `sem.row.table_power2_boundary`, matched registers, and reported no
+  backend error. The old `000020b7 0000a183` seed loads address `0x2000`,
+  outside the prover2 private-memory layout, and remains invalid as strict
+  baseline evidence.
+- `me7` is still not strict Beak Good: the repaired private-memory seed with
+  `--inject-kind nexus.semantic.memory.initial_value_binding --inject-step 3`
+  fires the hook at `read_write_memory.ram1_val_prev_initial`, but the injected
+  prover run fails constraints and semantic replay records
+  `underconstrained_candidate=false`.
+- Round10 mapping: `me11.written_cells` now maps
+  `sem.memory.finalization_consistency` to a same-semantics prover2
+  private-memory boundary hook in
+  `prover2/machine/src/components/read_write_memory_boundary/private_memory/mod.rs`.
+  The hook mutates `RamValFinal` on the boundary row selected by
+  `private_boundary_row_idx`. Focused smoke
+  `cargo run -q --bin beak-trace -- --bin "000810b7 00808093 07f00113 0020a023" --inject-kind nexus.semantic.memory.finalization_consistency --inject-step 1 --print-buckets`
+  emitted `sem.memory.finalization_consistency`, printed
+  `BEAK_NEXUS_SEMANTIC_INJECTION_APPLIED kind=nexus.semantic.memory.finalization_consistency step=1 site=private_memory_boundary.ram_val_final`,
+  and reported `injection_applied = true` with
+  `backend_error = nexus verify failed: Proof has invalid structure: claimed logup sum is not zero`.
+  This is mapping evidence only, not strict Beak Good.
+- Round78 mapping: `me11.read_only_cells` now emits for private-memory bytes
+  that are actually loaded and have no overlapping executed store. The bucket
+  maps to the same private-memory boundary `RamValFinal` hook as
+  `me11.written_cells`, anchored by `private_boundary_row_idx`. Focused smoke
+  `cargo run -q --bin beak-trace -- --bin "000810b7 00808093 0000a183" --oracle-data-size-bytes 0x82020 --print-buckets`
+  emitted `sem.memory.finalization_consistency` with
+  `cell_id=me11.read_only_cells`. Ordinary semantic search on the same seed
+  applied `nexus.semantic.memory.finalization_consistency` at private boundary
+  step 1 and recorded `underconstrained_candidate=false` with
+  `backend_error = nexus verify failed: Proof has invalid structure: claimed logup sum is not zero`.
+  This is same-semantics mapping evidence only, not strict Beak Good.
+- Round6 classification: `pd1.mem_padding` now has a reachable same-semantics
+  prover2 hook for `sem.row.padding_interaction_send` in
+  `prover2/machine/src/components/read_write_memory/trace.rs`. Focused smoke
+  `cargo run -q --bin beak-trace -- --bin "00100093 00112023 00012183" --inject-kind nexus.semantic.row.padding_interaction_send --inject-step 2 --print-buckets`
+  emitted `sem.row.padding_interaction_send`, printed
+  `BEAK_NEXUS_SEMANTIC_INJECTION_APPLIED kind=nexus.semantic.row.padding_interaction_send step=2 site=prover2.read_write_memory.padding_row`,
+  and reported `injection_applied = true`.
+- Round9 strict Beak Good: ordinary `beak-fuzz` e2e on the repaired
+  private-memory seed
+  `cargo run -q --bin beak-fuzz -- --bin "000810b7 00808093 0000a183" --oracle-data-size-bytes 0x82020 --semantic-window-before 0 --semantic-window-after 0 --semantic-max-trials-per-bucket 1`
+  recorded `trigger_bucket_id=sem.row.padding_interaction_send`,
+  `inject_kind=nexus.semantic.row.padding_interaction_send`, `inject_step=1`,
+  `semantic_injection_applied=true`, `backend_error=null`, and
+  `underconstrained_candidate=true`.
+- Invalid broadening kept rejected: `me11` is mapped only through the real
+  private-memory boundary row, not the read/write-memory padding hook. Focused
+  `nexus.semantic.memory.finalization_consistency` at the old padding step 2
+  reports `injection_applied = false`. `me11.untouched_cells` remains
+  trace-missing because the current trace does not enumerate untouched
+  allocated memory cells. `pd3.mem_table` remains
+  trace-observable/bucket-only because no table-size boundary mutation hook is
+  identified. `me5` remains bucket-only for the missing mutation point
+  described in the Nexus notes above; `me7.rodata/stack_uninit` remains
+  trace-missing because the executed memory records do not expose provenance.
+- Round12 strict replay audit: ordinary `beak-fuzz` e2e with exact-anchor
+  semantic search on the repaired private-memory `me7` seed
+  `000810b7 00808093 0000a183` applied
+  `nexus.semantic.memory.initial_value_binding` at step 3 but recorded
+  `underconstrained_candidate=false` with constraint/proof rejection. The same
+  run rediscovered only the existing `pd1.mem_padding` strict bug. The
+  `me11.written_cells` seed `000810b7 00808093 07f00113 0020a023` likewise
+  applied `nexus.semantic.memory.finalization_consistency` at private boundary
+  step 1 but recorded `underconstrained_candidate=false` with
+  `claimed logup sum is not zero`; its only bug record was also the prior
+  `pd1.mem_padding` candidate. No same-semantics prover2 mutation point was
+  added for `me5` or `pd3`.
+- Round15 rechecked the same repaired private-memory strict paths. `me7`
+  still applies at step 3 but records `underconstrained_candidate=false` with
+  `nexus prove failed: Constraints not satisfied`; `me11.written_cells` still
+  applies at private-boundary step 1 but records
+  `underconstrained_candidate=false` with the invalid-logup-sum verifier error.
+  Both rechecks rediscovered only the existing strict `pd1.mem_padding`
+  candidate. Source audit again found no same-semantics prover2 address-space
+  selector for `me5` and no safe table-size/log-size witness row for
+  `pd3.mem_table`.
+
 ### risc0 snapshots
 
 - `risc0-98387806`: obligation pass completed to current Risc0 visibility.
@@ -848,6 +1028,43 @@ OpenVM-336 Control verifier smoke:
   for `bu1`.
 - Smoke evidence is recorded in
   `agent_runs/vm-distributed/lead-risc0-98387806-deep-instrumentation.md`.
+- `risc0-10fa9788` latest/M3: `me1`, `me3`, `me4`, and
+  `ts2.same-address` are now
+  `semantic_injection_mapped`. `me1` maps through
+  `sem.memory.store_load_payload_flow -> risc0.semantic.memory.store_load_payload_flow`;
+  `me3` maps through
+  `sem.memory.load_value_binding -> risc0.semantic.memory.load_value_binding`;
+  `me4` maps through
+  `sem.memory.write_payload_consistency -> risc0.semantic.memory.write_payload_consistency`;
+  `ts2.same-address` maps through
+  `sem.time.monotonic_access_ordering -> risc0.semantic.time.monotonic_access_ordering`.
+  The install asset patches the normal M3 `prove/beak.rs` path and mutates
+  `InstLoadWitness.mem.value` for `me1`/`me3` and
+  `InstStoreWitness.mem.value` for `me4`, and
+  `InstLoadWitness.mem.prevCycle` for `ts2`; the backend maps only observed
+  matching `obligation_id=me1`, `obligation_id=me3`, `obligation_id=me4`,
+  and `obligation_id=ts2` bucket hits. Focused `me3` smoke
+  `cargo run -q --bin beak-trace -- --bin "000100b7 00408093 07f00113 00208023 00008183" --inject-kind risc0.semantic.memory.load_value_binding --inject-step 4 --print-buckets`
+  emitted `sem.memory.load_value_binding`, reported `injection_applied = true`,
+  logged the `InstLoadWitness` mutation, and returned verifier rejection.
+  Focused `me1` smoke with the same seed and
+  `--inject-kind risc0.semantic.memory.store_load_payload_flow --inject-step 4`
+  emitted `sem.memory.store_load_payload_flow`, reported
+  `injection_applied = true`, logged the same proof-facing load memory value
+  mutation, and returned verifier rejection. Focused `me4` smoke with the same
+  seed and
+  `--inject-kind risc0.semantic.memory.write_payload_consistency --inject-step 3`
+  emitted `sem.memory.write_payload_consistency`, reported
+  `injection_applied = true`, logged the proof-facing store memory value
+  mutation, and returned verifier rejection. Focused `ts2` smoke with the same
+  seed and
+  `--inject-kind risc0.semantic.time.monotonic_access_ordering --inject-step 4`
+  emitted `sem.time.monotonic_access_ordering`, reported
+  `injection_applied = true`, logged the proof-facing load previous-cycle
+  mutation, and returned verifier rejection. This is mapping evidence, not
+  strict Beak Good. Other 10fa M3 memory buckets (`me2`, `me5`-`me7`,
+  `me9`-`me11`) remain bucket-only until a same-semantics
+  witness/prover mutation hook is added.
 - `risc0-c0db0713`: obligation pass ported the Risc0 executed-instruction
   trace path to the legacy commit. Instruction-local buckets now come from
   executed RV32IM oracle steps under the Risc0 split code/data layout, with

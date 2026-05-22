@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pico_fuzzer.settings import (
     PICO_AVAILABLE_COMMITS_OR_BRANCHES,
-    PICO_BENCHMARK_45E74_COMMIT,
+    PICO_LATEST_22B0_COMMIT,
     resolve_pico_commit,
 )
 from pico_fuzzer.utils_install import clone_and_checkout_pico
@@ -28,7 +28,7 @@ def _build_parser() -> argparse.ArgumentParser:
     install.add_argument(
         "--commit-or-branch",
         type=str,
-        default=PICO_BENCHMARK_45E74_COMMIT,
+        default=PICO_LATEST_22B0_COMMIT,
         choices=PICO_AVAILABLE_COMMITS_OR_BRANCHES,
         help="Pico commit/alias to install.",
     )
