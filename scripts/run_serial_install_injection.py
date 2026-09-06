@@ -236,6 +236,7 @@ def build_worker_cpu_sets(cpu_pool: list[int], vm_cores: int, parallel_vms: int)
 
 class Config:
     def __init__(self) -> None:
+        self.no_cpu_affinity = os.environ.get("BEAK_NO_CPU_AFFINITY", "") in ("1", "true")
         self.cpu_set = os.environ.get("CPU_SET", default_cpu_set())
         self.cpu_pool = parse_cpu_set(self.cpu_set)
         legacy_threads = env_int("THREADS", 32)
@@ -243,12 +244,20 @@ class Config:
         self.parallel_vms = env_int(
             "PARALLEL_VMS", default_parallel_vms(len(self.cpu_pool), self.vm_cores)
         )
-        self.worker_cpu_sets = build_worker_cpu_sets(
-            self.cpu_pool,
-            self.vm_cores,
-            self.parallel_vms,
-        )
-        self.threads = min(self.vm_cores, len(self.worker_cpu_sets[0]))
+        if self.no_cpu_affinity:
+            # Unpinned: every slot sees the whole pool; the kernel scheduler shares it
+            # dynamically. VM_CORES then acts purely as the per-VM thread cap
+            # (RAYON/OMP/TOKIO/CARGO_BUILD_JOBS), giving "baseline share under
+            # contention, burst into idle cores, capped at VM_CORES per VM".
+            self.worker_cpu_sets = [self.cpu_pool for _ in range(self.parallel_vms)]
+            self.threads = self.vm_cores
+        else:
+            self.worker_cpu_sets = build_worker_cpu_sets(
+                self.cpu_pool,
+                self.vm_cores,
+                self.parallel_vms,
+            )
+            self.threads = min(self.vm_cores, len(self.worker_cpu_sets[0]))
         self.soft_timeout_seconds = env_int("SOFT_TIMEOUT_SECONDS", 14400)
         self.kill_grace_seconds = env_int("KILL_GRACE_SECONDS", 30)
         self.uv_cache_dir = os.environ.get("UV_CACHE_DIR", "/tmp/uv-cache")
@@ -377,7 +386,12 @@ def matches_filters(
 
 def command_prefix(config: Config) -> list[str]:
     prefix: list[str] = []
-    if shutil.which("taskset"):
+    # BEAK_NO_CPU_AFFINITY=1 runs every target unpinned so the kernel scheduler
+    # shares the whole pool dynamically (baseline share under contention, burst
+    # into idle cores), instead of statically partitioning CPU_SET per VM.
+    if config.no_cpu_affinity:
+        pass
+    elif shutil.which("taskset"):
         prefix.extend(["taskset", "-c", config.cpu_set])
     if config.memory_limit_bytes > 0:
         prefix.extend(["prlimit", f"--as={config.memory_limit_bytes}"])
