@@ -92,9 +92,7 @@ Shared behavior belongs in `crates/beak-core/`.
 | `src/trace/semantic_matchers.rs` | Backend-independent matchers over shared observation structs |
 | `src/trace/observations.rs` | Shared observation structs used by matchers |
 | `src/trace/mod.rs` | `BucketHit`, `TraceSignal`, and trace canonicalization contract |
-| `src/fuzz/benchmark.rs` | Semantic search candidate/replay loop |
-| `src/fuzz/loop1.rs` | Direct chained injection loop |
-| `src/fuzz/loop2.rs` | Follow-on direct injection loop |
+| `src/fuzz/benchmark.rs` | Semantic search candidate/replay loop and run/bug metadata recording |
 
 One-off backend logic should stay under `projects/<vm>-<commit>/`.
 General logic used by at least two VM families should move into
@@ -185,18 +183,6 @@ obligations end-to-end must continue past bucket emission and do one of:
 
 Do not treat `bucket_emitted` as equivalent to an implemented injection path.
 
-## Direct Injection Contract
-
-Backends that support loop1 chained direct injection must implement:
-
-- `bucket_has_direct_injection`
-- `clear_direct_injection`
-- `arm_direct_injection_from_hits`
-
-Direct injection is for high-confidence bucket-to-witness mappings. It should
-not be enabled for speculative or broad search ranges. The direct path must use
-the same bucket ids, details schema, and inject kind naming as semantic search.
-
 ## Install Instrumentation Contract
 
 When a VM snapshot lacks trace fields or injection hooks, add the minimum
@@ -248,7 +234,7 @@ beak-py/projects/<vm>-fuzzer/.../passes/
   -> projects/<vm>-<commit>/src/lib/trace.rs parses emitted JSON logs
   -> trace.rs emits registered sem.* BucketHit values
   -> projects/<vm>-<commit>/src/lib/backend.rs maps BucketHit to injection candidates
-  -> beak-core benchmark/loop1 records run metadata and bug candidates
+  -> beak-core benchmark records run metadata and bug candidates
 ```
 
 Use this flow for both observability-only hooks and witness/prover mutation

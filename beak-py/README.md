@@ -78,21 +78,6 @@ make openvm-run COMMIT=bmk-regzero BIN=beak-trace ARGS='--bin "12345017 00000533
    - optionally apply instrumentation / fault-injection patches (where supported)
 3. **`crates/beak-core`** (Rust): shared ISA/oracle, seed format, fuzz loop scaffolding, and bucket/feedback traits used by backend runners (e.g. `beak-trace`, `beak-fuzz`).
 
-## Register Safety
+## Commit Options
 
-Some tooling/pipelines may prefer a subset of “safe” RISC-V registers (`x5-x7`, `x10-x17`, `x28-x31`)
-to avoid conflicts with system-reserved registers like `sp` and `gp`.
-
-Note: the current loop1 mutator/seed pipeline does not strictly enforce this constraint for all generated mutations.
-
-## OpenVM Commit Options
-
-`openvm-fuzzer install --commit-or-branch <alias|hash>` accepts both pinned aliases (e.g. `bmk-regzero`)
-and full commit hashes. See `beak-py/projects/openvm-fuzzer/openvm_fuzzer/settings.py` for the current
-alias list and pinned commits.
-
-## SP1 Commit Options
-
-`sp1-fuzzer install --commit-or-branch <alias|hash>` accepts both pinned aliases and full commit
-hashes. See `beak-py/projects/sp1-fuzzer/sp1_fuzzer/settings.py` for the current alias list and
-pinned commits.
+`*-fuzzer install --commit-or-branch <alias|hash>` accepts pinned aliases and full commit hashes; the alias lists live in each fuzzer's `settings.py`.

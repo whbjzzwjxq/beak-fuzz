@@ -1,9 +1,8 @@
 .PHONY: extract-initial-seeds openvm-install openvm-build openvm-run openvm-example-x0 \
-	openvm-fuzz-build openvm-fuzz openvm-fuzz-5min openvm-fuzz-quick \
-	openvm-trace openvm-trace-buckets \
+	openvm-fuzz-build openvm-fuzz \
 	pico-install pico-build pico-run pico-fuzz \
 	sp1-install sp1-build sp1-run sp1-fuzz \
-	sp1-install-v4 sp1-build-v4 sp1-fuzz-v4 \
+	sp1-install-audit sp1-build-audit sp1-fuzz-audit \
 	jolt-install jolt-build jolt-run jolt-fuzz \
 	nexus-install nexus-build nexus-run nexus-fuzz \
 	risc0-install risc0-build risc0-run risc0-fuzz \
@@ -21,7 +20,7 @@
 COMMIT ?= bmk-regzero
 PICO_COMMIT ?= 45e74ccd62758c6d67239913956e749adaba261c
 SP1_COMMIT ?= 7f643da16813af4c0fbaad4837cd7409386cf38c
-SP1_AUDIT_V4_IS_MEMORY_COMMIT ?= 39ab52fce38172c9d23feed7248198dc14c164a9
+SP1_AUDIT_COMMIT ?= 39ab52fce38172c9d23feed7248198dc14c164a9
 JOLT_COMMIT ?= e9caa23565dbb13019afe61a2c95f51d1999e286
 NEXUS_COMMIT ?= 636ccb360d0f4ae657ae4bb64e1e275ccec8826
 RISC0_COMMIT ?= c0db0713671c8ec467b3efc26b22a0b0591897ff
@@ -246,14 +245,14 @@ sp1-run: sp1-build
 sp1-fuzz: sp1-run
 	@echo "SP1 full repro finished for $(SP1_COMMIT)"
 
-sp1-install-v4:
-	@$(MAKE) sp1-install SP1_COMMIT=$(SP1_AUDIT_V4_IS_MEMORY_COMMIT)
+sp1-install-audit:
+	@$(MAKE) sp1-install SP1_COMMIT=$(SP1_AUDIT_COMMIT)
 
-sp1-build-v4:
-	@$(MAKE) sp1-build SP1_COMMIT=$(SP1_AUDIT_V4_IS_MEMORY_COMMIT)
+sp1-build-audit:
+	@$(MAKE) sp1-build SP1_COMMIT=$(SP1_AUDIT_COMMIT)
 
-sp1-fuzz-v4:
-	@$(MAKE) sp1-fuzz SP1_COMMIT=$(SP1_AUDIT_V4_IS_MEMORY_COMMIT)
+sp1-fuzz-audit:
+	@$(MAKE) sp1-fuzz SP1_COMMIT=$(SP1_AUDIT_COMMIT)
 
 jolt-install:
 	$(_require_jolt_commit)

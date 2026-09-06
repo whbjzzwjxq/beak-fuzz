@@ -67,41 +67,26 @@ smoke blocker was fixed by sizing Jolt read/write memory witness vectors from
 the trace, bytecode initialization, and input initialization ranges; baseline
 prover smokes now complete.
 
+Entrypoint receipts bind the row-0 bytecode witness to the independently
+declared ELF entry (`RAM_START_ADDRESS`). Executed `md3`/`md5` hits carry the
+checked arithmetic relations (exact `q*d+r=n` recomposition, remainder bound,
+MULHSU signed/unsigned high bits); a typed exception receipt is emitted only
+when the matching instruction-lookup or R1CS sumcheck equality fails on a
+non-injected run.
+
 Minimal smoke checks:
 
 ```bash
 cargo run -q --bin beak-trace -- --bin "00100013" --print-buckets
-cargo run -q --bin beak-trace -- --bin 123450b7 --print-buckets
-cargo run -q --bin beak-trace -- --bin "00100093 00200113 0020c463 00300193" --print-buckets
-cargo run -q --bin beak-trace -- --bin "00700113 00500193 023150b3" --print-buckets
-cargo run -q --bin beak-trace -- --bin "00700093 00500113 022081b3" --print-buckets
-cargo run -q --bin beak-trace -- --bin "7fffc0b7 10008093 0000c183" --print-buckets
-cargo run -q --bin beak-trace -- --bin "7fffc0b7 10008093 0000c183 0000c203" --print-buckets
-cargo run -q --bin beak-trace -- --bin "7fffd0b7 10008093 07f00113 00208023" --print-buckets
-cargo run -q --bin beak-trace -- --bin 123450b7 --inject-kind jolt.semantic.decode.upper_immediate_materialization --inject-step 18446744073709551615 --print-buckets
-cargo run -q --bin beak-trace -- --bin "00100093 00200113 0020c463 00300193" --inject-kind jolt.semantic.exec.control_flow_binding --inject-step 18446744073709551615 --print-buckets
-cargo run -q --bin beak-trace -- --bin 123450b7 --inject-kind jolt.semantic.control.entrypoint_binding --inject-step 0 --print-buckets
-cargo run -q --bin beak-trace -- --bin 00100013 --inject-kind jolt.semantic.decode.zero_register_immutability --inject-step 18446744073709551615 --print-buckets
-cargo run -q --bin beak-trace -- --bin 10000093 --inject-kind jolt.semantic.alu.immediate_limb_consistency --inject-step 18446744073709551615 --print-buckets
-cargo run -q --bin beak-trace -- --bin "000010b7 00002137 002091b3" --inject-kind jolt.semantic.alu.shift_mod32 --inject-step 2 --print-buckets
-cargo run -q --bin beak-trace -- --bin "000010b7 0200c1b3" --inject-kind jolt.semantic.arithmetic.special_case_consistency --inject-step 1 --print-buckets
-cargo run -q --bin beak-trace -- --bin "7fffc0b7 10008093 0000c183" --inject-kind jolt.semantic.memory.address_pointer_consistency --inject-step 18446744073709551615 --print-buckets
-cargo run -q --bin beak-trace -- --bin "7fffc0b7 10008093 0000c183 0000c203" --inject-kind jolt.semantic.memory.address_space_consistency --inject-step 18446744073709551615
-cargo run -q --bin beak-trace -- --bin "7fffc0b7 10008093 0000c183 0000c203" --inject-kind jolt.semantic.memory.initial_value_binding --inject-step 18446744073709551615
-cargo run -q --bin beak-trace -- --bin "7fffc0b7 10008093 0000c183 0000c203" --inject-kind jolt.semantic.memory.finalization_consistency --inject-step 18446744073709551615
-cargo run -q --bin beak-trace -- --bin "7fffc0b7 10008093 0000c183 0000c203" --inject-kind jolt.semantic.time.monotonic_access_ordering --inject-step 18446744073709551615
-cargo run -q --bin beak-trace -- --bin "7fffc0b7 10008093 0000c183 0000c203" --inject-kind jolt.semantic.lookup.boolean_multiplicity --inject-step 18446744073709551615
-cargo run -q --bin beak-trace -- --bin "7fffc0b7 10008093 0000c183 0000c203" --inject-kind jolt.semantic.row.padding_interaction_send --inject-step 18446744073709551615
+cargo run -q --bin beak-trace -- --bin 00100013 \
+  --inject-kind jolt.semantic.decode.zero_register_immutability \
+  --inject-step 18446744073709551615 --print-buckets
 cargo run -q --bin beak-fuzz -- --bin 123450b7 --initial-limit 1 --semantic-max-trials-per-bucket 4
 ```
 
-Current prover smoke note: the baseline commands above emit the expected
-semantic buckets and match final registers. Injected smokes report
-`injection_applied = true`; most fail verifier/prover checks as expected.
-`id3` upper-immediate injection currently preserves registers and verifies,
-which is recorded as underconstrained evidence rather than a rejected proof.
-The new kind-selector and padding hooks also apply and verify, so they are
-recorded as mapped/underconstrained rather than verified.
+Injected smokes report `injection_applied = true` and mostly fail
+verifier/prover checks; the `id3` upper-immediate, `me10` kind-selector, and
+`pd1` padding injections still verify and are recorded as underconstrained.
 `md2` signed division/remainder overflow still panics in
 `jolt-core/src/jolt/instruction/{div,rem}.rs` before a baseline bucket is
 available.

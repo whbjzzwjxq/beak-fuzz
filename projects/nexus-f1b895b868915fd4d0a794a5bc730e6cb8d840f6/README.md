@@ -1,6 +1,6 @@
 # Nexus Benchmark Backend
 
-This project wires the Nexus zkVM snapshot `636ccb360d0f4ae657ae4bb64e1e275ccec8826`
+This project wires the Nexus zkVM snapshot `f1b895b868915fd4d0a794a5bc730e6cb8d840f6`
 into the same `beak-trace` / `beak-fuzz` benchmark entrypoints used by the other
 zkVM integrations.
 
@@ -15,28 +15,18 @@ plus memory records:
 - Memory/time: `me1`-`me7`, `me9`, `me10`, `ts1`, same-address `ts2`, and
   `ts3` from `UniformTrace` memory records.
 
-The following rows are now mapped to installed-source prover hooks, but are not
-marked verified because injected smokes fire the hook and then fail Nexus
-constraints/prover checks:
+Executed `md4` hits include `rs1_val`, `rs2_val`, `rd_val`, `product_hi`, and
+`product_lo`, and are emitted only when the destination agrees with the exact
+64-bit product relation. MUL just below the carry boundary and MULHU remain
+distinct control cells.
 
-- Register/decode/ALU/control: `rf1`-`rf3`, `id1`-`id5`, `al1`-`al5`,
-  `cf1`-`cf4`, `cf6.normal/after_branch_not_taken`, and `cf7`.
-- Memory/time: `me2`, `me3`, `me6`, `me9`, `ts1`, same-address `ts2`, and
-  `ts3`.
-
-The verified rows remain installed-source load/store prover hooks for:
-
-- `me1` / `nexus.semantic.memory.store_load_payload_flow`
-- `me4` / `nexus.semantic.memory.write_payload_consistency`
-- `me10` / `nexus.semantic.memory.kind_selector_consistency`
-
-Current mappings target pass3 hooks in `prover/src/chips/cpu.rs`,
-`prover/src/chips/memory_check/register_mem_check.rs`,
-`prover/src/chips/instructions/{sll,srl,sra}.rs`,
-`prover/src/chips/instructions/{slt,sltu,sub}.rs`, branch/JAL/JALR chips, and
-`prover/src/chips/instructions/load_store.rs`. Each hook reports applied-site
-evidence from the installed prover path through
-`BEAK_NEXUS_SEMANTIC_INJECTION_APPLIED` and backend `injection_applied = true`.
+This snapshot's MulCarry target is a baseline prover exception. Its install
+path adds a typed exception receipt immediately before the executed MUL
+`carry_1 < 4` assertion, while leaving the failing arithmetic unchanged and
+not applying the 636 semantic witness-mutation hooks. The backend admits that
+receipt only when it matches the same executed `md4.mul_overflow` operands,
+product halves, failing carry, and non-injected run. It does not advertise
+semantic candidates, and injected calls fail closed.
 
 Minimal smoke checks:
 
@@ -45,19 +35,6 @@ cargo run --bin beak-trace -- --bin "00100093 00200113 002081b3 40218233 0020c46
 cargo run --bin beak-trace -- --bin "00100093 00112023 00012183" --print-buckets
 cargo run --bin beak-trace -- --bin "08000093 00110023 00010183" --print-buckets
 cargo run --bin beak-trace -- --bin "fff00093 ffd0a103" --print-buckets
-```
-
-Mapped injected smoke examples:
-
-```bash
-cargo run --bin beak-trace -- --bin "00100013" --inject-kind nexus.semantic.decode.zero_register_immutability --inject-step 0 --print-buckets
-cargo run --bin beak-trace -- --bin "00100093 02000113 002091b3" --inject-kind nexus.semantic.alu.shift_mod32 --inject-step 2 --print-buckets
-cargo run --bin beak-trace -- --bin "008000ef 00100113 00200193" --inject-kind nexus.semantic.exec.control_flow_binding --inject-step 0 --print-buckets
-cargo run --bin beak-trace -- --bin "20100893 00000073" --inject-kind nexus.semantic.control.ecall_word_validity --inject-step 1 --print-buckets
-cargo run --bin beak-trace -- --bin "08000093 00110023 00010183" --inject-kind nexus.semantic.memory.address_alignment_consistency --inject-step 1 --print-buckets
-cargo run --bin beak-trace -- --bin "00100093 00112023 00012183" --inject-kind nexus.semantic.memory.store_load_payload_flow --inject-step 1 --print-buckets
-cargo run --bin beak-trace -- --bin "08000093 00110023 00010183" --inject-kind nexus.semantic.memory.write_payload_consistency --inject-step 1 --print-buckets
-cargo run --bin beak-trace -- --bin "00100093 00112023 00012183" --inject-kind nexus.semantic.memory.kind_selector_consistency --inject-step 1 --print-buckets
 ```
 
 Remaining gaps after inspection:

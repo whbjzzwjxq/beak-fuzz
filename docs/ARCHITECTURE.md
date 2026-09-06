@@ -6,7 +6,7 @@
 - different Rust toolchains (often pinned nightlies),
 - different binaries and runtimes,
 
-while still benefiting from a shared “core” (ISA/oracles/trace abstractions/seed formats).
+while still benefiting from a shared "core" (ISA/oracles/trace abstractions/seed formats).
 
 This repository is organized to keep zkVM-specific code isolated, and keep shared logic reusable.
 
@@ -57,37 +57,41 @@ Each zkVM snapshot project provides its own binaries under `projects/<zkvm>-<com
 
 For example, `projects/openvm-d7eab708f43487b2e7c00524ffd611f835e8e6b5` provides:
 
-- `beak-trace`: runs oracle execution and compares it against OpenVM execution for a given input; can also print captured trace JSON logs (when enabled by snapshot instrumentation).
-- `beak-fuzz`: runs loop1 (libAFL in-process mutational fuzzing) for oracle vs OpenVM differential checking with bucket-guided feedback.
+- `beak-trace`: runs oracle execution and compares it against backend execution for a given input; can also print captured trace JSON logs (when enabled by snapshot instrumentation).
+- `beak-fuzz`: runs the beak-core benchmark loop (`run_benchmark_threaded`): differential oracle-vs-backend checking, bucket-guided feedback, and typed semantic-injection trials.
 
-## Data Flow (Loop1, Current OpenVM Path)
+## Campaign Runner
 
-At a high level, loop1 for OpenVM currently follows this shape:
+`scripts/run_serial_install_injection.py` is the single entrypoint for
+multi-target campaigns. It installs each configured snapshot, then runs the
+ordinary `beak-fuzz` benchmark per target with a wall-clock budget, and writes
+`summary.tsv` / `summary.json` plus per-run JSONL artifacts.
+
+## Data Flow (Benchmark Path)
+
+At a high level, each evaluated input follows this shape:
 
 ```text
 seed/input_words
   -> oracle_execute (beak-core, rrs-lib based)
-  -> transpile_to_openvm_program
-  -> execute+tracegen (OpenVM SDK)
+  -> transpile_to_vm_program
+  -> execute+tracegen (VM SDK)
   -> extract backend final registers + micro-op logs
   -> derive bucket hits
   -> compare (oracle regs vs backend regs)
 ```
 
-OpenVM loop1 intentionally uses **trace-only + execute-only** for speed:
-
-- Runs metered execution and preflight execution.
-- Runs proving-context generation (`generate_proving_ctx`) to trigger chip trace generation (`fill_trace_row` path).
-- Skips `engine.prove` (the expensive proof generation stage).
-
-This preserves differential checking and bucket extraction while keeping per-input runtime much lower than full proof generation.
-
-## Loop1 Execution Model
+## Benchmark Execution Model
 
 - Initial seeds are loaded from `--seeds-jsonl` (optionally capped by `--initial-limit`).
-- Loop1 evaluates each initial corpus entry once before mutational fuzzing.
-- Then loop1 runs `--iters` times, where each iteration executes one `fuzz_one` step.
-- A single `fuzz_one` can evaluate multiple candidate inputs internally, so backend run counters can exceed `--iters`.
+- Benchmark JSONL output uses each wrapper's configured directory by default. Set
+  `BEAK_BENCHMARK_OUT_DIR` to route an ordinary benchmark run into a fresh
+  campaign- or test-owned directory without changing backend behavior.
+- Every scheduled seed is evaluated once as a baseline before semantic-injection
+  trials and mutation rounds (`--mutation-iters`).
+- Program length is scheduled with a soft nominal cap (`--max-instructions`,
+  default 256) plus a long-tail quota lane up to `--long-tail-max-instructions`
+  (runner default 8192), so long programs appear rarely instead of never.
 
 ## Bucket and Feedback Model
 
@@ -96,8 +100,8 @@ This preserves differential checking and bucket extraction while keeping per-inp
 - `docs/OBLIGATIONS.md` defines the high-level obligation/cell taxonomy.
 - `docs/OBLIGATION_IMPLEMENTATION_CONTRACT.md` defines the cross-VM contract for bucket names, `BucketHit.details`, injection kinds, and install instrumentation.
 - `docs/OBLIGATION_IMPLEMENTATION_MATRIX.md` tracks per-VM implementation status.
-- Loop1 canonicalizes hit bucket IDs into a stable signature (`bucket_hits_sig`, separated by `;`) for novelty tracking.
-- Mutator arm selection is controlled by a multi-armed bandit (`crates/beak-core/src/fuzz/bandit.rs`).
+- Hit bucket IDs are canonicalized into a stable signature (`bucket_hits_sig`, separated by `;`) for novelty tracking.
+- Mutation arm selection uses a UCB bandit built into `crates/beak-core/src/fuzz/seed_mutation.rs`.
 
 ## How to Build / Test
 

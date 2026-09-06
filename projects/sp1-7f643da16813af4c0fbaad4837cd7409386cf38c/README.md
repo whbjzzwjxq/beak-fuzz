@@ -28,6 +28,13 @@ Benchmark JSONL files are written to:
 
 - `path/to/beak/storage/fuzzing_seeds/`
 
+## Ordinary ECALL Carrier Lane
+
+Without `--bin`, `beak-fuzz` prepends three generated write-syscall ECALL
+programs (fds 1, 3, 4) to the initial corpus. Executed ECALL hits are accepted
+as evidence only through a typed `ExecutedControlFlowEquation` receipt matching
+the executed word/opcode, PC, step, expected `PC + 4`, and changed next PC.
+
 ## Obligation Status
 
 - Executed-instruction semantic buckets cover `rf1`-`rf3`, `id1`-`id5`,

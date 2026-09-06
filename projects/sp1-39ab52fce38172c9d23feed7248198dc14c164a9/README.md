@@ -49,13 +49,21 @@ cd path/to/beak
 make sp1-fuzz SP1_COMMIT=39ab52fce38172c9d23feed7248198dc14c164a9
 ```
 
+Without `--bin`, the ordinary `beak-fuzz` entrypoint prepends three generated
+one-instruction memory carriers (`lw`, `sw`, and `lb`) to the initial corpus.
+
+For `sem.exec.memory_effect_binding`, the installed CPU-row hook records a
+typed `MemorySelectorEquation` receipt. The backend accepts it only when the
+executed SP1 opcode, reconstructed RV word, PC, step, op index, commit, and
+`is_memory: 1 -> 0` transition agree with the baseline memory row.
+
 The semantic injection kind for the real audit issue is:
 
 - `sp1.semantic.exec.memory_effect_binding`
 
 Additional installed SP1 hooks currently mapped by the target backend:
 
-- CPU-row decode/register hooks from `pass4_v4_is_memory.py`:
+- CPU-row decode/register hooks from `pass4_is_memory.py`:
   `sp1.semantic.decode.zero_register_immutability`,
   `sp1.semantic.decode.operand_index_routing`,
   `sp1.semantic.exec.dest_binding`,
@@ -63,7 +71,7 @@ Additional installed SP1 hooks currently mapped by the target backend:
   `sp1.semantic.decode.immediate_sign_extension`,
   `sp1.semantic.exec.op_selector_binding`, and
   `sp1.semantic.decode.format_immediate_reassembly`
-- ALU/mul/div chip hooks from `pass4_v4_is_memory.py`:
+- ALU/mul/div chip hooks from `pass4_is_memory.py`:
   `sp1.semantic.alu.immediate_limb_consistency`,
   `sp1.semantic.alu.shift_mod32`,
   `sp1.semantic.alu.comparison_booleanity`,

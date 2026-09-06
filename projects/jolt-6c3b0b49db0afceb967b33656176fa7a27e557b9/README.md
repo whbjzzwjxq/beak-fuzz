@@ -20,7 +20,12 @@ backend panic from the ordinary prover path.
 
 Current semantic coverage is bucket-only:
 
-- `sem.row.bytecode_table_boundary` for existing obligation `pd4`
+- `sem.row.bytecode_table_boundary` / `pd4.just_over`, emitted only when the
+  real read/write-memory preprocessing bytecode span ends exactly one row past
+  its allocated power-of-two `v_init` table. The installed source records the
+  population relation before the unchanged vulnerable copy and emits a typed
+  non-injected exception receipt at the exact out-of-capacity write. Both are
+  validated fail-closed by the backend and shared classifier.
 
 Minimal smoke:
 

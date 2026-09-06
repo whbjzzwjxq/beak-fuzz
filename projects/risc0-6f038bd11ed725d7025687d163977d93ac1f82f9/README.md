@@ -14,10 +14,12 @@ standard Beak RISC0 instrumentation copied in. The generated
 source by using `LOOKUP_TABLE_CYCLES` for Beak padding metadata; the vulnerable
 executor and preflight accounting are unchanged.
 
-## ControlDone Boundary Repro
+## ControlDone Boundary Diagnostic
 
-The strict non-injected prover exception is reproducible with a generic counted
-loop that lands the final segment at the missing-ControlDone boundary:
+The strict non-injected prover exception is reproducible for debugging with a
+generic counted loop that lands the final segment at the missing-ControlDone
+boundary. This exact-seed command is diagnostic only; campaign completion still
+requires ordinary corpus/scheduler/mutator discovery.
 
 ```sh
 cargo run --release -q --bin beak-fuzz -- \
@@ -41,11 +43,18 @@ addi a4, a4, 1
 blt  a4, a5, loop
 ```
 
-The ordinary `beak-fuzz` run records a baseline bug with
-`semantic_injection_applied=false`, `underconstrained_candidate=false`, and
-`backend_error="risc0 prove panicked during semantic injection"`. The captured
-RISC0 panic is from `prove/witgen/mod.rs:90`:
-`cycles <= 1 << segment.po2`.
+The backend emits `sem.row.trace_power2_boundary` from the executed segment
+summary and accepts an `ExecutedExceptionEffect::ControlDoneCapacity` receipt
+only when the installed witness generator reaches the matching capacity
+assertion in a non-injected run. The relation records capacity `32768`, legacy
+accounting `32768`, required accounting `32770`, and the concrete pre-fix trace
+manifestation of `32769` rows. Core classification recomputes the capacity
+equation and matches the typed stage, segment, step, and context; the panic text
+is diagnostic and is not classification evidence.
+
+Without `--bin`, the ordinary `beak-fuzz` run prepends three generated
+counted-loop carriers around the segment-capacity boundary to the initial
+corpus; the `--bin` path above remains a diagnostic replay.
 
 Earlier checks with the prior minimized loop
 `00000713 000017b7 4e778793 00170713 fef74ee3` and with the release example

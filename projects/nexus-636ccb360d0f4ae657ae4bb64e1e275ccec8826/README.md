@@ -15,6 +15,11 @@ plus memory records:
 - Memory/time: `me1`-`me7`, `me9`, `me10`, `ts1`, same-address `ts2`, and
   `ts3` from `UniformTrace` memory records.
 
+Executed `md4` hits include `rs1_val`, `rs2_val`, `rd_val`, `product_hi`, and
+`product_lo`, and are emitted only when the destination agrees with the exact
+64-bit product relation. MUL just below the carry boundary and MULHU remain
+distinct control cells.
+
 The following rows are now mapped to installed-source prover hooks, but are not
 marked verified because injected smokes fire the hook and then fail Nexus
 constraints/prover checks:

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from sp1_fuzzer.settings import (
     SP1_AVAILABLE_COMMITS_OR_BRANCHES,
-    SP1_AUDIT_V4_39AB_COMMIT,
+    SP1_AUDIT_39AB_COMMIT,
     SP1_RECURSION_KALOS_FB38_COMMIT,
     SP1_UINT256_DIV_3561_COMMIT,
     resolve_sp1_commit,
@@ -30,7 +30,7 @@ def _build_parser() -> argparse.ArgumentParser:
     install.add_argument(
         "--commit-or-branch",
         type=str,
-        default=SP1_AUDIT_V4_39AB_COMMIT,
+        default=SP1_AUDIT_39AB_COMMIT,
         choices=SP1_AVAILABLE_COMMITS_OR_BRANCHES,
         help="SP1 commit/alias to install.",
     )
