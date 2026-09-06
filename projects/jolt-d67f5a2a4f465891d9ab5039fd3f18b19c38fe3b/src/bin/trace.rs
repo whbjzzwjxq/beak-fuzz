@@ -94,6 +94,15 @@ fn main() {
     if let Some(err) = &backend_resp.backend_error {
         println!("  backend_error = {err}");
     }
+    for hit in &backend_resp.bucket_hits {
+        println!("  bucket_hit = {}", serde_json::to_string(hit).expect("serialize bucket hit"));
+    }
+    if let Some(receipt) = &backend_resp.executed_exception_receipt {
+        println!(
+            "  executed_exception_receipt = {}",
+            serde_json::to_string(receipt).expect("serialize executed exception receipt")
+        );
+    }
 
     println!("\n=== Jolt registers ===");
     let Some(jolt_regs) = backend_resp.final_regs else {

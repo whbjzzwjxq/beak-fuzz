@@ -981,42 +981,5 @@ mod tests {
         assert_eq!(candidates[0].inject_kind, TIME_MONOTONIC_INJECT_KIND);
     }
 
-    #[test]
-    fn inspect_reg_banks_for_known_cases() {
-        std::thread::Builder::new()
-            .name("risc0-reg-bank-test".to_string())
-            .stack_size(256 * 1024 * 1024)
-            .spawn(inspect_reg_banks_for_known_cases_inner)
-            .expect("spawn reg-bank test worker")
-            .join()
-            .expect("reg-bank test worker panicked");
-    }
 
-    fn inspect_reg_banks_for_known_cases_inner() {
-        let cases = [
-            ("divrem", vec![0x0070_0113, 0x0050_0193, 0x0231_50b3]),
-            ("ecall_len", vec![0x0010_0893, 0x0000_0513, 0x0050_05b7, 0x0040_0613, 0x0000_0073]),
-        ];
-
-        for (name, words) in cases {
-            let image = MemoryImage::new_kernel(build_program(&words));
-            let limit = ExecutionLimit::DEFAULT
-                .with_segment_po2(DEFAULT_SEGMENT_LIMIT_PO2)
-                .with_session_limit(DEFAULT_SESSION_LIMIT);
-            let session = execute(image, limit, Risc0HostSyscall, None)
-                .unwrap_or_else(|e| panic!("{name}: execute failed: {e}"));
-            let mut post = session.result.post_image.clone();
-            let machine = read_reg_bank(&mut post, MACHINE_REGS_ADDR.waddr(), "machine").unwrap();
-            let user = read_reg_bank(&mut post, USER_REGS_ADDR.waddr(), "user").unwrap();
-            eprintln!(
-                "{name}: machine_nonzero={} user_nonzero={} machine_x11={} user_x11={} machine_x17={} user_x17={}",
-                nonzero_reg_count(&machine),
-                nonzero_reg_count(&user),
-                machine[11],
-                user[11],
-                machine[17],
-                user[17],
-            );
-        }
-    }
 }

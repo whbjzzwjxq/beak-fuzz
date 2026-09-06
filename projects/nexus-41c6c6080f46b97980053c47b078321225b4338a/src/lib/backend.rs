@@ -1,60 +1,35 @@
-use std::collections::BTreeMap;
-
 use beak_core::fuzz::benchmark::{
-    BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
+    BackendEval, BenchmarkBackend, ExecutedExceptionReceipt, SemanticInjectionCandidate,
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{BucketHit, Trace, TraceSignal};
 use nexus_common::cpu::Registers;
-use nexus_common::memory::MemoryRecord;
 use nexus_common::riscv::register::Register;
 use nexus_vm::emulator::{Emulator, HarvardEmulator};
 use nexus_vm::error::VMError;
-use nexus_vm::trace::UniformTrace;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use crate::trace::NexusTrace;
+use crate::trace::{memory_table_boundary_hit_from_receipt, NexusTrace};
 
-const ZERO_REG_INJECT_KIND: &str = "nexus.semantic.decode.zero_register_immutability";
-const OPERAND_ROUTING_INJECT_KIND: &str = "nexus.semantic.decode.operand_index_routing";
-const DEST_BINDING_INJECT_KIND: &str = "nexus.semantic.exec.dest_binding";
-const FIELD_RANGE_INJECT_KIND: &str = "nexus.semantic.decode.field_range";
-const IMM_SIGNEXT_INJECT_KIND: &str = "nexus.semantic.decode.immediate_sign_extension";
-const UPPER_IMM_INJECT_KIND: &str = "nexus.semantic.decode.upper_immediate_materialization";
-const FORMAT_IMM_INJECT_KIND: &str = "nexus.semantic.decode.format_immediate_reassembly";
-const OP_SELECTOR_INJECT_KIND: &str = "nexus.semantic.exec.op_selector_binding";
-const ALU_IMM_INJECT_KIND: &str = "nexus.semantic.alu.immediate_limb_consistency";
-const SHIFT_INJECT_KIND: &str = "nexus.semantic.alu.shift_mod32";
-const CMP_BOOL_INJECT_KIND: &str = "nexus.semantic.alu.comparison_booleanity";
-const SUB_BORROW_INJECT_KIND: &str = "nexus.semantic.alu.subtraction_borrow_chain";
-const CMP_AUX_INJECT_KIND: &str = "nexus.semantic.alu.comparison_auxiliary_chain";
-const CONTROL_FLOW_INJECT_KIND: &str = "nexus.semantic.exec.control_flow_binding";
-const ENTRYPOINT_INJECT_KIND: &str = "nexus.semantic.control.entrypoint_binding";
-const ECALL_WORD_INJECT_KIND: &str = "nexus.semantic.control.ecall_word_validity";
-const TIME_BOUNDARY_INJECT_KIND: &str = "nexus.semantic.time.boundary_origin_consistency";
-const ADDRESS_ALIGNMENT_INJECT_KIND: &str = "nexus.semantic.memory.address_alignment_consistency";
-const LOAD_VALUE_INJECT_KIND: &str = "nexus.semantic.memory.load_value_binding";
-const ADDRESS_POINTER_INJECT_KIND: &str = "nexus.semantic.memory.address_pointer_consistency";
-const ADDRESS_PROGRESSION_INJECT_KIND: &str =
-    "nexus.semantic.memory.address_progression_consistency";
-const TIME_MONOTONIC_INJECT_KIND: &str = "nexus.semantic.time.monotonic_access_ordering";
-const FLOW_PAYLOAD_INJECT_KIND: &str = "nexus.semantic.memory.store_load_payload_flow";
-const WRITE_PAYLOAD_INJECT_KIND: &str = "nexus.semantic.memory.write_payload_consistency";
-const KIND_SELECTOR_INJECT_KIND: &str = "nexus.semantic.memory.kind_selector_consistency";
 const BEAK_NEXUS_INJECT_KIND_ENV: &str = "BEAK_NEXUS_INJECT_KIND";
 const BEAK_NEXUS_INJECT_STEP_ENV: &str = "BEAK_NEXUS_INJECT_STEP";
 const BEAK_NEXUS_INJECTION_APPLIED_ENV: &str = "BEAK_NEXUS_INJECTION_APPLIED";
-const BEAK_NEXUS_STORE_LOAD_FLOW_ENV: [&str; 3] = [
-    "BEAK_NEXUS_STORE_LOAD_FLOW_ADDR",
-    "BEAK_NEXUS_STORE_LOAD_FLOW_CLK",
-    "BEAK_NEXUS_STORE_LOAD_FLOW_BYTE",
-];
+const MEMORY_TABLE_BOUNDARY_RECEIPT_ENV: &str = "BEAK_NEXUS_MEMORY_TABLE_BOUNDARY_RECEIPT";
+const EXECUTED_EXCEPTION_RECEIPT_ENV: &str = "BEAK_NEXUS_EXECUTED_EXCEPTION_RECEIPT";
+const MEMORY_TABLE_RELATION: &str =
+    "last_access_population_crosses_allocated_rows_at_first_overflow";
+const MEMORY_TABLE_NAME: &str = "rw_mem_check.last_access";
+const MEMORY_TABLE_TRACE_SOURCE: &str = "prover.rw_mem_check.last_access";
+const MEMORY_TABLE_FAILURE_MANIFESTATION: &str = "capacity_write_out_of_bounds";
 
-#[derive(Debug, Clone)]
-struct WitnessInjectionPlan {
-    kind: String,
-    step: u64,
-}
+pub const NEXUS_ORDINARY_MAX_INSTRUCTIONS: usize = 1 << 10;
+pub const NEXUS_ORDINARY_MAX_INSTRUCTIONS_ARG: &str = "1024";
+pub const NEXUS_ORDINARY_PRECHECK_MAX_STEPS_ARG: &str = "1024";
+const CAPACITY_CONTROL_STORE_COUNT: usize = 1 << 7;
+const CAPACITY_CROSSING_STORE_COUNT: usize = 1 << 9;
+const ORDINARY_CAPACITY_CARRIER_COUNT: usize = 3;
+const ORDINARY_CAPACITY_CARRIER_MAX_WORDS: usize = CAPACITY_CROSSING_STORE_COUNT + 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunResponse {
@@ -63,8 +38,9 @@ pub struct RunResponse {
     pub bucket_hits: Vec<BucketHit>,
     pub trace_signals: Vec<TraceSignal>,
     pub backend_error: Option<String>,
-    pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pub injection_applied: bool,
+    pub executed_exception_receipt: Option<ExecutedExceptionReceipt>,
+    pub production_resource: Option<Value>,
 }
 
 fn panic_payload_to_string(p: &(dyn std::any::Any + Send)) -> String {
@@ -88,112 +64,6 @@ where
     res
 }
 
-fn record_site(sites: &mut BTreeMap<String, Vec<u64>>, kind: &str, step: u64) {
-    let steps = sites.entry(kind.to_string()).or_default();
-    if steps.last().copied() != Some(step) {
-        steps.push(step);
-    }
-}
-
-fn is_i_alu_mnemonic(mnemonic: &str) -> bool {
-    matches!(
-        mnemonic,
-        "addi" | "slti" | "sltiu" | "xori" | "ori" | "andi" | "slli" | "srli" | "srai"
-    )
-}
-
-fn is_shift_mnemonic(mnemonic: &str) -> bool {
-    matches!(mnemonic, "sll" | "slli" | "srl" | "srli" | "sra" | "srai")
-}
-
-fn is_comparison_mnemonic(mnemonic: &str) -> bool {
-    matches!(mnemonic, "slt" | "slti" | "sltu" | "sltiu")
-}
-
-fn is_supported_sub_borrow_mnemonic(mnemonic: &str) -> bool {
-    matches!(mnemonic, "sub" | "slt" | "slti" | "sltu" | "sltiu")
-}
-
-fn is_format_imm_mnemonic(mnemonic: &str) -> bool {
-    matches!(mnemonic, "sb" | "sh" | "sw" | "beq" | "bne" | "blt" | "bge" | "bltu" | "bgeu" | "jal")
-}
-
-fn collect_observed_injection_sites(trace: &UniformTrace) -> BTreeMap<String, Vec<u64>> {
-    let mut sites = BTreeMap::<String, Vec<u64>>::new();
-    let mut flat_step = 0u64;
-    for block in &trace.blocks {
-        for step in &block.steps {
-            if let Some(decoded) = RV32IMInstruction::decode_with_pc(step.raw_instruction, step.pc)
-            {
-                let mnemonic = decoded.mnemonic.as_str();
-                record_site(&mut sites, FIELD_RANGE_INJECT_KIND, flat_step);
-                record_site(&mut sites, OP_SELECTOR_INJECT_KIND, flat_step);
-                record_site(&mut sites, OPERAND_ROUTING_INJECT_KIND, flat_step);
-                if decoded.rd.is_some() {
-                    record_site(&mut sites, ZERO_REG_INJECT_KIND, flat_step);
-                    record_site(&mut sites, DEST_BINDING_INJECT_KIND, flat_step);
-                }
-                if decoded.imm.is_some() {
-                    record_site(&mut sites, IMM_SIGNEXT_INJECT_KIND, flat_step);
-                }
-                if matches!(mnemonic, "lui" | "auipc") {
-                    record_site(&mut sites, UPPER_IMM_INJECT_KIND, flat_step);
-                }
-                if is_format_imm_mnemonic(mnemonic) {
-                    record_site(&mut sites, FORMAT_IMM_INJECT_KIND, flat_step);
-                }
-                if is_i_alu_mnemonic(mnemonic) {
-                    record_site(&mut sites, ALU_IMM_INJECT_KIND, flat_step);
-                }
-                if is_shift_mnemonic(mnemonic) {
-                    record_site(&mut sites, SHIFT_INJECT_KIND, flat_step);
-                }
-                if is_comparison_mnemonic(mnemonic) {
-                    record_site(&mut sites, CMP_BOOL_INJECT_KIND, flat_step);
-                    record_site(&mut sites, CMP_AUX_INJECT_KIND, flat_step);
-                }
-                if is_supported_sub_borrow_mnemonic(mnemonic) {
-                    record_site(&mut sites, SUB_BORROW_INJECT_KIND, flat_step);
-                }
-                record_site(&mut sites, CONTROL_FLOW_INJECT_KIND, flat_step);
-                if mnemonic == "ecall" {
-                    record_site(&mut sites, ECALL_WORD_INJECT_KIND, flat_step);
-                }
-                if flat_step == 0 {
-                    record_site(&mut sites, ENTRYPOINT_INJECT_KIND, flat_step);
-                    record_site(&mut sites, TIME_BOUNDARY_INJECT_KIND, flat_step);
-                }
-            }
-            if step
-                .memory_records
-                .iter()
-                .any(|record| matches!(record, MemoryRecord::StoreRecord(_, _)))
-            {
-                record_site(&mut sites, WRITE_PAYLOAD_INJECT_KIND, flat_step);
-                record_site(&mut sites, FLOW_PAYLOAD_INJECT_KIND, flat_step);
-            }
-            if step.memory_records.iter().any(|record| {
-                matches!(record, MemoryRecord::StoreRecord(_, _) | MemoryRecord::LoadRecord(_, _))
-            }) {
-                record_site(&mut sites, KIND_SELECTOR_INJECT_KIND, flat_step);
-                record_site(&mut sites, ADDRESS_ALIGNMENT_INJECT_KIND, flat_step);
-                record_site(&mut sites, ADDRESS_POINTER_INJECT_KIND, flat_step);
-                record_site(&mut sites, ADDRESS_PROGRESSION_INJECT_KIND, flat_step);
-                record_site(&mut sites, TIME_MONOTONIC_INJECT_KIND, flat_step);
-            }
-            if step
-                .memory_records
-                .iter()
-                .any(|record| matches!(record, MemoryRecord::LoadRecord(_, _)))
-            {
-                record_site(&mut sites, LOAD_VALUE_INJECT_KIND, flat_step);
-            }
-            flat_step = flat_step.saturating_add(1);
-        }
-    }
-    sites
-}
-
 fn read_prover_injection_applied() -> bool {
     std::env::var(BEAK_NEXUS_INJECTION_APPLIED_ENV).ok().as_deref() == Some("true")
 }
@@ -202,11 +72,7 @@ fn arm_prover_injection_env(inject_kind: Option<&str>, inject_step: u64) -> EnvR
     let previous_kind = std::env::var(BEAK_NEXUS_INJECT_KIND_ENV).ok();
     let previous_step = std::env::var(BEAK_NEXUS_INJECT_STEP_ENV).ok();
     let previous_applied = std::env::var(BEAK_NEXUS_INJECTION_APPLIED_ENV).ok();
-    let previous_flow = BEAK_NEXUS_STORE_LOAD_FLOW_ENV.map(|key| std::env::var(key).ok());
     std::env::remove_var(BEAK_NEXUS_INJECTION_APPLIED_ENV);
-    for key in BEAK_NEXUS_STORE_LOAD_FLOW_ENV {
-        std::env::remove_var(key);
-    }
     if let Some(kind) = inject_kind {
         std::env::set_var(BEAK_NEXUS_INJECT_KIND_ENV, kind);
         std::env::set_var(BEAK_NEXUS_INJECT_STEP_ENV, inject_step.to_string());
@@ -214,14 +80,13 @@ fn arm_prover_injection_env(inject_kind: Option<&str>, inject_step: u64) -> EnvR
         std::env::remove_var(BEAK_NEXUS_INJECT_KIND_ENV);
         std::env::remove_var(BEAK_NEXUS_INJECT_STEP_ENV);
     }
-    EnvRestore { previous_kind, previous_step, previous_applied, previous_flow }
+    EnvRestore { previous_kind, previous_step, previous_applied }
 }
 
 struct EnvRestore {
     previous_kind: Option<String>,
     previous_step: Option<String>,
     previous_applied: Option<String>,
-    previous_flow: [Option<String>; 3],
 }
 
 impl EnvRestore {
@@ -229,9 +94,6 @@ impl EnvRestore {
         restore_env(BEAK_NEXUS_INJECT_KIND_ENV, self.previous_kind);
         restore_env(BEAK_NEXUS_INJECT_STEP_ENV, self.previous_step);
         restore_env(BEAK_NEXUS_INJECTION_APPLIED_ENV, self.previous_applied);
-        for (key, value) in BEAK_NEXUS_STORE_LOAD_FLOW_ENV.into_iter().zip(self.previous_flow) {
-            restore_env(key, value);
-        }
     }
 }
 
@@ -240,6 +102,19 @@ fn restore_env(key: &str, value: Option<String>) {
         std::env::set_var(key, value);
     } else {
         std::env::remove_var(key);
+    }
+}
+
+fn append_memory_table_boundary_receipt(
+    hits: &mut Vec<BucketHit>,
+    inject_kind: Option<&str>,
+    raw_receipt: Option<&str>,
+) {
+    if inject_kind.is_some() {
+        return;
+    }
+    if let Some(hit) = raw_receipt.and_then(memory_table_boundary_hit_from_receipt) {
+        hits.push(hit);
     }
 }
 
@@ -264,15 +139,24 @@ pub fn run_backend_once(
     inject_kind: Option<&str>,
     inject_step: u64,
 ) -> Result<RunResponse, String> {
+    if inject_kind.is_some() {
+        return Err(
+            "semantic injection is intentionally unsupported for the vulnerable Nexus MemorySize snapshot"
+                .to_string(),
+        );
+    }
     let final_regs = execute_final_regs(words)?;
 
     let program = nexus_vm::riscv::decode_instructions(words);
     let (view, trace) = nexus_vm::trace::k_trace_direct(&program.blocks, 1)
         .map_err(|e| format!("nexus k_trace_direct failed: {e}"))?;
 
-    let observed_injection_sites = collect_observed_injection_sites(&trace);
     let derived = NexusTrace::from_words_and_uniform_trace(words, &trace);
     let env_restore = arm_prover_injection_env(inject_kind, inject_step);
+    let previous_boundary_receipt = std::env::var_os(MEMORY_TABLE_BOUNDARY_RECEIPT_ENV);
+    let previous_exception_receipt = std::env::var_os(EXECUTED_EXCEPTION_RECEIPT_ENV);
+    std::env::remove_var(MEMORY_TABLE_BOUNDARY_RECEIPT_ENV);
+    std::env::remove_var(EXECUTED_EXCEPTION_RECEIPT_ENV);
     let backend_error = match catch_unwind_nonfatal(std::panic::AssertUnwindSafe(|| {
         match nexus_vm_prover::prove(&trace, &view) {
             Ok(proof) => nexus_vm_prover::verify(proof, &view)
@@ -285,34 +169,83 @@ pub fn run_backend_once(
         Err(payload) => Some(panic_payload_to_string(&*payload)),
     };
     let injection_applied = read_prover_injection_applied();
+    let boundary_receipt = std::env::var(MEMORY_TABLE_BOUNDARY_RECEIPT_ENV).ok();
+    let executed_exception_receipt = std::env::var(EXECUTED_EXCEPTION_RECEIPT_ENV)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<ExecutedExceptionReceipt>(&raw).ok());
+    if let Some(previous) = previous_boundary_receipt {
+        std::env::set_var(MEMORY_TABLE_BOUNDARY_RECEIPT_ENV, previous);
+    } else {
+        std::env::remove_var(MEMORY_TABLE_BOUNDARY_RECEIPT_ENV);
+    }
+    if let Some(previous) = previous_exception_receipt {
+        std::env::set_var(EXECUTED_EXCEPTION_RECEIPT_ENV, previous);
+    } else {
+        std::env::remove_var(EXECUTED_EXCEPTION_RECEIPT_ENV);
+    }
     env_restore.restore();
+    let mut bucket_hits = derived.bucket_hits().to_vec();
+    append_memory_table_boundary_receipt(
+        &mut bucket_hits,
+        inject_kind,
+        boundary_receipt.as_deref(),
+    );
 
     Ok(RunResponse {
         final_regs: Some(final_regs),
         micro_op_count: derived.step_count(),
-        bucket_hits: derived.bucket_hits().to_vec(),
+        bucket_hits,
         trace_signals: derived.trace_signals().to_vec(),
         backend_error,
-        observed_injection_sites,
         injection_applied,
+        executed_exception_receipt,
+        production_resource: None,
     })
+}
+
+#[cfg(test)]
+mod baseline_receipt_routing_tests {
+    use beak_core::fuzz::benchmark::BenchmarkBackend;
+
+    use super::{append_memory_table_boundary_receipt, NexusBackend};
+
+    const VALID: &str = r#"{"schema_version":1,"relation":"last_access_population_crosses_allocated_rows_at_first_overflow","table_name":"rw_mem_check.last_access","population_rows":23,"allocated_rows":16,"public_rows":8,"boundary_k":4,"crossing_row_idx":16,"overflow_rows":7,"exact_crossing":true,"failing_table_row_idx":16,"failing_address":64,"last_access_timestamp":16,"last_value":0}"#;
+
+    #[test]
+    fn routes_only_valid_non_injected_memory_boundary_receipts() {
+        let mut hits = Vec::new();
+        append_memory_table_boundary_receipt(&mut hits, None, Some(VALID));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].details["cell_id"], "pd3.mem_table");
+
+        let mut injected = Vec::new();
+        append_memory_table_boundary_receipt(
+            &mut injected,
+            Some("nexus.semantic.any"),
+            Some(VALID),
+        );
+        assert!(injected.is_empty());
+
+        let mut malformed = Vec::new();
+        append_memory_table_boundary_receipt(&mut malformed, None, Some("{}"));
+        assert!(malformed.is_empty());
+    }
+
+    #[test]
+    fn baseline_snapshot_exposes_no_semantic_injection_route() {
+        let mut backend = NexusBackend::new(8);
+        assert!(backend.arm_semantic_injection("nexus.semantic.unsupported", 0).is_err());
+    }
 }
 
 pub struct NexusBackend {
     max_instructions: usize,
     eval: BackendEval,
-    last_observed_injection_sites: BTreeMap<String, Vec<u64>>,
-    pending_injection: Option<WitnessInjectionPlan>,
 }
 
 impl NexusBackend {
     pub fn new(max_instructions: usize) -> Self {
-        Self {
-            max_instructions,
-            eval: BackendEval::default(),
-            last_observed_injection_sites: BTreeMap::new(),
-            pending_injection: None,
-        }
+        Self { max_instructions, eval: BackendEval::default() }
     }
 }
 
@@ -326,23 +259,18 @@ impl BenchmarkBackend for NexusBackend {
 
     fn prepare_for_run(&mut self, _rng_seed: u64) {
         self.eval = BackendEval::default();
-        self.last_observed_injection_sites.clear();
     }
 
     fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
         self.eval = BackendEval::default();
-        let resp = run_backend_once(
-            words,
-            self.pending_injection.as_ref().map(|p| p.kind.as_str()),
-            self.pending_injection.as_ref().map(|p| p.step).unwrap_or(0),
-        )?;
-        self.last_observed_injection_sites = resp.observed_injection_sites;
+        let resp = run_backend_once(words, None, 0)?;
         self.eval.final_regs = resp.final_regs;
         self.eval.micro_op_count = resp.micro_op_count;
         self.eval.bucket_hits = resp.bucket_hits;
         self.eval.trace_signals = resp.trace_signals;
         self.eval.backend_error = resp.backend_error;
         self.eval.semantic_injection_applied = resp.injection_applied;
+        self.eval.executed_exception_receipt = resp.executed_exception_receipt;
         resp.final_regs.ok_or_else(|| "nexus backend returned no final_regs".to_string())
     }
 
@@ -350,120 +278,48 @@ impl BenchmarkBackend for NexusBackend {
         self.eval.clone()
     }
 
-    fn clear_semantic_injection(&mut self) {
-        self.pending_injection = None;
+    fn clear_semantic_injection(&mut self) {}
+
+    fn arm_semantic_injection(&mut self, _kind: &str, _step: u64) -> Result<(), String> {
+        Err(
+            "semantic injection is intentionally unsupported for the vulnerable Nexus MemorySize snapshot"
+                .to_string(),
+        )
     }
 
-    fn arm_semantic_injection(&mut self, kind: &str, step: u64) -> Result<(), String> {
-        self.pending_injection = Some(WitnessInjectionPlan { kind: kind.to_string(), step });
-        Ok(())
-    }
-
-    fn semantic_injection_candidates(&self, hits: &[BucketHit]) -> Vec<SemanticInjectionCandidate> {
-        hits.iter().filter_map(candidate_from_hit).collect()
+    fn semantic_injection_candidates(
+        &self,
+        _hits: &[BucketHit],
+    ) -> Vec<SemanticInjectionCandidate> {
+        Vec::new()
     }
 }
 
-fn candidate_from_hit(hit: &BucketHit) -> Option<SemanticInjectionCandidate> {
-    let mnemonic = detail_str(hit, "mnemonic");
-    let (inject_kind, semantic_class) = match hit.bucket_id.as_str() {
-        "sem.decode.zero_register_immutability" => {
-            (ZERO_REG_INJECT_KIND, "semantic.decode.zero_register_immutability")
+#[cfg(test)]
+mod mem_bomb_probe {
+    // Regression: a fuzzed non-terminating program (zero-offset taken branch) must fail
+    // with a catchable step-budget panic instead of growing emulator trace buffers until
+    // the process aborts on an uncatchable allocation failure.
+    #[test]
+    fn non_terminating_program_fails_at_step_budget() {
+        let words: Vec<u32> = [
+            0x00c00313u32, 0x00000393, 0x00002697, 0xd5568693, 0x00168703, 0x00070313,
+            0xff000393, 0x00731063, 0x00138393, 0x00200293, 0x00539063,
+        ]
+        .to_vec();
+        let prev = std::env::var_os("BEAK_NEXUS_EXECUTE_STEP_BUDGET");
+        std::env::set_var("BEAK_NEXUS_EXECUTE_STEP_BUDGET", "10000");
+        let result = std::panic::catch_unwind(|| super::execute_final_regs(&words));
+        match &prev {
+            Some(value) => std::env::set_var("BEAK_NEXUS_EXECUTE_STEP_BUDGET", value),
+            None => std::env::remove_var("BEAK_NEXUS_EXECUTE_STEP_BUDGET"),
         }
-        "sem.decode.operand_index_routing" => {
-            (OPERAND_ROUTING_INJECT_KIND, "semantic.decode.operand_index_routing")
-        }
-        "sem.exec.dest_binding" => (DEST_BINDING_INJECT_KIND, "semantic.exec.dest_binding"),
-        "sem.decode.field_range" => (FIELD_RANGE_INJECT_KIND, "semantic.decode.field_range"),
-        "sem.decode.immediate_sign_extension" => {
-            (IMM_SIGNEXT_INJECT_KIND, "semantic.decode.immediate_sign_extension")
-        }
-        "sem.decode.upper_immediate_materialization" => {
-            (UPPER_IMM_INJECT_KIND, "semantic.decode.upper_immediate_materialization")
-        }
-        "sem.decode.format_immediate_reassembly" => {
-            (FORMAT_IMM_INJECT_KIND, "semantic.decode.format_immediate_reassembly")
-        }
-        "sem.exec.op_selector_binding" => {
-            (OP_SELECTOR_INJECT_KIND, "semantic.exec.op_selector_binding")
-        }
-        "sem.alu.immediate_limb_consistency" => {
-            (ALU_IMM_INJECT_KIND, "semantic.alu.immediate_limb_consistency")
-        }
-        "sem.alu.shift_mod32" if mnemonic.is_some_and(is_shift_mnemonic) => {
-            (SHIFT_INJECT_KIND, "semantic.alu.shift_mod32")
-        }
-        "sem.alu.comparison_booleanity" if mnemonic.is_some_and(is_comparison_mnemonic) => {
-            (CMP_BOOL_INJECT_KIND, "semantic.alu.comparison_booleanity")
-        }
-        "sem.alu.subtraction_borrow_chain"
-            if mnemonic.is_some_and(is_supported_sub_borrow_mnemonic) =>
-        {
-            (SUB_BORROW_INJECT_KIND, "semantic.alu.subtraction_borrow_chain")
-        }
-        "sem.alu.comparison_auxiliary_chain" if mnemonic.is_some_and(is_comparison_mnemonic) => {
-            (CMP_AUX_INJECT_KIND, "semantic.alu.comparison_auxiliary_chain")
-        }
-        "sem.exec.control_flow_binding" => {
-            (CONTROL_FLOW_INJECT_KIND, "semantic.exec.control_flow_binding")
-        }
-        "sem.control.entrypoint_binding" => {
-            (ENTRYPOINT_INJECT_KIND, "semantic.control.entrypoint_binding")
-        }
-        "sem.control.ecall_word_validity" => {
-            (ECALL_WORD_INJECT_KIND, "semantic.control.ecall_word_validity")
-        }
-        "sem.time.boundary_origin_consistency" => {
-            (TIME_BOUNDARY_INJECT_KIND, "semantic.time.boundary_origin_consistency")
-        }
-        "sem.memory.address_alignment_consistency" => {
-            (ADDRESS_ALIGNMENT_INJECT_KIND, "semantic.memory.address_alignment_consistency")
-        }
-        "sem.memory.load_value_binding" => {
-            (LOAD_VALUE_INJECT_KIND, "semantic.memory.load_value_binding")
-        }
-        "sem.memory.address_boundary_range" => {
-            (ADDRESS_POINTER_INJECT_KIND, "semantic.memory.address_boundary_range")
-        }
-        "sem.memory.address_progression_consistency" => {
-            (ADDRESS_PROGRESSION_INJECT_KIND, "semantic.memory.address_progression_consistency")
-        }
-        "sem.time.monotonic_access_ordering" => {
-            (TIME_MONOTONIC_INJECT_KIND, "semantic.time.monotonic_access_ordering")
-        }
-        "sem.memory.store_load_payload_flow" => {
-            (FLOW_PAYLOAD_INJECT_KIND, "semantic.memory.write_payload_flow_consistency")
-        }
-        "sem.memory.write_payload_consistency" => {
-            (WRITE_PAYLOAD_INJECT_KIND, "semantic.memory.write_payload_flow_consistency")
-        }
-        "sem.memory.kind_selector_consistency" => {
-            (KIND_SELECTOR_INJECT_KIND, "semantic.memory.kind_selector_consistency")
-        }
-        "sem.row.table_power2_boundary" => {
-            // Bucket-only for now: Nexus RamInitFinal table sizing has no safe witness hook yet.
-            return None;
-        }
-        _ => return None,
-    };
-    let step = detail_u64(hit, "store_step_idx")
-        .or_else(|| detail_u64(hit, "op_idx"))
-        .or_else(|| detail_u64(hit, "step_idx"))?;
-    Some(SemanticInjectionCandidate {
-        bucket_id: hit.bucket_id.clone(),
-        trigger_signal_id: None,
-        semantic_class: semantic_class.to_string(),
-        inject_kind: inject_kind.to_string(),
-        schedule: InjectionSchedule::Exact(step),
-    })
-}
-
-fn detail_str<'a>(hit: &'a BucketHit, key: &str) -> Option<&'a str> {
-    hit.details.get(key).and_then(|value| value.as_str())
-}
-
-fn detail_u64(hit: &BucketHit, key: &str) -> Option<u64> {
-    hit.details.get(key).and_then(|value| {
-        value.as_u64().or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
-    })
+        let err = result.expect_err("non-terminating program must not execute cleanly");
+        let msg = err
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default();
+        assert!(msg.contains("execute step budget"), "unexpected payload: {msg}");
+    }
 }

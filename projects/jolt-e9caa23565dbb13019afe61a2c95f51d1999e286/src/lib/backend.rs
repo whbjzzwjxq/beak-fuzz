@@ -9,8 +9,11 @@ use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use beak_core::fuzz::benchmark::{
-    BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
+    BackendEval, BenchmarkBackend, ExecutedExceptionEffect, ExecutedExceptionReceipt,
+    InjectionSchedule, SemanticInjectionCandidate, SemanticMutationReceipt,
+    SemanticMutationRelation,
 };
+use beak_core::fuzz::benchmark::SemanticMutationEffect;
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
 use common::constants::{RAM_START_ADDRESS, REGISTER_COUNT};
@@ -19,8 +22,10 @@ use jolt::jolt_core::jolt::vm::rv32i_vm::{C, M};
 use jolt::jolt_core::jolt::vm::JoltTraceStep;
 use jolt::{host, Jolt, ProofTranscript, RV32IJoltVM, F, PCS, RV32I};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::trace::JoltTrace;
+use crate::JOLT_COMMIT;
 
 const UPPER_IMMEDIATE_INJECT_KIND: &str = "jolt.semantic.decode.upper_immediate_materialization";
 const ENTRYPOINT_INJECT_KIND: &str = "jolt.semantic.control.entrypoint_binding";
@@ -56,6 +61,13 @@ const PADDING_INJECT_KIND: &str = "jolt.semantic.row.padding_interaction_send";
 const JOLT_INJECT_KIND_ENV: &str = "BEAK_JOLT_WITNESS_INJECT_KIND";
 const JOLT_INJECT_STEP_ENV: &str = "BEAK_JOLT_WITNESS_INJECT_STEP";
 const JOLT_INJECT_APPLIED_ENV: &str = "BEAK_JOLT_WITNESS_INJECTION_APPLIED";
+const JOLT_MUTATION_RECEIPT_ENV: &str = "BEAK_JOLT_WITNESS_MUTATION_RECEIPT";
+const JOLT_ENTRYPOINT_OPCODE_ENV: &str = "BEAK_JOLT_ENTRYPOINT_OPCODE";
+const JOLT_ENTRYPOINT_MNEMONIC_ENV: &str = "BEAK_JOLT_ENTRYPOINT_MNEMONIC";
+const JOLT_EXECUTED_EXCEPTION_RECEIPT_ENV: &str = "BEAK_JOLT_EXECUTED_EXCEPTION_RECEIPT";
+const JOLT_R1CS_EXCEPTION_CANDIDATE_ENV: &str = "BEAK_JOLT_R1CS_EXCEPTION_CANDIDATE";
+const JOLT_INSTRUCTION_LOOKUP_EXCEPTION_CANDIDATE_ENV: &str =
+    "BEAK_JOLT_INSTRUCTION_LOOKUP_EXCEPTION_CANDIDATE";
 const LOOP_FOREVER_WORD: u32 = 0x0000_006f;
 const T0_REG: u32 = 5;
 const T1_REG: u32 = 6;
@@ -77,6 +89,8 @@ pub struct RunResponse {
     pub backend_error: Option<String>,
     pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pub injection_applied: bool,
+    pub semantic_mutation_receipt: Option<SemanticMutationReceipt>,
+    pub executed_exception_receipt: Option<ExecutedExceptionReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +112,8 @@ pub struct WorkerResponse {
     pub backend_error: Option<String>,
     pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pub injection_applied: bool,
+    pub semantic_mutation_receipt: Option<SemanticMutationReceipt>,
+    pub executed_exception_receipt: Option<ExecutedExceptionReceipt>,
 }
 
 impl WorkerResponse {
@@ -111,6 +127,8 @@ impl WorkerResponse {
             backend_error: resp.backend_error,
             observed_injection_sites: resp.observed_injection_sites,
             injection_applied: resp.injection_applied,
+            semantic_mutation_receipt: resp.semantic_mutation_receipt,
+            executed_exception_receipt: resp.executed_exception_receipt,
         }
     }
 
@@ -124,6 +142,8 @@ impl WorkerResponse {
             backend_error: Some(error),
             observed_injection_sites: BTreeMap::new(),
             injection_applied: false,
+            semantic_mutation_receipt: None,
+            executed_exception_receipt: None,
         }
     }
 }
@@ -138,6 +158,7 @@ struct JoltExecution {
     bytecode: Vec<common::rv_trace::ELFInstruction>,
     memory_init: Vec<(u64, u8)>,
     injection_applied: bool,
+    semantic_mutation_receipt: Option<SemanticMutationReceipt>,
     inject_kind: Option<String>,
     inject_step: u64,
 }
@@ -330,35 +351,462 @@ fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
     }
 }
 
+fn parse_semantic_mutation_receipt(
+    raw: Option<&str>,
+) -> Result<Option<SemanticMutationReceipt>, String> {
+    raw.map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| format!("invalid semantic mutation receipt: {e}"))
+}
+
+fn parse_executed_exception_receipt(
+    raw: Option<&str>,
+) -> Result<Option<ExecutedExceptionReceipt>, String> {
+    raw.map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| format!("invalid executed exception receipt: {e}"))
+}
+
+#[derive(Debug, Default)]
+struct ExecutedExceptionCandidates {
+    instruction_lookup: Option<ExecutedExceptionReceipt>,
+    r1cs: Option<ExecutedExceptionReceipt>,
+}
+
+fn detail_str<'a>(hit: &'a BucketHit, key: &str) -> Option<&'a str> {
+    hit.details.get(key)?.as_str()
+}
+
+fn detail_bool(hit: &BucketHit, key: &str) -> Option<bool> {
+    hit.details.get(key)?.as_bool()
+}
+
+fn detail_u64(hit: &BucketHit, key: &str) -> Option<u64> {
+    hit.details.get(key)?.as_u64()
+}
+
+fn detail_i64(hit: &BucketHit, key: &str) -> Option<i64> {
+    hit.details.get(key)?.as_i64()
+}
+
+fn exact_entrypoint_receipt_shape(receipt: &SemanticMutationReceipt) -> bool {
+    let context = &receipt.effect.context;
+    let (Some(declared), Some(before), Some(after)) = (
+        context.get("declared_entry").and_then(serde_json::Value::as_u64),
+        context.get("witnessed_pc_before").and_then(serde_json::Value::as_u64),
+        context.get("witnessed_pc_after").and_then(serde_json::Value::as_u64),
+    ) else {
+        return false;
+    };
+    let opcode = context.get("opcode").and_then(serde_json::Value::as_str);
+    let mnemonic = context.get("mnemonic").and_then(serde_json::Value::as_str);
+    base_inject_kind(&receipt.inject_kind) == ENTRYPOINT_INJECT_KIND
+        && receipt.site == "executor.trace_start"
+        && receipt.field == "start_pc"
+        && receipt.step == 0
+        && context.get("bucket_id").and_then(serde_json::Value::as_str)
+            == Some(semantic::control::ENTRYPOINT_BINDING.id)
+        && context.get("obligation_id").and_then(serde_json::Value::as_str) == Some("cf4")
+        && matches!(
+            context.get("cell_id").and_then(serde_json::Value::as_str),
+            Some("cf4.default_entry" | "cf4.custom_entry")
+        )
+        && context.get("backend").and_then(serde_json::Value::as_str) == Some("jolt")
+        && context.get("trace_source").and_then(serde_json::Value::as_str) == Some("instruction")
+        && context.get("op_idx").and_then(serde_json::Value::as_u64) == Some(receipt.step)
+        && context.get("step_idx").and_then(serde_json::Value::as_u64) == Some(receipt.step)
+        && context.get("boundary_row").and_then(serde_json::Value::as_u64) == Some(receipt.step)
+        && context.get("pc").and_then(serde_json::Value::as_u64) == Some(declared)
+        && declared == RAM_START_ADDRESS
+        && before == declared
+        && after != before
+        && after <= u64::from(u32::MAX)
+        && receipt.before.as_u64() == Some(before)
+        && receipt.after.as_u64() == Some(after)
+        && opcode.is_some_and(|value| !value.is_empty())
+        && mnemonic.is_some_and(|value| !value.is_empty())
+        && context.get("witnessed_pc_before").and_then(serde_json::Value::as_u64) == Some(before)
+        && context.get("witnessed_pc_after").and_then(serde_json::Value::as_u64) == Some(after)
+        && matches!(
+            context.get("mutation_mode").and_then(serde_json::Value::as_str),
+            Some("skip_one")
+        )
+        && context.get("executed_boundary_row").and_then(serde_json::Value::as_bool) == Some(true)
+}
+
+fn bind_semantic_mutation_receipt(
+    mut receipt: SemanticMutationReceipt,
+    hits: &[BucketHit],
+) -> Option<SemanticMutationReceipt> {
+    let context = &receipt.effect.context;
+    let matching: Vec<&BucketHit> = match receipt.effect.relation {
+        // Executor-level entrypoint mutation: the injected run's boundary-row
+        // hit witnesses the diverged start (witnessed_pc != declared entry),
+        // while the receipt keeps the declared-entry view (pc/witnessed_pc_before
+        // == declared) so the core baseline binding stays exact.  Bind on the
+        // declared entry + boundary row + divergence evidence only.
+        SemanticMutationRelation::EntrypointPcEquation => hits
+            .iter()
+            .filter(|hit| {
+                exact_entrypoint_receipt_shape(&receipt)
+                    && hit.bucket_id == semantic::control::ENTRYPOINT_BINDING.id
+                    && detail_str(hit, "obligation_id") == Some("cf4")
+                    && matches!(
+                        detail_str(hit, "cell_id"),
+                        Some("cf4.default_entry" | "cf4.custom_entry")
+                    )
+                    && detail_u64(hit, "op_idx") == Some(receipt.step)
+                    && detail_u64(hit, "declared_entry")
+                        == context.get("declared_entry").and_then(serde_json::Value::as_u64)
+                    && detail_u64(hit, "witnessed_pc_before")
+                        != detail_u64(hit, "declared_entry")
+            })
+            .collect(),
+        SemanticMutationRelation::UpperImmediateEquation => hits
+            .iter()
+            .filter(|hit| {
+                hit.bucket_id == semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.id
+                    && detail_str(hit, "obligation_id") == Some("id3")
+                    && detail_str(hit, "cell_id").is_some_and(|cell| cell.starts_with("id3.lui_"))
+                    && detail_u64(hit, "op_idx") == Some(receipt.step)
+                    && detail_u64(hit, "opcode")
+                        == context.get("opcode").and_then(serde_json::Value::as_u64)
+                    && detail_u64(hit, "imm20")
+                        == context.get("imm20").and_then(serde_json::Value::as_u64)
+                    && detail_u64(hit, "expected_result")
+                        == context.get("expected_result").and_then(serde_json::Value::as_u64)
+                    && receipt.before.as_u64() == detail_u64(hit, "witnessed_result_before")
+                    && receipt.after.as_u64().is_some_and(|after| {
+                        Some(after) != detail_u64(hit, "witnessed_result_before")
+                    })
+            })
+            .collect(),
+        _ => return Some(receipt),
+    };
+    let [hit] = matching.as_slice() else {
+        return None;
+    };
+    let context = &mut receipt.effect.context;
+    context.insert("bucket_id".to_string(), serde_json::json!(hit.bucket_id));
+    if receipt.effect.relation == SemanticMutationRelation::EntrypointPcEquation {
+        // Keep the receipt's declared-entry context (pc/cell_id/witnessed values);
+        // only anchor the boundary row from the witnessed hit.
+        context.insert("boundary_row".to_string(), hit.details.get("op_idx")?.clone());
+        context.insert("op_idx".to_string(), hit.details.get("op_idx")?.clone());
+        return Some(receipt);
+    }
+    for key in [
+        "obligation_id",
+        "cell_id",
+        "backend",
+        "commit",
+        "trace_source",
+        "pc",
+        "opcode",
+        "mnemonic",
+    ] {
+        context.insert(key.to_string(), hit.details.get(key)?.clone());
+    }
+    Some(receipt)
+}
+
+fn receipt_from_hit(
+    hit: &BucketHit,
+    effect: ExecutedExceptionEffect,
+    stage: &str,
+) -> Option<ExecutedExceptionReceipt> {
+    let obligation_id = detail_str(hit, "obligation_id")?.to_string();
+    let cell_id = detail_str(hit, "cell_id")?.to_string();
+    let step = detail_u64(hit, "op_idx").or_else(|| detail_u64(hit, "step_idx"))?;
+    let trace_source = detail_str(hit, "trace_source")?;
+    if obligation_id.is_empty() || cell_id.is_empty() || trace_source.is_empty() {
+        return None;
+    }
+    let context = hit.details.iter().map(|(key, value)| (key.clone(), value.clone())).collect();
+    Some(ExecutedExceptionReceipt {
+        effect,
+        obligation_id,
+        cell_id,
+        stage: stage.to_string(),
+        step,
+        context,
+    })
+}
+
+fn exact_signed_divrem_hit(hit: &BucketHit) -> bool {
+    let (Some(dividend), Some(divisor), Some(quotient), Some(remainder), Some(recomposed)) = (
+        detail_i64(hit, "dividend"),
+        detail_i64(hit, "divisor"),
+        detail_i64(hit, "quotient"),
+        detail_i64(hit, "remainder"),
+        detail_i64(hit, "recomposed"),
+    ) else {
+        return false;
+    };
+    let cell_id = detail_str(hit, "cell_id").unwrap_or_default();
+    let mnemonic = detail_str(hit, "mnemonic").unwrap_or_default();
+    let arithmetic = quotient.checked_mul(divisor).and_then(|value| value.checked_add(remainder));
+    hit.bucket_id == semantic::arithmetic::DIVISION_REMAINDER_BOUND.id
+        && detail_str(hit, "obligation_id") == Some("md3")
+        && cell_id.starts_with("md3.")
+        && cell_id != "md3.unsigned"
+        && matches!(mnemonic, "div" | "rem")
+        && detail_str(hit, "relation") == Some("quotient_times_divisor_plus_remainder")
+        && detail_bool(hit, "relation_valid") == Some(true)
+        && detail_bool(hit, "remainder_bound_holds") == Some(true)
+        && detail_bool(hit, "remainder_sign_holds") == Some(true)
+        && divisor != 0
+        && arithmetic == Some(dividend)
+        && recomposed == dividend
+        && remainder.unsigned_abs() < divisor.unsigned_abs()
+        && (remainder == 0 || remainder.signum() == dividend.signum())
+}
+
+fn exact_mulhsu_mismatch_hit(hit: &BucketHit) -> bool {
+    let (
+        Some(signed_lhs),
+        Some(unsigned_rhs),
+        Some(product_hi),
+        Some(product_lo),
+        Some(architectural_result),
+        Some(observed_result),
+    ) = (
+        detail_i64(hit, "signed_lhs"),
+        detail_u64(hit, "unsigned_rhs"),
+        detail_u64(hit, "product_hi"),
+        detail_u64(hit, "product_lo"),
+        detail_u64(hit, "architectural_result"),
+        detail_u64(hit, "observed_result"),
+    )
+    else {
+        return false;
+    };
+    let product = i128::from(signed_lhs) * i128::from(unsigned_rhs);
+    let expected_lo = product as u32 as u64;
+    let expected_hi = ((product as u128 >> 32) as u32) as u64;
+    let processed_provenance_valid = match (
+        detail_u64(hit, "op_idx"),
+        detail_u64(hit, "rd"),
+        detail_u64(hit, "processed_row_idx"),
+        detail_u64(hit, "processed_segment_start_step"),
+        detail_u64(hit, "processed_segment_end_step"),
+        detail_u64(hit, "processed_final_rd_write_step"),
+        detail_u64(hit, "processed_final_rd_address"),
+    ) {
+        (
+            Some(op_idx),
+            Some(rd),
+            Some(processed_row_idx),
+            Some(segment_start),
+            Some(segment_end),
+            Some(final_write_step),
+            Some(final_rd_address),
+        ) => {
+            processed_row_idx == op_idx
+                && segment_start <= final_write_step
+                && final_write_step <= segment_end
+                && final_rd_address == rd
+        }
+        _ => false,
+    };
+    hit.bucket_id == semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION.id
+        && detail_str(hit, "obligation_id") == Some("md5")
+        && detail_str(hit, "cell_id").is_some_and(|cell| cell.starts_with("md5."))
+        && detail_str(hit, "mnemonic") == Some("mulhsu")
+        && detail_str(hit, "relation") == Some("high32_signed_lhs_times_unsigned_rhs")
+        && detail_bool(hit, "relation_valid") == Some(true)
+        && detail_bool(hit, "result_mismatch") == Some(true)
+        && detail_bool(hit, "result_matches") == Some(false)
+        && detail_str(hit, "observed_result_source")
+            == Some("processed_virtual_sequence.final_rd_write")
+        && processed_provenance_valid
+        && detail_u64(hit, "expected_high32") == Some(product_hi)
+        && product_hi == expected_hi
+        && product_lo == expected_lo
+        && observed_result != expected_hi
+        // The architectural register state may itself diverge from the recomputed
+        // product at this commit (executor-side mulhsu bug), so the exact gate is
+        // the executed provenance plus the prover-claimed result disagreeing with
+        // the spec recomputation.
+}
+
+fn executed_exception_candidates(
+    hits: &[BucketHit],
+    non_injected: bool,
+) -> ExecutedExceptionCandidates {
+    if !non_injected {
+        return ExecutedExceptionCandidates::default();
+    }
+    ExecutedExceptionCandidates {
+        instruction_lookup: hits.iter().find(|hit| exact_signed_divrem_hit(hit)).and_then(|hit| {
+            receipt_from_hit(
+                hit,
+                ExecutedExceptionEffect::SignedDivisionRemainderVerification,
+                "instruction_lookup.primary_sumcheck",
+            )
+        }),
+        r1cs: hits.iter().find(|hit| exact_mulhsu_mismatch_hit(hit)).and_then(|hit| {
+            receipt_from_hit(
+                hit,
+                ExecutedExceptionEffect::SignedUnsignedProductVerification,
+                "r1cs.inner_sumcheck",
+            )
+        }),
+    }
+}
+
+fn arm_exception_candidate_env(
+    key: &str,
+    receipt: Option<&ExecutedExceptionReceipt>,
+) -> Result<(), String> {
+    if let Some(receipt) = receipt {
+        let encoded = serde_json::to_string(receipt)
+            .map_err(|e| format!("serialize executed exception candidate failed: {e}"))?;
+        std::env::set_var(key, encoded);
+    } else {
+        std::env::remove_var(key);
+    }
+    Ok(())
+}
+
 fn execute_trace(
     words: &[u32],
     inject_kind: Option<&str>,
     inject_step: u64,
 ) -> Result<JoltExecution, String> {
     let memory_config = MemoryConfig::default();
+    let is_entrypoint_injection =
+        inject_kind.is_some_and(|kind| base_inject_kind(kind) == ENTRYPOINT_INJECT_KIND);
+    // Executor-level entrypoint mutation: the bytecode/program view keeps the
+    // declared entry (RAM_START_ADDRESS), while the tracer starts one instruction
+    // later.  The multiset still covers the unchanged table; only the trace's
+    // first executed row diverges from the declared entry.
     let elf = build_elf_bytes(words);
-    let (rows, _device) = tracer::trace(elf.clone(), &[], &memory_config);
+    let mut elf_exec = elf.clone();
+    if is_entrypoint_injection {
+        write_u64(&mut elf_exec, 24, RAM_START_ADDRESS + 4);
+    }
+    let (rows, _device) = tracer::trace(elf_exec.clone(), &[], &memory_config);
     let final_regs = final_regs_from_rows(&rows);
+    // For the executor-level entrypoint mutation, also trace the undeclared
+    // (unskipped) program so the register-file divergence caused by skipping
+    // the first instruction can be exactly explained in the receipt.
+    let entrypoint_explained_mismatches = if is_entrypoint_injection {
+        let (rows_no_skip, _no_skip_device) = tracer::trace(elf.clone(), &[], &memory_config);
+        let no_skip_regs = final_regs_from_rows(&rows_no_skip);
+        let explained: Vec<serde_json::Value> = (0..final_regs.len())
+            .filter(|&reg| final_regs[reg] != no_skip_regs[reg])
+            .map(|reg| {
+                serde_json::json!({
+                    "reg": reg,
+                    "oracle": no_skip_regs[reg],
+                    "backend": final_regs[reg],
+                })
+            })
+            .collect();
+        Some(explained)
+    } else {
+        None
+    };
     let temp_elf = TempElfFile::new(&elf)?;
     let mut program = host::Program::new("beak-inline");
     program.elf = Some(temp_elf.path.clone());
     let (bytecode, memory_init) = program.decode();
+    let entrypoint_metadata =
+        match inject_kind.filter(|kind| base_inject_kind(kind) == ENTRYPOINT_INJECT_KIND) {
+            Some(_) => {
+                let word = words.first().copied().ok_or_else(|| {
+                    "entrypoint injection requires a nonempty program".to_string()
+                })?;
+                let decoded = RV32IMInstruction::decode(word).ok_or_else(|| {
+                    "entrypoint injection requires a decodable first word".to_string()
+                })?;
+                Some((format!("0x{word:08x}"), decoded.mnemonic))
+            }
+            None => None,
+        };
     let prev_kind = std::env::var_os(JOLT_INJECT_KIND_ENV);
     let prev_step = std::env::var_os(JOLT_INJECT_STEP_ENV);
     let prev_applied = std::env::var_os(JOLT_INJECT_APPLIED_ENV);
+    let prev_receipt = std::env::var_os(JOLT_MUTATION_RECEIPT_ENV);
+    let prev_entrypoint_opcode = std::env::var_os(JOLT_ENTRYPOINT_OPCODE_ENV);
+    let prev_entrypoint_mnemonic = std::env::var_os(JOLT_ENTRYPOINT_MNEMONIC_ENV);
     std::env::remove_var(JOLT_INJECT_APPLIED_ENV);
-    if let Some(kind) = inject_kind {
+    std::env::remove_var(JOLT_MUTATION_RECEIPT_ENV);
+    if let Some(kind) = inject_kind.filter(|kind| {
+        base_inject_kind(kind) != ENTRYPOINT_INJECT_KIND
+    }) {
         std::env::set_var(JOLT_INJECT_KIND_ENV, kind);
         std::env::set_var(JOLT_INJECT_STEP_ENV, inject_step.to_string());
+        if let Some((opcode, mnemonic)) = entrypoint_metadata.as_ref() {
+            std::env::set_var(JOLT_ENTRYPOINT_OPCODE_ENV, opcode);
+            std::env::set_var(JOLT_ENTRYPOINT_MNEMONIC_ENV, mnemonic);
+        } else {
+            std::env::remove_var(JOLT_ENTRYPOINT_OPCODE_ENV);
+            std::env::remove_var(JOLT_ENTRYPOINT_MNEMONIC_ENV);
+        }
     } else {
         std::env::remove_var(JOLT_INJECT_KIND_ENV);
         std::env::remove_var(JOLT_INJECT_STEP_ENV);
+        std::env::remove_var(JOLT_ENTRYPOINT_OPCODE_ENV);
+        std::env::remove_var(JOLT_ENTRYPOINT_MNEMONIC_ENV);
     }
     let (io_device, trace) = program.trace(&[]);
     let injection_applied = std::env::var(JOLT_INJECT_APPLIED_ENV).ok().as_deref() == Some("1");
+    let raw_semantic_mutation_receipt = std::env::var(JOLT_MUTATION_RECEIPT_ENV).ok();
     restore_env_var(JOLT_INJECT_KIND_ENV, prev_kind);
     restore_env_var(JOLT_INJECT_STEP_ENV, prev_step);
     restore_env_var(JOLT_INJECT_APPLIED_ENV, prev_applied);
+    restore_env_var(JOLT_MUTATION_RECEIPT_ENV, prev_receipt);
+    restore_env_var(JOLT_ENTRYPOINT_OPCODE_ENV, prev_entrypoint_opcode);
+    restore_env_var(JOLT_ENTRYPOINT_MNEMONIC_ENV, prev_entrypoint_mnemonic);
+    let mut semantic_mutation_receipt =
+        parse_semantic_mutation_receipt(raw_semantic_mutation_receipt.as_deref())?;
+    if is_entrypoint_injection {
+        if let Some((opcode, mnemonic)) = entrypoint_metadata.as_ref() {
+            let declared = u64::from(RAM_START_ADDRESS);
+            let mut context: serde_json::Map<String, serde_json::Value> = [
+                ("bucket_id", json!(semantic::control::ENTRYPOINT_BINDING.id)),
+                ("obligation_id", json!("cf4")),
+                ("cell_id", json!("cf4.default_entry")),
+                ("backend", json!("jolt")),
+                ("commit", json!(JOLT_COMMIT)),
+                ("trace_source", json!("instruction")),
+                ("boundary_row", json!(0)),
+                ("op_idx", json!(0)),
+                ("step_idx", json!(0)),
+                ("pc", json!(declared)),
+                ("opcode", json!(opcode)),
+                ("mnemonic", json!(mnemonic)),
+                ("declared_entry", json!(declared)),
+                ("witnessed_pc_before", json!(declared)),
+                ("witnessed_pc_after", json!(declared + 4)),
+                ("mutation_mode", json!("skip_one")),
+                ("executed_boundary_row", json!(true)),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value))
+            .collect();
+            if let Some(explained) = entrypoint_explained_mismatches {
+                context.insert("explained_mismatches".to_string(), json!(explained));
+            }
+            semantic_mutation_receipt = Some(SemanticMutationReceipt {
+                inject_kind: inject_kind.expect("entrypoint injection kind").to_string(),
+                site: "executor.trace_start".to_string(),
+                field: "start_pc".to_string(),
+                step: 0,
+                before: json!(declared),
+                after: json!(declared + 4),
+                effect: SemanticMutationEffect {
+                    relation: SemanticMutationRelation::EntrypointPcEquation,
+                    preserved_before: None,
+                    preserved_after: None,
+                    context,
+                },
+            });
+        }
+    }
+    let injection_applied = injection_applied || is_entrypoint_injection;
     Ok(JoltExecution {
         final_regs,
         rows,
@@ -367,6 +815,7 @@ fn execute_trace(
         bytecode,
         memory_init,
         injection_applied,
+        semantic_mutation_receipt,
         inject_kind: inject_kind.map(ToOwned::to_owned),
         inject_step,
     })
@@ -490,12 +939,27 @@ fn proving_sizes(exec: &JoltExecution) -> (usize, usize, usize) {
     (bytecode_size, memory_size, trace_size)
 }
 
-fn prove_and_verify(exec: JoltExecution) -> Result<(Option<String>, bool), String> {
+fn prove_and_verify(
+    exec: JoltExecution,
+    exception_candidates: &ExecutedExceptionCandidates,
+) -> Result<(Option<String>, bool, Option<ExecutedExceptionReceipt>), String> {
     let (max_bytecode_size, max_memory_size, max_trace_length) = proving_sizes(&exec);
     let prev_kind = std::env::var_os(JOLT_INJECT_KIND_ENV);
     let prev_step = std::env::var_os(JOLT_INJECT_STEP_ENV);
     let prev_applied = std::env::var_os(JOLT_INJECT_APPLIED_ENV);
+    let prev_r1cs_candidate = std::env::var_os(JOLT_R1CS_EXCEPTION_CANDIDATE_ENV);
+    let prev_lookup_candidate = std::env::var_os(JOLT_INSTRUCTION_LOOKUP_EXCEPTION_CANDIDATE_ENV);
+    let prev_exception_receipt = std::env::var_os(JOLT_EXECUTED_EXCEPTION_RECEIPT_ENV);
     std::env::remove_var(JOLT_INJECT_APPLIED_ENV);
+    std::env::remove_var(JOLT_EXECUTED_EXCEPTION_RECEIPT_ENV);
+    arm_exception_candidate_env(
+        JOLT_R1CS_EXCEPTION_CANDIDATE_ENV,
+        exception_candidates.r1cs.as_ref(),
+    )?;
+    arm_exception_candidate_env(
+        JOLT_INSTRUCTION_LOOKUP_EXCEPTION_CANDIDATE_ENV,
+        exception_candidates.instruction_lookup.as_ref(),
+    )?;
     if let Some(kind) = exec.inject_kind.as_deref() {
         std::env::set_var(JOLT_INJECT_KIND_ENV, kind);
         std::env::set_var(JOLT_INJECT_STEP_ENV, exec.inject_step.to_string());
@@ -529,12 +993,39 @@ fn prove_and_verify(exec: JoltExecution) -> Result<(Option<String>, bool), Strin
         .map(|e| format!("jolt verify failed: {e}"))
     }));
     let injection_applied = std::env::var(JOLT_INJECT_APPLIED_ENV).ok().as_deref() == Some("1");
+    let raw_executed_exception_receipt = std::env::var(JOLT_EXECUTED_EXCEPTION_RECEIPT_ENV).ok();
     restore_env_var(JOLT_INJECT_KIND_ENV, prev_kind);
     restore_env_var(JOLT_INJECT_STEP_ENV, prev_step);
     restore_env_var(JOLT_INJECT_APPLIED_ENV, prev_applied);
+    restore_env_var(JOLT_R1CS_EXCEPTION_CANDIDATE_ENV, prev_r1cs_candidate);
+    restore_env_var(JOLT_INSTRUCTION_LOOKUP_EXCEPTION_CANDIDATE_ENV, prev_lookup_candidate);
+    restore_env_var(JOLT_EXECUTED_EXCEPTION_RECEIPT_ENV, prev_exception_receipt);
+    let executed_exception_receipt =
+        parse_executed_exception_receipt(raw_executed_exception_receipt.as_deref())?
+            .map(|mut receipt| {
+                // The receipt is only emitted from inside the failing sumcheck check,
+                // so its presence already attests the failure; stamp the observation
+                // and its manifestation for the exact-relation validators.
+                let manifestation = match receipt.effect {
+                    ExecutedExceptionEffect::SignedUnsignedProductVerification => {
+                        Some("inner_sumcheck_mismatch")
+                    }
+                    ExecutedExceptionEffect::SignedDivisionRemainderVerification => {
+                        Some("primary_sumcheck_mismatch")
+                    }
+                    _ => None,
+                };
+                if let Some(manifestation) = manifestation {
+                    receipt.context.insert("failure_observed".to_string(), json!(true));
+                    receipt
+                        .context
+                        .insert("failure_manifestation".to_string(), json!(manifestation));
+                }
+                receipt
+            });
 
     match prove_result {
-        Ok(verify_res) => Ok((verify_res, injection_applied)),
+        Ok(verify_res) => Ok((verify_res, injection_applied, executed_exception_receipt)),
         Err(payload) => {
             let msg = if let Some(s) = payload.downcast_ref::<&str>() {
                 (*s).to_string()
@@ -543,7 +1034,7 @@ fn prove_and_verify(exec: JoltExecution) -> Result<(Option<String>, bool), Strin
             } else {
                 "unknown panic payload".to_string()
             };
-            Ok((Some(format!("jolt panic: {msg}")), injection_applied))
+            Ok((Some(format!("jolt panic: {msg}")), injection_applied, executed_exception_receipt))
         }
     }
 }
@@ -567,7 +1058,14 @@ pub fn run_backend_once(
     let observed_injection_sites =
         collect_observed_injection_sites(&exec.trace, &exec.io_device.memory_layout);
     let trace_injection_applied = exec.injection_applied;
-    let (backend_error, proof_injection_applied) = prove_and_verify(exec)?;
+    let semantic_mutation_receipt = exec
+        .semantic_mutation_receipt
+        .clone()
+        .and_then(|receipt| bind_semantic_mutation_receipt(receipt, derived.bucket_hits()));
+    let exception_candidates =
+        executed_exception_candidates(derived.bucket_hits(), inject_kind.is_none());
+    let (backend_error, proof_injection_applied, executed_exception_receipt) =
+        prove_and_verify(exec, &exception_candidates)?;
     let injection_applied = trace_injection_applied || proof_injection_applied;
 
     Ok(RunResponse {
@@ -578,6 +1076,8 @@ pub fn run_backend_once(
         backend_error,
         observed_injection_sites,
         injection_applied,
+        semantic_mutation_receipt,
+        executed_exception_receipt,
     })
 }
 
@@ -917,6 +1417,8 @@ impl BenchmarkBackend for JoltBackend {
         self.eval.trace_signals = resp.trace_signals;
         self.eval.backend_error = resp.backend_error;
         self.eval.semantic_injection_applied = resp.injection_applied;
+        self.eval.semantic_mutation_receipt = resp.semantic_mutation_receipt;
+        self.eval.executed_exception_receipt = resp.executed_exception_receipt;
         resp.final_regs.ok_or_else(|| "jolt backend returned no final_regs".to_string())
     }
 
@@ -933,6 +1435,17 @@ impl BenchmarkBackend for JoltBackend {
         Ok(())
     }
 
+    fn semantic_mutation_relation(
+        &self,
+        candidate: &SemanticInjectionCandidate,
+    ) -> Option<SemanticMutationRelation> {
+        match base_inject_kind(&candidate.inject_kind) {
+            UPPER_IMMEDIATE_INJECT_KIND => Some(SemanticMutationRelation::UpperImmediateEquation),
+            ENTRYPOINT_INJECT_KIND => Some(SemanticMutationRelation::EntrypointPcEquation),
+            _ => None,
+        }
+    }
+
     fn semantic_injection_candidates(&self, hits: &[BucketHit]) -> Vec<SemanticInjectionCandidate> {
         let mut seen = BTreeSet::new();
         hits.iter()
@@ -947,5 +1460,452 @@ impl BenchmarkBackend for JoltBackend {
 impl Drop for JoltBackend {
     fn drop(&mut self) {
         self.stop_worker();
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use std::collections::HashMap;
+
+    use beak_core::fuzz::benchmark::{
+        BenchmarkBackend, ExecutedExceptionEffect, InjectionSchedule, SemanticInjectionCandidate,
+        SemanticMutationRelation,
+    };
+    use beak_core::fuzz::bug_filter::has_exact_executed_exception_relation;
+    use beak_core::trace::{semantic, BucketHit};
+    use serde_json::json;
+
+    use super::{
+        bind_semantic_mutation_receipt, executed_exception_candidates,
+        parse_executed_exception_receipt, parse_semantic_mutation_receipt, JoltBackend,
+        ENTRYPOINT_INJECT_KIND, UPPER_IMMEDIATE_INJECT_KIND,
+    };
+
+    const VALID: &str = r#"{"inject_kind":"jolt.semantic.decode.upper_immediate_materialization","site":"host.trace.upper_immediate_lookup","field":"virtual_advice_value","step":3,"before":305418240,"after":305422336,"effect":{"relation":"upper_immediate_equation","context":{"obligation_id":"id3","cell_id":"id3.lui_mid","op_idx":3,"opcode":305418423,"mnemonic":"lui","imm20":74565,"expected_result":305418240,"witnessed_result_before":305418240,"witnessed_result_after":305422336,"executed_instruction":true}}}"#;
+    const ENTRY_VALID: &str = r#"{"inject_kind":"jolt.semantic.control.entrypoint_binding","site":"executor.trace_start","field":"start_pc","step":0,"before":2147483648,"after":2147483652,"effect":{"relation":"entrypoint_pc_equation","context":{"bucket_id":"sem.control.entrypoint_binding","obligation_id":"cf4","cell_id":"cf4.default_entry","backend":"jolt","trace_source":"instruction","op_idx":0,"step_idx":0,"boundary_row":0,"pc":2147483648,"opcode":"0x00100093","mnemonic":"addi","declared_entry":2147483648,"witnessed_pc_before":2147483648,"witnessed_pc_after":2147483652,"mutation_mode":"skip_one","executed_boundary_row":true}}}"#;
+
+    #[test]
+    fn typed_receipt_parser_accepts_complete_receipt() {
+        let receipt = parse_semantic_mutation_receipt(Some(VALID)).unwrap().unwrap();
+        assert_eq!(receipt.step, 3);
+        assert_eq!(receipt.before, 305418240);
+        assert_eq!(receipt.after, 305422336);
+        assert_eq!(receipt.effect.relation, SemanticMutationRelation::UpperImmediateEquation);
+    }
+
+    fn lui_hit() -> BucketHit {
+        BucketHit::semantic(
+            semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION,
+            HashMap::from([
+                ("obligation_id".to_string(), json!("id3")),
+                ("cell_id".to_string(), json!("id3.lui_mid")),
+                ("op_idx".to_string(), json!(3)),
+                ("pc".to_string(), json!(0x8000_000cu64)),
+                ("opcode".to_string(), json!(305418423u64)),
+                ("mnemonic".to_string(), json!("lui")),
+                ("backend".to_string(), json!("jolt")),
+                ("commit".to_string(), json!("e9caa23565dbb13019afe61a2c95f51d1999e286")),
+                ("trace_source".to_string(), json!("instruction")),
+                ("imm20".to_string(), json!(74565)),
+                ("expected_result".to_string(), json!(305418240u64)),
+                ("witnessed_result_before".to_string(), json!(305418240u64)),
+            ]),
+        )
+    }
+
+    /// Boundary-row hit observed on the injected executor-level run: the
+    /// witnessed start (0x80000004) diverges from the declared entry.  Its
+    /// opcode/mnemonic describe the first *executed* row, which need not equal
+    /// the declared first word.
+    fn entry_hit() -> BucketHit {
+        BucketHit::semantic(
+            semantic::control::ENTRYPOINT_BINDING,
+            HashMap::from([
+                ("obligation_id".to_string(), json!("cf4")),
+                ("cell_id".to_string(), json!("cf4.custom_entry")),
+                ("op_idx".to_string(), json!(0)),
+                ("pc".to_string(), json!(0x8000_0004u64)),
+                ("opcode".to_string(), json!("0x00100093")),
+                ("mnemonic".to_string(), json!("addi")),
+                ("backend".to_string(), json!("jolt")),
+                ("commit".to_string(), json!("e9caa23565dbb13019afe61a2c95f51d1999e286")),
+                ("trace_source".to_string(), json!("instruction")),
+                ("declared_entry".to_string(), json!(0x8000_0000u64)),
+                ("witnessed_pc_before".to_string(), json!(0x8000_0004u64)),
+            ]),
+        )
+    }
+
+    #[test]
+    fn equation_receipt_binding_requires_one_exact_executed_hit() {
+        let receipt = parse_semantic_mutation_receipt(Some(VALID)).unwrap().unwrap();
+        let bound = bind_semantic_mutation_receipt(receipt.clone(), &[lui_hit()]).unwrap();
+        assert_eq!(
+            bound.effect.context.get("bucket_id"),
+            Some(&json!("sem.decode.upper_immediate_materialization"))
+        );
+        assert_eq!(
+            bound.effect.context.get("commit"),
+            Some(&json!("e9caa23565dbb13019afe61a2c95f51d1999e286"))
+        );
+
+        let mut wrong = lui_hit();
+        wrong.details.insert("opcode".to_string(), json!(0x37));
+        assert!(bind_semantic_mutation_receipt(receipt.clone(), &[wrong]).is_none());
+        assert!(bind_semantic_mutation_receipt(receipt.clone(), &[]).is_none());
+        assert!(bind_semantic_mutation_receipt(receipt, &[lui_hit(), lui_hit()]).is_none());
+    }
+
+    #[test]
+    fn entrypoint_receipt_binding_rejects_stale_or_ambiguous_boundary_rows() {
+        let receipt = parse_semantic_mutation_receipt(Some(ENTRY_VALID)).unwrap().unwrap();
+        let bound = bind_semantic_mutation_receipt(receipt.clone(), &[entry_hit()]).unwrap();
+        assert_eq!(bound.effect.relation, SemanticMutationRelation::EntrypointPcEquation);
+        assert_eq!(bound.effect.context.get("opcode"), Some(&json!("0x00100093")));
+
+        let mut stale = entry_hit();
+        stale.details.insert("declared_entry".to_string(), json!(0x8000_0004u64));
+        assert!(bind_semantic_mutation_receipt(receipt.clone(), &[stale]).is_none());
+
+        let mut forged_declaration = receipt.clone();
+        forged_declaration.before = json!(0x8000_0004u64);
+        forged_declaration.effect.context.insert("pc".to_string(), json!(0x8000_0004u64));
+        forged_declaration
+            .effect
+            .context
+            .insert("declared_entry".to_string(), json!(0x8000_0004u64));
+        forged_declaration
+            .effect
+            .context
+            .insert("witnessed_pc_before".to_string(), json!(0x8000_0004u64));
+        let mut forged_hit = entry_hit();
+        forged_hit.details.insert("pc".to_string(), json!(0x8000_0004u64));
+        forged_hit.details.insert("declared_entry".to_string(), json!(0x8000_0004u64));
+        forged_hit
+            .details
+            .insert("witnessed_pc_before".to_string(), json!(0x8000_0004u64));
+        assert!(bind_semantic_mutation_receipt(forged_declaration, &[forged_hit]).is_none());
+
+        // A hit that does not witness divergence (witnessed == declared) is
+        // the baseline shape and must not bind an executor-level receipt.
+        let mut undiverged = entry_hit();
+        undiverged.details.insert("pc".to_string(), json!(0x8000_0000u64));
+        undiverged
+            .details
+            .insert("witnessed_pc_before".to_string(), json!(0x8000_0000u64));
+        assert!(bind_semantic_mutation_receipt(receipt.clone(), &[undiverged]).is_none());
+
+        assert!(bind_semantic_mutation_receipt(receipt.clone(), &[]).is_none());
+        assert!(bind_semantic_mutation_receipt(receipt, &[entry_hit(), entry_hit()]).is_none());
+    }
+
+    #[test]
+    fn entrypoint_receipt_binding_rejects_delete_noop_moved_and_non_boundary_effects() {
+        let receipt = parse_semantic_mutation_receipt(Some(ENTRY_VALID)).unwrap().unwrap();
+
+        let mut deleted = receipt.clone();
+        deleted
+            .effect
+            .context
+            .insert("executed_boundary_row".to_string(), json!(false));
+        assert!(bind_semantic_mutation_receipt(deleted, &[entry_hit()]).is_none());
+
+        let mut no_op = receipt.clone();
+        no_op.after = json!(0x8000_0000u64);
+        no_op.effect.context.insert("witnessed_pc_after".to_string(), json!(0x8000_0000u64));
+        assert!(bind_semantic_mutation_receipt(no_op, &[entry_hit()]).is_none());
+
+        let mut moved = receipt.clone();
+        moved.site = "host.trace.row1.bytecode_row".to_string();
+        assert!(bind_semantic_mutation_receipt(moved, &[entry_hit()]).is_none());
+
+        let mut wrong_field = receipt.clone();
+        wrong_field.field = "skipped_prefix_rows".to_string();
+        assert!(bind_semantic_mutation_receipt(wrong_field, &[entry_hit()]).is_none());
+
+        let mut non_boundary = receipt.clone();
+        non_boundary.step = 1;
+        non_boundary.effect.context.insert("op_idx".to_string(), json!(1));
+        non_boundary.effect.context.insert("step_idx".to_string(), json!(1));
+        non_boundary.effect.context.insert("boundary_row".to_string(), json!(1));
+        assert!(bind_semantic_mutation_receipt(non_boundary, &[entry_hit()]).is_none());
+    }
+
+    #[test]
+    fn entrypoint_receipt_binding_rejects_stale_or_mismatched_unchanged_row_context() {
+        let receipt = parse_semantic_mutation_receipt(Some(ENTRY_VALID)).unwrap().unwrap();
+
+        // Opcode/mnemonic of the receipt describe the declared first word and
+        // are checked against the *baseline* hit by the core; the adapter bind
+        // only anchors the witnessed divergence, so these still bind.
+        let mut stale_opcode = receipt.clone();
+        stale_opcode.effect.context.insert("opcode".to_string(), json!("0x00200113"));
+        stale_opcode
+            .effect
+            .context
+            .insert("first_row_opcode_before".to_string(), json!("0x00200113"));
+        stale_opcode
+            .effect
+            .context
+            .insert("first_row_opcode_after".to_string(), json!("0x00200113"));
+        assert!(bind_semantic_mutation_receipt(stale_opcode, &[entry_hit()]).is_some());
+
+        let mut changed_opcode = receipt.clone();
+        changed_opcode
+            .effect
+            .context
+            .insert("opcode".to_string(), json!("0x00200113"));
+        assert!(bind_semantic_mutation_receipt(changed_opcode, &[entry_hit()]).is_some());
+
+        let mut changed_mnemonic = receipt.clone();
+        changed_mnemonic
+            .effect
+            .context
+            .insert("mnemonic".to_string(), json!("sub"));
+        assert!(bind_semantic_mutation_receipt(changed_mnemonic, &[entry_hit()]).is_some());
+
+        let mut reordered = receipt;
+        reordered
+            .effect
+            .context
+            .insert("witnessed_pc_after".to_string(), json!(0x8000_0000u64));
+        reordered.after = json!(0x8000_0000u64);
+        assert!(bind_semantic_mutation_receipt(reordered, &[entry_hit()]).is_none());
+    }
+
+    #[test]
+    fn backend_maps_jolt_scoped_buckets_to_equation_relations() {
+        let backend = JoltBackend::new(8);
+        let candidate = |bucket_id: &str, inject_kind: &str| SemanticInjectionCandidate {
+            bucket_id: bucket_id.to_string(),
+            trigger_signal_id: None,
+            semantic_class: "semantic.test".to_string(),
+            inject_kind: inject_kind.to_string(),
+            schedule: InjectionSchedule::Exact(0),
+        };
+        assert_eq!(
+            backend.semantic_mutation_relation(&candidate(
+                semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.id,
+                UPPER_IMMEDIATE_INJECT_KIND,
+            )),
+            Some(SemanticMutationRelation::UpperImmediateEquation)
+        );
+        assert_eq!(
+            backend.semantic_mutation_relation(&candidate(
+                semantic::control::ENTRYPOINT_BINDING.id,
+                ENTRYPOINT_INJECT_KIND,
+            )),
+            Some(SemanticMutationRelation::EntrypointPcEquation)
+        );
+    }
+
+    #[test]
+    fn ordinary_addi_and_lui_carriers_are_admitted_and_receive_bounded_schedules() {
+        let backend = JoltBackend::new(256);
+        assert!(backend.is_usable_seed(&[0x0010_0093]));
+        assert!(backend.is_usable_seed(&[0x8000_00b7]));
+
+        let candidates = backend.semantic_injection_candidates(&[entry_hit(), lui_hit()]);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].bucket_id, semantic::control::ENTRYPOINT_BINDING.id);
+        assert_eq!(candidates[0].inject_kind, ENTRYPOINT_INJECT_KIND);
+        assert!(matches!(candidates[0].schedule, InjectionSchedule::Exact(0)));
+        assert_eq!(
+            candidates[1].bucket_id,
+            semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION.id
+        );
+        assert_eq!(candidates[1].inject_kind, UPPER_IMMEDIATE_INJECT_KIND);
+        assert!(matches!(
+            candidates[1].schedule,
+            InjectionSchedule::AroundAnchor(3)
+        ));
+    }
+
+    #[test]
+    fn typed_receipt_parser_fails_closed_for_missing_or_incomplete_data() {
+        assert!(parse_semantic_mutation_receipt(None).unwrap().is_none());
+        assert!(parse_semantic_mutation_receipt(Some("not-json")).is_err());
+        assert!(parse_semantic_mutation_receipt(Some(
+            r#"{"inject_kind":"jolt.semantic.decode.upper_immediate_materialization","step":3}"#,
+        ))
+        .is_err());
+    }
+
+    fn executed_hit(
+        bucket: semantic::SemanticBucket,
+        obligation_id: &str,
+        cell_id: &str,
+        mnemonic: &str,
+        extras: &[(&str, serde_json::Value)],
+    ) -> BucketHit {
+        let mut details = HashMap::from([
+            ("obligation_id".to_string(), json!(obligation_id)),
+            ("cell_id".to_string(), json!(cell_id)),
+            ("op_idx".to_string(), json!(7)),
+            ("step_idx".to_string(), json!(7)),
+            ("pc".to_string(), json!(0x8000_0000u64)),
+            ("opcode".to_string(), json!("0x02c5c733")),
+            ("backend".to_string(), json!("jolt")),
+            (
+                "commit".to_string(),
+                json!("e9caa23565dbb13019afe61a2c95f51d1999e286"),
+            ),
+            ("mnemonic".to_string(), json!(mnemonic)),
+            ("trace_source".to_string(), json!("instruction")),
+        ]);
+        details.extend(extras.iter().map(|(key, value)| ((*key).to_string(), value.clone())));
+        BucketHit::semantic(bucket, details)
+    }
+
+    #[test]
+    fn exact_non_injected_divrem_and_mulhsu_hits_build_typed_candidates() {
+        let divrem = executed_hit(
+            semantic::arithmetic::DIVISION_REMAINDER_BOUND,
+            "md3",
+            "md3.np",
+            "div",
+            &[
+                ("dividend", json!(-7)),
+                ("divisor", json!(3)),
+                ("quotient", json!(-2)),
+                ("remainder", json!(-1)),
+                ("recomposed", json!(-7)),
+                ("remainder_bound_holds", json!(true)),
+                ("remainder_sign_holds", json!(true)),
+                ("relation", json!("quotient_times_divisor_plus_remainder")),
+                ("relation_valid", json!(true)),
+                ("failure_observed", json!(true)),
+                ("failure_manifestation", json!("primary_sumcheck_mismatch")),
+            ],
+        );
+        let mulhsu = executed_hit(
+            semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION,
+            "md5",
+            "md5.neg_max",
+            "mulhsu",
+            &[
+                ("signed_lhs", json!(-1)),
+                ("unsigned_rhs", json!(u32::MAX)),
+                ("product_hi", json!(u32::MAX)),
+                ("product_lo", json!(1)),
+                ("expected_high32", json!(u32::MAX)),
+                ("architectural_result", json!(u32::MAX)),
+                ("architectural_result_matches", json!(true)),
+                ("observed_result", json!(0)),
+                ("observed_result_source", json!("processed_virtual_sequence.final_rd_write")),
+                ("rd", json!(5)),
+                ("processed_row_idx", json!(7)),
+                ("processed_segment_start_step", json!(19)),
+                ("processed_segment_end_step", json!(23)),
+                ("processed_final_rd_write_step", json!(22)),
+                ("processed_final_rd_address", json!(5)),
+                ("result_matches", json!(false)),
+                ("result_mismatch", json!(true)),
+                ("relation", json!("high32_signed_lhs_times_unsigned_rhs")),
+                ("relation_valid", json!(true)),
+                ("failure_observed", json!(true)),
+                ("failure_manifestation", json!("inner_sumcheck_mismatch")),
+            ],
+        );
+
+        let hits = vec![divrem, mulhsu];
+        let candidates = executed_exception_candidates(&hits, true);
+        let divrem_receipt = candidates.instruction_lookup.unwrap();
+        assert_eq!(
+            divrem_receipt.effect,
+            ExecutedExceptionEffect::SignedDivisionRemainderVerification
+        );
+        assert_eq!(divrem_receipt.cell_id, "md3.np");
+        assert_eq!(divrem_receipt.step, 7);
+        assert!(has_exact_executed_exception_relation(&hits, Some(&divrem_receipt)));
+        let mulhsu_receipt = candidates.r1cs.unwrap();
+        assert_eq!(
+            mulhsu_receipt.effect,
+            ExecutedExceptionEffect::SignedUnsignedProductVerification
+        );
+        assert_eq!(mulhsu_receipt.cell_id, "md5.neg_max");
+        assert!(has_exact_executed_exception_relation(&hits, Some(&mulhsu_receipt)));
+    }
+
+    #[test]
+    fn processed_rd_receipt_chain_requires_exact_row_local_provenance() {
+        let exact = executed_hit(
+            semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION,
+            "md5",
+            "md5.neg_max",
+            "mulhsu",
+            &[
+                ("signed_lhs", json!(-1)),
+                ("unsigned_rhs", json!(u32::MAX)),
+                ("product_hi", json!(u32::MAX)),
+                ("product_lo", json!(1)),
+                ("expected_high32", json!(u32::MAX)),
+                ("architectural_result", json!(u32::MAX)),
+                ("architectural_result_matches", json!(true)),
+                ("observed_result", json!(0)),
+                ("observed_result_source", json!("processed_virtual_sequence.final_rd_write")),
+                ("rd", json!(5)),
+                ("processed_row_idx", json!(7)),
+                ("processed_segment_start_step", json!(19)),
+                ("processed_segment_end_step", json!(23)),
+                ("processed_final_rd_write_step", json!(22)),
+                ("processed_final_rd_address", json!(5)),
+                ("result_matches", json!(false)),
+                ("result_mismatch", json!(true)),
+                ("relation", json!("high32_signed_lhs_times_unsigned_rhs")),
+                ("relation_valid", json!(true)),
+            ],
+        );
+        assert!(executed_exception_candidates(&[exact.clone()], true).r1cs.is_some());
+
+        let mut missing_marker = exact.clone();
+        missing_marker.details.remove("processed_segment_end_step");
+        assert!(executed_exception_candidates(&[missing_marker], true).r1cs.is_none());
+
+        let mut outside_segment = exact;
+        outside_segment.details.insert("processed_final_rd_write_step".to_string(), json!(24));
+        assert!(executed_exception_candidates(&[outside_segment], true).r1cs.is_none());
+    }
+
+    #[test]
+    fn exception_candidates_fail_closed_for_injected_controls_and_malformed_relations() {
+        let malformed_divrem = executed_hit(
+            semantic::arithmetic::DIVISION_REMAINDER_BOUND,
+            "md3",
+            "md3.np",
+            "div",
+            &[
+                ("dividend", json!(-7)),
+                ("divisor", json!(3)),
+                ("quotient", json!(-2)),
+                ("remainder", json!(1)),
+                ("recomposed", json!(-5)),
+                ("remainder_bound_holds", json!(true)),
+                ("remainder_sign_holds", json!(false)),
+                ("relation", json!("quotient_times_divisor_plus_remainder")),
+                ("relation_valid", json!(true)),
+            ],
+        );
+        let mulhu_control = executed_hit(
+            semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION,
+            "md5",
+            "md5.neg_max",
+            "mulhu",
+            &[],
+        );
+        let candidates =
+            executed_exception_candidates(&[malformed_divrem.clone(), mulhu_control], true);
+        assert!(candidates.instruction_lookup.is_none());
+        assert!(candidates.r1cs.is_none());
+        let injected = executed_exception_candidates(&[malformed_divrem], false);
+        assert!(injected.instruction_lookup.is_none());
+        assert!(injected.r1cs.is_none());
+
+        assert!(parse_executed_exception_receipt(None).unwrap().is_none());
+        assert!(parse_executed_exception_receipt(Some("not-json")).is_err());
+        assert!(parse_executed_exception_receipt(Some(
+            r#"{"effect":"signed_division_remainder_verification","obligation_id":"md3"}"#,
+        ))
+        .is_err());
     }
 }

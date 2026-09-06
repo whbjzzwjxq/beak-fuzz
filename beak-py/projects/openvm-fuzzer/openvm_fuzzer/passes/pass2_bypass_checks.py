@@ -22,9 +22,26 @@ None (these are structural patches applied uniformly when files exist).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from zkvm_fuzzer_utils.file import prepend_file, replace_in_file
+
+
+_FUZZER_UTILS_IMPORT = "#[allow(unused_imports)]\nuse fuzzer_utils;\n"
+
+
+def _normalize_fuzzer_utils_import(path: Path) -> None:
+    """Keep the pass idempotent even when an older install placed the import later."""
+    contents = path.read_text()
+    import_pattern = re.compile(
+        r"(?:#\[allow\(unused_imports\)\]\n)?use fuzzer_utils;\n\n?"
+    )
+    if not import_pattern.search(contents):
+        prepend_file(path, _FUZZER_UTILS_IMPORT)
+        return
+    normalized = import_pattern.sub("", contents).lstrip("\n")
+    path.write_text(f"{_FUZZER_UTILS_IMPORT}\n{normalized}")
 
 
 # --- vm_replace_asserts.py (merged) ---
@@ -59,10 +76,8 @@ def _vm_replace_asserts_and_add_fuzzer_utils_dep(*, openvm_install_path: Path) -
                         (r"\bdebug_assert_eq!", "fuzzer_utils::fuzzer_assert_eq!"),
                     ],
                 )
-                if is_updated:
-                    prefix = "#[allow(unused_imports)]\nuse fuzzer_utils;\n"
-                    if not elem.read_text().startswith(prefix):
-                        prepend_file(elem, prefix)
+                if is_updated or "use fuzzer_utils;" in elem.read_text():
+                    _normalize_fuzzer_utils_import(elem)
 
 
 # --- rv32im_replace_asserts.py (merged) ---
@@ -89,10 +104,8 @@ def _rv32im_replace_asserts(*, openvm_install_path: Path) -> None:
                         (r"\bdebug_assert_eq!", "fuzzer_utils::fuzzer_assert_eq!"),
                     ],
                 )
-                if is_updated:
-                    prefix = "#[allow(unused_imports)]\nuse fuzzer_utils;\n"
-                    if not elem.read_text().startswith(prefix):
-                        prepend_file(elem, prefix)
+                if is_updated or "use fuzzer_utils;" in elem.read_text():
+                    _normalize_fuzzer_utils_import(elem)
 
 
 def apply(*, openvm_install_path: Path, commit_or_branch: str) -> None:

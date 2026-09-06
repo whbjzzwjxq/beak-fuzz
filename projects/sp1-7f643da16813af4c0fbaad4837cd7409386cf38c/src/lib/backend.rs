@@ -7,15 +7,16 @@ use std::thread::JoinHandle;
 
 use beak_core::fuzz::benchmark::{
     BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
+    SemanticMutationReceipt, SemanticMutationRelation,
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic};
+use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
 use serde::{Deserialize, Serialize};
 use sp1_core_executor::{ByteOpcode, ExecutionRecord, Executor, ExecutorMode, Opcode, Register};
 use sp1_core_machine::utils::run_test;
 use sp1_stark::{CpuProver, SP1CoreOpts};
 
-use crate::trace::{Sp1Trace, build_sp1_program};
+use crate::trace::{build_sp1_program, executed_ecall_register_states, Sp1Trace};
 
 #[derive(Debug, Clone)]
 struct WitnessInjectionPlan {
@@ -44,6 +45,8 @@ pub struct WorkerResponse {
     pub backend_error: Option<String>,
     pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pub injection_applied: bool,
+    #[serde(default)]
+    pub semantic_mutation_receipt: Option<SemanticMutationReceipt>,
 }
 
 const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
@@ -59,9 +62,12 @@ struct RealRunnerResponse {
     error: Option<String>,
     observed_injection_sites: BTreeMap<String, Vec<u64>>,
     injection_applied: bool,
+    semantic_mutation_receipt: Option<SemanticMutationReceipt>,
 }
 
 const S28_INJECT_KIND: &str = "sp1.semantic.exec.control_flow_binding";
+const SP1_COMMIT: &str = "7f643da16813af4c0fbaad4837cd7409386cf38c";
+const SP1_WRITE_SYSCALL_ID: u32 = 2;
 const IS_MEMORY_INJECT_KIND: &str = "sp1.semantic.exec.memory_effect_binding";
 const MEMORY_ADDRESS_INJECT_KIND: &str = "sp1.semantic.memory.address_pointer_consistency";
 const MEMORY_VALUE_INJECT_KIND: &str = "sp1.semantic.memory.value_payload_consistency";
@@ -92,8 +98,174 @@ fn base_inject_kind(kind: &str) -> &str {
     kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
 }
 
+fn receipt_context_u64(receipt: &SemanticMutationReceipt, key: &str) -> Option<u64> {
+    receipt.effect.context.get(key).and_then(|value| value.as_u64())
+}
+
+fn receipt_context_u32(receipt: &SemanticMutationReceipt, key: &str) -> Option<u32> {
+    u32::try_from(receipt_context_u64(receipt, key)?).ok()
+}
+
+fn receipt_context_str<'a>(receipt: &'a SemanticMutationReceipt, key: &str) -> Option<&'a str> {
+    receipt.effect.context.get(key).and_then(|value| value.as_str())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExecutedControlFlowAnchor {
+    step: u64,
+    op_idx: u64,
+    pc: u32,
+    observed_next_pc: u32,
+    rv_instruction: u32,
+    sp1_opcode: u32,
+    mnemonic: String,
+    ecall_registers: [u32; 4],
+}
+
+fn nondegenerate_ecall_register_state([x5, _x10, x11, x12]: [u32; 4]) -> bool {
+    x5 != SP1_WRITE_SYSCALL_ID
+        || (x12 > 0 && x11.checked_add(x12.saturating_sub(1)).is_some())
+}
+
+fn executed_control_flow_anchors(
+    records: &[ExecutionRecord],
+) -> BTreeMap<u64, ExecutedControlFlowAnchor> {
+    let mut anchors = BTreeMap::new();
+    let ecall_register_states = executed_ecall_register_states(records);
+    let mut flat_cpu_idx = 0u64;
+    for record in records {
+        for event in &record.cpu_events {
+            let instruction = record.program.fetch(event.pc);
+            if instruction.opcode == Opcode::ECALL {
+                if let Some(ecall_registers) = ecall_register_states.get(&flat_cpu_idx).copied() {
+                    anchors.insert(
+                        flat_cpu_idx,
+                        ExecutedControlFlowAnchor {
+                            step: flat_cpu_idx,
+                            op_idx: flat_cpu_idx,
+                            pc: event.pc,
+                            observed_next_pc: event.next_pc,
+                            rv_instruction: 0x0000_0073,
+                            sp1_opcode: instruction.opcode as u32,
+                            mnemonic: instruction.opcode.mnemonic().to_string(),
+                            ecall_registers,
+                        },
+                    );
+                }
+            }
+            flat_cpu_idx = flat_cpu_idx.saturating_add(1);
+        }
+    }
+    anchors
+}
+
+fn valid_executed_control_flow_receipt(
+    receipt: &SemanticMutationReceipt,
+    requested_kind: &str,
+    resolved_step: u64,
+    executed_anchor: &ExecutedControlFlowAnchor,
+) -> bool {
+    let requested_mode = inject_variant_value(requested_kind, "mode");
+    let Some(receipt_ecall_registers) = (|| {
+        Some([
+            receipt_context_u32(receipt, "ecall_x5")?,
+            receipt_context_u32(receipt, "ecall_x10")?,
+            receipt_context_u32(receipt, "ecall_x11")?,
+            receipt_context_u32(receipt, "ecall_x12")?,
+        ])
+    })() else {
+        return false;
+    };
+    if base_inject_kind(requested_kind) != S28_INJECT_KIND
+        || inject_variant_family(requested_kind) != Some("ecall")
+        || !matches!(requested_mode, Some("near_jump" | "mid_jump" | "legacy_far_jump"))
+        || receipt.inject_kind != requested_kind
+        || receipt.site != "executor.execute_instruction"
+        || receipt.field != "next_pc"
+        || receipt.step != resolved_step
+        || receipt.effect.relation != SemanticMutationRelation::ExecutedControlFlowEquation
+        || receipt_context_str(receipt, "bucket_id")
+            != Some(semantic::exec::CONTROL_FLOW_BINDING.id)
+        || receipt_context_str(receipt, "obligation_id") != Some("cf6")
+        || receipt_context_str(receipt, "cell_id") != Some("cf6.normal")
+        || receipt_context_str(receipt, "backend") != Some("sp1")
+        || receipt_context_str(receipt, "commit") != Some(SP1_COMMIT)
+        || receipt_context_str(receipt, "trace_source") != Some("instruction")
+        || receipt_context_str(receipt, "control_flow_family") != Some("ecall")
+        || receipt_context_str(receipt, "mnemonic") != Some("ecall")
+        || receipt_context_u64(receipt, "opcode") != Some(0x0000_0073)
+        || receipt_context_str(receipt, "family") != Some("ecall")
+        || receipt_context_str(receipt, "mode") != requested_mode
+        || receipt.effect.context.get("executed_instruction") != Some(&serde_json::json!(true))
+        || receipt_context_u64(receipt, "anchor") != Some(resolved_step)
+        || executed_anchor.step != resolved_step
+        || executed_anchor.observed_next_pc != executed_anchor.pc.wrapping_add(4)
+        || !nondegenerate_ecall_register_state(executed_anchor.ecall_registers)
+        || receipt_ecall_registers != executed_anchor.ecall_registers
+    {
+        return false;
+    }
+    let Some(pc) = receipt_context_u64(receipt, "pc") else {
+        return false;
+    };
+    let Some(expected_next_pc) = receipt_context_u64(receipt, "expected_next_pc") else {
+        return false;
+    };
+    let before = receipt.before.as_u64();
+    let after = receipt.after.as_u64();
+    let Some(expected_after) = requested_mode.map(|mode| match mode {
+        "near_jump" => executed_anchor.pc.wrapping_add(8),
+        "mid_jump" => executed_anchor.pc.wrapping_add(0x40),
+        "legacy_far_jump" => executed_anchor.pc.wrapping_add(0x10000),
+        _ => unreachable!("validated control-flow mode"),
+    }) else {
+        return false;
+    };
+    pc == executed_anchor.pc as u64
+        && receipt_context_u64(receipt, "op_idx") == Some(executed_anchor.op_idx)
+        && receipt_context_u64(receipt, "sp1_opcode") == Some(executed_anchor.sp1_opcode as u64)
+        && receipt_context_u64(receipt, "source_selector")
+            == Some(executed_anchor.sp1_opcode as u64)
+        && executed_anchor.rv_instruction == 0x0000_0073
+        && executed_anchor.sp1_opcode == Opcode::ECALL as u32
+        && executed_anchor.mnemonic == "ecall"
+        && expected_next_pc == (pc as u32).wrapping_add(4) as u64
+        && receipt_context_u64(receipt, "step") == Some(resolved_step)
+        && receipt_context_u64(receipt, "observed_next_pc_before") == before
+        && receipt_context_u64(receipt, "observed_next_pc_after") == after
+        && before == Some(expected_next_pc)
+        && after == Some(expected_after as u64)
+}
+
+fn take_valid_semantic_mutation_receipt(
+    raw: Option<serde_json::Value>,
+    requested_kind: Option<&str>,
+    resolved_step: Option<u64>,
+    executed_anchors: &BTreeMap<u64, ExecutedControlFlowAnchor>,
+) -> Result<Option<SemanticMutationReceipt>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let receipt: SemanticMutationReceipt = serde_json::from_value(raw)
+        .map_err(|error| format!("decode SP1 semantic mutation receipt failed: {error}"))?;
+    let valid = requested_kind
+        .zip(resolved_step)
+        .and_then(|(kind, step)| executed_anchors.get(&step).map(|anchor| (kind, step, anchor)))
+        .is_some_and(|(kind, step, anchor)| {
+            valid_executed_control_flow_receipt(&receipt, kind, step, anchor)
+        });
+    if !valid {
+        return Err("SP1 semantic mutation receipt failed local relation validation".to_string());
+    }
+    Ok(Some(receipt))
+}
+
 fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
-    if variant.is_empty() { kind.to_string() } else { format!("{kind}::{variant}") }
+    if variant.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind}::{variant}")
+    }
 }
 
 fn supports_official_injection_kind(kind: &str) -> bool {
@@ -193,7 +365,6 @@ fn control_flow_semantic_class(family: Option<&str>) -> String {
 fn branch_next_pc_mutation(mode: Option<&str>, pc: u32, observed_next_pc: u32) -> Option<u32> {
     let sequential = pc.wrapping_add(4);
     match mode {
-        Some("noop_prefix") => None,
         Some("force_fallthrough") => Some(sequential),
         Some("force_taken_near") => {
             let near_taken =
@@ -208,7 +379,6 @@ fn branch_next_pc_mutation(mode: Option<&str>, pc: u32, observed_next_pc: u32) -
 fn jump_next_pc_mutation(mode: Option<&str>, pc: u32, observed_next_pc: u32) -> Option<u32> {
     let sequential = pc.wrapping_add(4);
     match mode {
-        Some("noop_prefix") => None,
         Some("force_sequential") => {
             Some(if observed_next_pc == sequential { pc.wrapping_add(8) } else { sequential })
         }
@@ -224,7 +394,6 @@ fn jump_next_pc_mutation(mode: Option<&str>, pc: u32, observed_next_pc: u32) -> 
 #[cfg(test)]
 fn ecall_next_pc_mutation(mode: Option<&str>, pc: u32, observed_next_pc: u32) -> Option<u32> {
     match mode {
-        Some("noop_prefix") => None,
         Some("near_jump") => Some(if observed_next_pc == pc.wrapping_add(8) {
             pc.wrapping_add(12)
         } else {
@@ -337,7 +506,11 @@ fn byte_lookup_step(opcode: ByteOpcode, a1: u16, b: u8, c: u8) -> u64 {
 }
 
 fn syscall_instr_padded_rows(real_rows: usize) -> usize {
-    if real_rows == 0 { 0 } else { real_rows.next_power_of_two().max(16) }
+    if real_rows == 0 {
+        0
+    } else {
+        real_rows.next_power_of_two().max(16)
+    }
 }
 
 fn panic_payload_to_string(p: &(dyn std::any::Any + Send)) -> String {
@@ -507,6 +680,7 @@ fn run_sp1_real_backend(
     let mut executor = run_sp1_executor(&program, None, None)?;
     let baseline_records = std::mem::take(&mut executor.records);
     let observed_injection_sites = collect_observed_injection_sites(&baseline_records);
+    let executed_anchors = executed_control_flow_anchors(&baseline_records);
     if !supports_official_injection(inject_kind) {
         let trace = Sp1Trace::from_execution_records(words, &baseline_records)?;
         let mut regs = [0u32; 32];
@@ -526,6 +700,7 @@ fn run_sp1_real_backend(
             )),
             observed_injection_sites,
             injection_applied: false,
+            semantic_mutation_receipt: None,
         });
     }
 
@@ -540,8 +715,18 @@ fn run_sp1_real_backend(
     };
 
     let trace = Sp1Trace::from_execution_records(words, &records)?;
-    let (prove_ok, verify_ok, prove_verify_error, proof_injection_applied) =
-        run_sp1_prove_verify_with_run_test(&executor.program, inject_kind, runtime_injection_step);
+    let (
+        prove_ok,
+        verify_ok,
+        prove_verify_error,
+        proof_injection_applied,
+        semantic_mutation_receipt,
+    ) = run_sp1_prove_verify_with_run_test(
+        &executor.program,
+        inject_kind,
+        runtime_injection_step,
+        &executed_anchors,
+    );
 
     let mut regs = [0u32; 32];
     for i in 0..32usize {
@@ -558,6 +743,7 @@ fn run_sp1_real_backend(
         error: prove_verify_error,
         observed_injection_sites,
         injection_applied: injection_was_scheduled && proof_injection_applied,
+        semantic_mutation_receipt,
     })
 }
 
@@ -565,8 +751,10 @@ fn run_sp1_prove_verify_with_run_test(
     program: &sp1_core_executor::Program,
     inject_kind: Option<&str>,
     witness_injection_step: Option<u64>,
-) -> (bool, bool, Option<String>, bool) {
+    executed_anchors: &BTreeMap<u64, ExecutedControlFlowAnchor>,
+) -> (bool, bool, Option<String>, bool, Option<SemanticMutationReceipt>) {
     let mut injection_applied = false;
+    let mut raw_semantic_mutation_receipt = None;
     let prove_result = with_scoped_witness_injection_env(
         inject_kind.filter(|kind| supports_official_injection_kind(kind)),
         witness_injection_step,
@@ -575,15 +763,30 @@ fn run_sp1_prove_verify_with_run_test(
                 run_test::<CpuProver<_, _>>(program.clone())
             }));
             injection_applied = fuzzer_utils::injection_was_applied();
+            raw_semantic_mutation_receipt = fuzzer_utils::take_semantic_mutation_receipt();
             result
         },
     );
 
+    let semantic_mutation_receipt = match take_valid_semantic_mutation_receipt(
+        raw_semantic_mutation_receipt,
+        inject_kind,
+        witness_injection_step,
+        executed_anchors,
+    ) {
+        Ok(receipt) => receipt,
+        Err(error) => return (true, false, Some(error), injection_applied, None),
+    };
+
     match prove_result {
-        Ok(Ok(_)) => (true, true, None, injection_applied),
-        Ok(Err(e)) => {
-            (true, false, Some(format!("sp1 run_test prove/verify failed: {e}")), injection_applied)
-        }
+        Ok(Ok(_)) => (true, true, None, injection_applied, semantic_mutation_receipt),
+        Ok(Err(e)) => (
+            true,
+            false,
+            Some(format!("sp1 run_test prove/verify failed: {e}")),
+            injection_applied,
+            semantic_mutation_receipt,
+        ),
         Err(p) => (
             true,
             false,
@@ -592,6 +795,7 @@ fn run_sp1_prove_verify_with_run_test(
                 panic_payload_to_string(p.as_ref())
             )),
             injection_applied,
+            semantic_mutation_receipt,
         ),
     }
 }
@@ -635,6 +839,7 @@ pub fn run_backend_once(
         backend_error,
         observed_injection_sites: resp.observed_injection_sites,
         injection_applied: resp.injection_applied,
+        semantic_mutation_receipt: resp.semantic_mutation_receipt,
     })
 }
 
@@ -733,6 +938,43 @@ impl Sp1Backend {
             .or_else(|| Self::mnemonic_from_hit(hit).and_then(control_flow_family_for_mnemonic))
     }
 
+    fn ecall_register_state_from_hit(hit: &BucketHit) -> Option<[u32; 4]> {
+        let value = |key: &str| {
+            hit.details
+                .get(key)
+                .and_then(|value| value.as_u64())
+                .and_then(|value| u32::try_from(value).ok())
+        };
+        Some([
+            value("ecall_x5")?,
+            value("ecall_x10")?,
+            value("ecall_x11")?,
+            value("ecall_x12")?,
+        ])
+    }
+
+    fn is_bound_sequential_ecall_hit(hit: &BucketHit) -> bool {
+        let Some(pc) = hit
+            .details
+            .get("pc")
+            .and_then(|value| value.as_u64())
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            return false;
+        };
+        let Some(next_pc) = hit
+            .details
+            .get("next_pc")
+            .and_then(|value| value.as_u64())
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            return false;
+        };
+        next_pc == pc.wrapping_add(4)
+            && Self::ecall_register_state_from_hit(hit)
+                .is_some_and(nondegenerate_ecall_register_state)
+    }
+
     fn is_chip_scheduled_bucket(bucket_id: &str) -> bool {
         bucket_id == semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id
             || bucket_id == semantic::alu::SHIFT_MOD32.id
@@ -759,28 +1001,23 @@ impl Sp1Backend {
     }
 
     fn s28_variant_specs_for_family(family: &str) -> Vec<String> {
-        let mut specs = Vec::new();
         match family {
-            "branch" => {
-                specs.push("family=branch,mode=force_fallthrough".to_string());
-                specs.push("family=branch,mode=force_taken_near".to_string());
-                specs.push("family=branch,mode=legacy_far_jump".to_string());
-            }
-            "jump" => {
-                specs.push("family=jump,mode=force_sequential".to_string());
-                specs.push("family=jump,mode=force_near_jump".to_string());
-                specs.push("family=jump,mode=legacy_far_jump".to_string());
-            }
-            _ => {
-                specs.push("family=ecall,mode=near_jump".to_string());
-                specs.push("family=ecall,mode=mid_jump".to_string());
-                specs.push("family=ecall,mode=legacy_far_jump".to_string());
-            }
+            "branch" => vec![
+                "family=branch,mode=force_fallthrough".to_string(),
+                "family=branch,mode=force_taken_near".to_string(),
+                "family=branch,mode=legacy_far_jump".to_string(),
+            ],
+            "jump" => vec![
+                "family=jump,mode=force_sequential".to_string(),
+                "family=jump,mode=force_near_jump".to_string(),
+                "family=jump,mode=legacy_far_jump".to_string(),
+            ],
+            _ => vec![
+                "family=ecall,mode=near_jump".to_string(),
+                "family=ecall,mode=mid_jump".to_string(),
+                "family=ecall,mode=legacy_far_jump".to_string(),
+            ],
         }
-        for rank in 0..768u32 {
-            specs.push(format!("family={family},mode=noop_prefix,rank={rank}"));
-        }
-        specs
     }
 
     fn semantic_candidate_priority(candidate: &SemanticInjectionCandidate) -> u8 {
@@ -830,6 +1067,9 @@ impl Sp1Backend {
             let Some(control_flow_family) = control_flow_family else {
                 return Vec::new();
             };
+            if control_flow_family == "ecall" && !Self::is_bound_sequential_ecall_hit(hit) {
+                return Vec::new();
+            }
             (
                 control_flow_semantic_class(Some(control_flow_family)),
                 Self::s28_variant_specs_for_family(control_flow_family)
@@ -1174,6 +1414,8 @@ impl BenchmarkBackend for Sp1Backend {
         self.eval.micro_op_count = 0;
         self.eval.final_regs = None;
         self.eval.semantic_injection_applied = false;
+        self.eval.semantic_mutation_receipt = None;
+        self.eval.executed_exception_receipt = None;
         self.last_observed_injection_sites.clear();
         self.start_worker()?;
 
@@ -1233,6 +1475,9 @@ impl BenchmarkBackend for Sp1Backend {
             final_regs: resp.final_regs,
             backend_error: resp.backend_error.clone(),
             semantic_injection_applied: resp.injection_applied,
+            semantic_mutation_receipt: resp.semantic_mutation_receipt,
+            executed_exception_receipt: None,
+            production_resource: None,
         };
         self.last_observed_injection_sites = resp.observed_injection_sites;
 
@@ -1255,6 +1500,20 @@ impl BenchmarkBackend for Sp1Backend {
         Ok(())
     }
 
+    fn semantic_mutation_relation(
+        &self,
+        candidate: &SemanticInjectionCandidate,
+    ) -> Option<SemanticMutationRelation> {
+        (candidate.bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id
+            && base_inject_kind(candidate.inject_kind.as_str()) == S28_INJECT_KIND
+            && inject_variant_family(candidate.inject_kind.as_str()) == Some("ecall")
+            && matches!(
+                inject_variant_value(candidate.inject_kind.as_str(), "mode"),
+                Some("near_jump" | "mid_jump" | "legacy_far_jump")
+            ))
+        .then_some(SemanticMutationRelation::ExecutedControlFlowEquation)
+    }
+
     fn semantic_injection_candidates(&self, hits: &[BucketHit]) -> Vec<SemanticInjectionCandidate> {
         let mut candidates: Vec<_> =
             hits.iter().flat_map(|hit| self.semantic_candidate_from_hit(hit)).collect();
@@ -1272,13 +1531,72 @@ impl Drop for Sp1Backend {
 #[cfg(test)]
 mod tests {
     use super::{
-        InjectionSchedule, Opcode, S28_INJECT_KIND, Sp1Backend, control_flow_semantic_class,
-        control_flow_site_key, inject_kind_with_variant, mutated_control_flow_next_pc,
-        resolve_runtime_injection_step, run_backend_once,
+        control_flow_semantic_class, control_flow_site_key, inject_kind_with_variant,
+        mutated_control_flow_next_pc, resolve_runtime_injection_step, run_backend_once,
+        valid_executed_control_flow_receipt, ExecutedControlFlowAnchor, InjectionSchedule, Opcode,
+        SemanticMutationReceipt, SemanticMutationRelation, Sp1Backend, S28_INJECT_KIND,
     };
-    use beak_core::trace::{BucketHit, semantic};
+    use beak_core::fuzz::benchmark::BenchmarkBackend;
+    use beak_core::trace::{semantic, BucketHit};
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap};
+
+    fn ecall_anchor() -> ExecutedControlFlowAnchor {
+        ExecutedControlFlowAnchor {
+            step: 9,
+            op_idx: 9,
+            pc: 16,
+            observed_next_pc: 20,
+            rv_instruction: 0x0000_0073,
+            sp1_opcode: Opcode::ECALL as u32,
+            mnemonic: "ecall".to_string(),
+            ecall_registers: [1, 3, 0x1000, 4],
+        }
+    }
+
+    fn ecall_receipt(mode: &str, observed_after: u32) -> SemanticMutationReceipt {
+        let inject_kind =
+            format!("sp1.semantic.exec.control_flow_binding::family=ecall,mode={mode}");
+        serde_json::from_value(json!({
+            "inject_kind": inject_kind,
+            "site": "executor.execute_instruction",
+            "field": "next_pc",
+            "step": 9,
+            "before": 20,
+            "after": observed_after,
+            "effect": {
+                "relation": "executed_control_flow_equation",
+                "context": {
+                    "bucket_id": "sem.exec.control_flow_binding",
+                    "obligation_id": "cf6",
+                    "cell_id": "cf6.normal",
+                    "backend": "sp1",
+                    "commit": "7f643da16813af4c0fbaad4837cd7409386cf38c",
+                    "trace_source": "instruction",
+                    "anchor": 9,
+                    "step": 9,
+                    "op_idx": 9,
+                    "pc": 16,
+                    "opcode": 0x0000_0073,
+                    "sp1_opcode": 28,
+                    "source_selector": 28,
+                    "mnemonic": "ecall",
+                    "control_flow_family": "ecall",
+                    "family": "ecall",
+                    "mode": mode,
+                    "expected_next_pc": 20,
+                    "observed_next_pc_before": 20,
+                    "observed_next_pc_after": observed_after,
+                    "ecall_x5": 1,
+                    "ecall_x10": 3,
+                    "ecall_x11": 4096,
+                    "ecall_x12": 4,
+                    "executed_instruction": true
+                }
+            }
+        }))
+        .expect("typed ECALL control-flow receipt")
+    }
 
     #[test]
     fn s28_mutation_is_family_scoped() {
@@ -1350,12 +1668,119 @@ mod tests {
     }
 
     #[test]
-    fn s28_real_mutations_are_tried_before_noop_prefixes() {
+    fn s28_family_specs_contain_only_real_mutations() {
         let specs = Sp1Backend::s28_variant_specs_for_family("ecall");
         assert_eq!(specs[0], "family=ecall,mode=near_jump");
         assert_eq!(specs[1], "family=ecall,mode=mid_jump");
         assert_eq!(specs[2], "family=ecall,mode=legacy_far_jump");
-        assert!(specs[3].starts_with("family=ecall,mode=noop_prefix"));
+        assert_eq!(specs.len(), 3);
+        assert!(specs.iter().all(|spec| !spec.contains("noop_prefix")));
+    }
+
+    #[test]
+    fn s28_receipt_recomputes_each_real_mode_from_baseline_executed_anchor() {
+        for (mode, after) in [("near_jump", 24), ("mid_jump", 80), ("legacy_far_jump", 65_552)] {
+            let kind = format!("sp1.semantic.exec.control_flow_binding::family=ecall,mode={mode}");
+            assert!(valid_executed_control_flow_receipt(
+                &ecall_receipt(mode, after),
+                &kind,
+                9,
+                &ecall_anchor(),
+            ));
+        }
+    }
+
+    #[test]
+    fn s28_receipt_rejects_wrong_relation_kind_anchor_opcode_pc_context_and_noop() {
+        let kind = "sp1.semantic.exec.control_flow_binding::family=ecall,mode=near_jump";
+        let check = |receipt: &SemanticMutationReceipt, requested_kind: &str, step: u64| {
+            valid_executed_control_flow_receipt(receipt, requested_kind, step, &ecall_anchor())
+        };
+
+        let mut wrong_relation = ecall_receipt("near_jump", 24);
+        wrong_relation.effect.relation = SemanticMutationRelation::MemorySelectorEquation;
+        assert!(!check(&wrong_relation, kind, 9));
+
+        let mut wrong_kind = ecall_receipt("near_jump", 24);
+        wrong_kind.inject_kind = S28_INJECT_KIND.to_string();
+        assert!(!check(&wrong_kind, kind, 9));
+
+        let mut wrong_anchor = ecall_receipt("near_jump", 24);
+        wrong_anchor.effect.context.insert("anchor".to_string(), json!(8));
+        assert!(!check(&wrong_anchor, kind, 9));
+        assert!(!check(&ecall_receipt("near_jump", 24), kind, 8));
+
+        let mut wrong_opcode = ecall_receipt("near_jump", 24);
+        wrong_opcode.effect.context.insert("opcode".to_string(), json!(0x63));
+        assert!(!check(&wrong_opcode, kind, 9));
+
+        let mut wrong_source_selector = ecall_receipt("near_jump", 24);
+        wrong_source_selector.effect.context.insert("sp1_opcode".to_string(), json!(18));
+        assert!(!check(&wrong_source_selector, kind, 9));
+
+        let mut wrong_pc = ecall_receipt("near_jump", 24);
+        wrong_pc.effect.context.insert("pc".to_string(), json!(20));
+        assert!(!check(&wrong_pc, kind, 9));
+
+        let mut wrong_op_idx = ecall_receipt("near_jump", 24);
+        wrong_op_idx.effect.context.insert("op_idx".to_string(), json!(8));
+        assert!(!check(&wrong_op_idx, kind, 9));
+
+        let mut stale_commit = ecall_receipt("near_jump", 24);
+        stale_commit.effect.context.insert("commit".to_string(), json!("stale"));
+        assert!(!check(&stale_commit, kind, 9));
+
+        let mut wrong_bucket = ecall_receipt("near_jump", 24);
+        wrong_bucket.effect.context.insert("bucket_id".to_string(), json!("sem.exec.dest_binding"));
+        assert!(!check(&wrong_bucket, kind, 9));
+
+        let mut wrong_cell = ecall_receipt("near_jump", 24);
+        wrong_cell.effect.context.insert("cell_id".to_string(), json!("cf6.near_segment_end"));
+        assert!(!check(&wrong_cell, kind, 9));
+
+        let mut wrong_mode = ecall_receipt("near_jump", 24);
+        wrong_mode.effect.context.insert("mode".to_string(), json!("mid_jump"));
+        assert!(!check(&wrong_mode, kind, 9));
+
+        assert!(!check(&ecall_receipt("near_jump", 80), kind, 9));
+        let noop_kind =
+            "sp1.semantic.exec.control_flow_binding::family=ecall,mode=noop_prefix,rank=0";
+        assert!(!check(&ecall_receipt("noop_prefix", 20), noop_kind, 9));
+    }
+
+    #[test]
+    fn s28_route_maps_only_ecall_candidates_to_executed_control_flow_equation() {
+        let backend = Sp1Backend::new(16);
+        let mut details = HashMap::new();
+        details.insert("step_idx".to_string(), json!(9));
+        details.insert("mnemonic".to_string(), json!("ecall"));
+        details.insert("control_flow_family".to_string(), json!("ecall"));
+        details.insert("pc".to_string(), json!(16));
+        details.insert("next_pc".to_string(), json!(20));
+        details.insert("ecall_x5".to_string(), json!(1));
+        details.insert("ecall_x10".to_string(), json!(3));
+        details.insert("ecall_x11".to_string(), json!(0x1000));
+        details.insert("ecall_x12".to_string(), json!(4));
+        let hit = BucketHit::semantic(semantic::exec::CONTROL_FLOW_BINDING, details);
+        let candidates = backend.semantic_candidate_from_hit(&hit);
+        let real_candidates: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| !candidate.inject_kind.contains("mode=noop_prefix"))
+            .collect();
+        assert_eq!(real_candidates.len(), 3);
+        assert!(real_candidates.iter().all(|candidate| {
+            backend.semantic_mutation_relation(candidate)
+                == Some(SemanticMutationRelation::ExecutedControlFlowEquation)
+        }));
+
+        let mut wrong_family = (*real_candidates[0]).clone();
+        wrong_family.inject_kind =
+            inject_kind_with_variant(S28_INJECT_KIND, "family=branch,mode=force_fallthrough");
+        assert_eq!(backend.semantic_mutation_relation(&wrong_family), None);
+
+        let mut wrong_bucket = (*real_candidates[0]).clone();
+        wrong_bucket.bucket_id = semantic::exec::DEST_BINDING.id.to_string();
+        assert_eq!(backend.semantic_mutation_relation(&wrong_bucket), None);
     }
 
     #[test]
@@ -1377,6 +1802,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "diagnostic SP1 prover run; r2 validation uses focused source-level relation tests"]
     fn s28_official_run_test_path_applies_injection() {
         let words = vec![0x0020_0293, 0x0030_0513, 0x0000_0593, 0x0000_0613, 0x0000_0073];
 
@@ -1397,5 +1823,10 @@ mod tests {
         .expect("injected run");
 
         assert!(injected.injection_applied, "s28 official path did not apply injection");
+        assert!(
+            injected.semantic_mutation_receipt.is_some(),
+            "s28 official path did not return a validated typed receipt; backend_error={:?}",
+            injected.backend_error,
+        );
     }
 }

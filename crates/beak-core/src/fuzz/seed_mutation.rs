@@ -87,6 +87,7 @@ struct UsedOperands {
 
 pub struct SeedMutationEngine {
     max_instructions: usize,
+    hard_max_instructions: usize,
     rng: StdRand,
     arms: Vec<ArmStats>,
     epsilon: f64,
@@ -94,9 +95,10 @@ pub struct SeedMutationEngine {
 }
 
 impl SeedMutationEngine {
-    pub fn new(max_instructions: usize, rng_seed: u64) -> Self {
+    pub fn new(max_instructions: usize, hard_max_instructions: usize, rng_seed: u64) -> Self {
         Self {
             max_instructions: max_instructions.max(1),
+            hard_max_instructions: hard_max_instructions.max(max_instructions).max(1),
             rng: StdRand::with_seed(rng_seed),
             arms: (0..MutationArm::COUNT).map(|_| ArmStats::new()).collect(),
             epsilon: 0.05,
@@ -131,7 +133,7 @@ impl SeedMutationEngine {
         }
 
         let mut words = seed_words.to_vec();
-        words.truncate(self.max_instructions);
+        words.truncate(self.hard_max_instructions);
         let original = words.clone();
         let used = collect_used_operands(&words);
         let arm_index = self.select_arm();
@@ -148,7 +150,7 @@ impl SeedMutationEngine {
             MutationArm::ReplaceMnemonic => self.replace_mnemonic_same_format(&mut words),
         }
 
-        words.truncate(self.max_instructions);
+        words.truncate(self.hard_max_instructions);
         if words.is_empty() || words == original {
             return None;
         }
@@ -260,8 +262,17 @@ impl SeedMutationEngine {
     }
 
     fn insert_random_instruction(&mut self, words: &mut Vec<u32>, used: &UsedOperands) {
-        if words.len() >= self.max_instructions {
+        if words.len() >= self.hard_max_instructions {
             return;
+        }
+        // Long-tail growth: beyond the nominal length, allow growth with a Pareto-style
+        // probability (nominal/len)^2 so longer programs appear rarely instead of never.
+        if words.len() >= self.max_instructions {
+            let len = words.len() as u64;
+            let nominal = self.max_instructions as u64;
+            if self.rng.below(nz((len * len) as usize)) >= (nominal * nominal) as usize {
+                return;
+            }
         }
 
         let choose_mem = !used.mem_bases.is_empty() && self.rng.below(nz(4)) == 0;
@@ -318,8 +329,15 @@ impl SeedMutationEngine {
     }
 
     fn duplicate_one_instruction(&mut self, words: &mut Vec<u32>) {
-        if words.is_empty() || words.len() >= self.max_instructions {
+        if words.is_empty() || words.len() >= self.hard_max_instructions {
             return;
+        }
+        if words.len() >= self.max_instructions {
+            let len = words.len() as u64;
+            let nominal = self.max_instructions as u64;
+            if self.rng.below(nz((len * len) as usize)) >= (nominal * nominal) as usize {
+                return;
+            }
         }
         let idx = self.rng.below(nz(words.len()));
         words.insert(idx + 1, words[idx]);
@@ -362,7 +380,7 @@ impl SeedMutationEngine {
         let mut out = Vec::new();
         out.extend_from_slice(&words[..cut_a]);
         out.extend_from_slice(&other[cut_b..]);
-        out.truncate(self.max_instructions);
+        out.truncate(self.hard_max_instructions);
         if !out.is_empty() {
             *words = out;
         }
@@ -457,7 +475,7 @@ mod tests {
     fn mutates_seed_without_invalid_words() {
         let seed = vec![0x00100093, 0x00208113, 0x002081b3];
         let corpus = vec![seed.clone(), vec![0x00310193, 0x00418213]];
-        let mut engine = SeedMutationEngine::new(16, 7);
+        let mut engine = SeedMutationEngine::new(16, 16, 7);
         let mut seen_mutation = false;
         for _ in 0..32 {
             if let Some(m) = engine.mutate_from_corpus(&seed, &corpus) {

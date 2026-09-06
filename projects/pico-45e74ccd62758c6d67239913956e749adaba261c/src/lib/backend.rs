@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use beak_core::fuzz::benchmark::{
     BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
+    SemanticMutationReceipt, SemanticMutationRelation,
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
@@ -42,6 +43,10 @@ pub struct WorkerResponse {
     pub backend_error: Option<String>,
     pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pub injection_applied: bool,
+    #[serde(default)]
+    pub semantic_mutation_receipt: Option<SemanticMutationReceipt>,
+    #[serde(default)]
+    pub executed_exception_receipt: Option<beak_core::fuzz::benchmark::ExecutedExceptionReceipt>,
 }
 
 const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
@@ -63,6 +68,8 @@ struct RealRunnerResponse {
     error: Option<String>,
     observed_injection_sites: BTreeMap<String, Vec<u64>>,
     injection_applied: bool,
+    #[serde(default)]
+    semantic_mutation_receipt: Option<SemanticMutationReceipt>,
     #[serde(default)]
     executed_insns: Vec<PicoExecutedInsn>,
 }
@@ -219,6 +226,7 @@ pub fn run_backend_once(
     let mut eval = BackendEval::default();
     let mut observed_injection_sites = BTreeMap::new();
     let mut injection_applied = false;
+    let mut semantic_mutation_receipt = None;
 
     let runner_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_pico_real_backend(words, inject_kind, inject_step)
@@ -228,6 +236,7 @@ pub fn run_backend_once(
         Ok(Ok(resp)) => {
             observed_injection_sites = resp.observed_injection_sites.clone();
             injection_applied = resp.injection_applied;
+            semantic_mutation_receipt = resp.semantic_mutation_receipt.clone();
             eval.final_regs = resp.final_regs;
             eval.micro_op_count = resp.micro_op_count;
             if let Some(err) = &resp.error {
@@ -274,6 +283,8 @@ pub fn run_backend_once(
         backend_error: eval.backend_error,
         observed_injection_sites,
         injection_applied,
+        semantic_mutation_receipt,
+        executed_exception_receipt: None,
     })
 }
 
@@ -760,6 +771,9 @@ impl BenchmarkBackend for PicoBackend {
             final_regs: resp.final_regs,
             backend_error: resp.backend_error.clone(),
             semantic_injection_applied: resp.injection_applied,
+            semantic_mutation_receipt: resp.semantic_mutation_receipt,
+            executed_exception_receipt: resp.executed_exception_receipt,
+            production_resource: None,
         };
         self.last_observed_injection_sites = resp.observed_injection_sites;
 
@@ -788,6 +802,15 @@ impl BenchmarkBackend for PicoBackend {
         candidates.sort_by_key(Self::semantic_candidate_priority);
         candidates
     }
+
+    fn semantic_mutation_relation(
+        &self,
+        candidate: &SemanticInjectionCandidate,
+    ) -> Option<SemanticMutationRelation> {
+        (candidate.inject_kind == READ_WRITE_OP_SELECTOR_INJECT_KIND
+            && candidate.bucket_id == semantic::exec::OP_SELECTOR_BINDING.id)
+            .then_some(SemanticMutationRelation::OpcodeSelectorEquation)
+    }
 }
 
 impl Drop for PicoBackend {
@@ -799,7 +822,117 @@ impl Drop for PicoBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use beak_core::fuzz::benchmark::{run_benchmark, BenchmarkConfig};
+    use beak_core::fuzz::benchmark::SemanticMutationEffect;
+    use beak_core::rv32im::oracle::{OracleConfig, RISCVOracle};
     use beak_core::trace::Trace;
+    use serde_json::json;
+
+    #[derive(Default)]
+    struct ConstructiveOpcodeSelectorBackend {
+        armed: Option<(String, u64)>,
+        eval: BackendEval,
+    }
+
+    impl BenchmarkBackend for ConstructiveOpcodeSelectorBackend {
+        fn is_usable_seed(&self, words: &[u32]) -> bool {
+            !words.is_empty()
+                && words.len() <= 256
+                && words.iter().all(|word| RV32IMInstruction::decode(*word).is_some())
+        }
+
+        fn prepare_for_run(&mut self, _rng_seed: u64) {
+            self.eval = BackendEval::default();
+        }
+
+        fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
+            let regs = RISCVOracle::execute_with_config(words, OracleConfig::default());
+            let trace = PicoTrace::from_words(words)?;
+            let hits = trace.bucket_hits().to_vec();
+            self.eval = BackendEval {
+                micro_op_count: words.len(),
+                bucket_hits: hits.clone(),
+                final_regs: Some(regs),
+                ..BackendEval::default()
+            };
+
+            let Some((kind, step)) = self.armed.as_ref() else {
+                return Ok(regs);
+            };
+            if kind != READ_WRITE_OP_SELECTOR_INJECT_KIND {
+                return Ok(regs);
+            }
+            let Some(hit) = hits.iter().find(|hit| {
+                hit.bucket_id == semantic::exec::OP_SELECTOR_BINDING.id
+                    && hit.details.get("cell_id").and_then(|value| value.as_str())
+                        == Some("id4.load")
+                    && hit.details.get("op_idx").and_then(|value| value.as_u64()) == Some(*step)
+                    && hit.details.get("rd").and_then(|value| value.as_u64()).is_some_and(|rd| rd != 0)
+            }) else {
+                return Ok(regs);
+            };
+
+            let mut context = hit
+                .details
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<serde_json::Map<String, serde_json::Value>>();
+            context.insert("bucket_id".to_string(), json!(hit.bucket_id));
+            context.insert("executed_read_write_row".to_string(), json!(true));
+            context.insert("step".to_string(), json!(step));
+            context.insert("mutation_step".to_string(), json!(step));
+            context.insert("selector_before".to_string(), json!(0));
+            context.insert("selector_after".to_string(), json!(1));
+            self.eval.semantic_injection_applied = true;
+            self.eval.semantic_mutation_receipt = Some(SemanticMutationReceipt {
+                inject_kind: kind.clone(),
+                site: "memory_read_write.op_a_0".to_string(),
+                field: "instruction.op_a_0".to_string(),
+                step: *step,
+                before: json!(0),
+                after: json!(1),
+                effect: SemanticMutationEffect {
+                    relation: SemanticMutationRelation::OpcodeSelectorEquation,
+                    preserved_before: None,
+                    preserved_after: None,
+                    context,
+                },
+            });
+            Ok(regs)
+        }
+
+        fn collect_eval(&mut self) -> BackendEval {
+            self.eval.clone()
+        }
+
+        fn clear_semantic_injection(&mut self) {
+            self.armed = None;
+        }
+
+        fn arm_semantic_injection(&mut self, kind: &str, step: u64) -> Result<(), String> {
+            self.armed = Some((kind.to_string(), step));
+            Ok(())
+        }
+
+        fn semantic_injection_candidates(
+            &self,
+            hits: &[BucketHit],
+        ) -> Vec<SemanticInjectionCandidate> {
+            let backend = PicoBackend::new(256);
+            backend
+                .semantic_injection_candidates(hits)
+                .into_iter()
+                .filter(|candidate| candidate.inject_kind == READ_WRITE_OP_SELECTOR_INJECT_KIND)
+                .collect()
+        }
+
+        fn semantic_mutation_relation(
+            &self,
+            candidate: &SemanticInjectionCandidate,
+        ) -> Option<SemanticMutationRelation> {
+            PicoBackend::new(256).semantic_mutation_relation(candidate)
+        }
+    }
 
     #[test]
     fn id4_load_store_candidates_use_read_write_selector_hook() {
@@ -821,6 +954,113 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].bucket_id, semantic::exec::OP_SELECTOR_BINDING.id);
         assert_eq!(candidates[0].inject_kind, READ_WRITE_OP_SELECTOR_INJECT_KIND);
+        assert_eq!(
+            backend.semantic_mutation_relation(&candidates[0]),
+            Some(SemanticMutationRelation::OpcodeSelectorEquation)
+        );
+        let mut wrong_kind = candidates[0].clone();
+        wrong_kind.inject_kind = OP_SELECTOR_INJECT_KIND.to_string();
+        assert_eq!(backend.semantic_mutation_relation(&wrong_kind), None);
+        let mut wrong_bucket = candidates[0].clone();
+        wrong_bucket.bucket_id = semantic::exec::DEST_BINDING.id.to_string();
+        assert_eq!(backend.semantic_mutation_relation(&wrong_bucket), None);
+    }
+
+    #[test]
+    fn worker_response_requires_typed_receipt_when_present() {
+        let missing = serde_json::json!({
+            "request_id": 1,
+            "final_regs": null,
+            "micro_op_count": 0,
+            "bucket_hits": [],
+            "trace_signals": [],
+            "backend_error": null,
+            "observed_injection_sites": {},
+            "injection_applied": false
+        });
+        let parsed: WorkerResponse = serde_json::from_value(missing).expect("optional receipt");
+        assert!(parsed.semantic_mutation_receipt.is_none());
+
+        let malformed = serde_json::json!({
+            "request_id": 1,
+            "final_regs": null,
+            "micro_op_count": 0,
+            "bucket_hits": [],
+            "trace_signals": [],
+            "backend_error": null,
+            "observed_injection_sites": {},
+            "injection_applied": true,
+            "semantic_mutation_receipt": {"inject_kind": READ_WRITE_OP_SELECTOR_INJECT_KIND}
+        });
+        assert!(serde_json::from_value::<WorkerResponse>(malformed).is_err());
+    }
+
+    #[test]
+    fn ordinary_generator_path_classifies_and_persists_changed_executed_selector_receipt() {
+        // The ordinary bounded carrier generator supplies multiple generic paired SW/LW
+        // variants. No historical replay word sequence is present in this test corpus.
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "beak-pico-op-selector-path-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create test output directory");
+        let seeds = dir.join("ordinary-empty.jsonl");
+        std::fs::write(&seeds, "").expect("write empty ordinary corpus");
+
+        let outputs = run_benchmark(
+            BenchmarkConfig {
+                zkvm_tag: "pico".to_string(),
+                zkvm_commit: "45e74ccd62758c6d67239913956e749adaba261c".to_string(),
+                rng_seed: 2026,
+                oracle: OracleConfig::default(),
+                seeds_jsonl: seeds,
+                out_dir: dir.clone(),
+                output_prefix: Some("constructive-path".to_string()),
+                initial_limit: 1,
+                mutation_iterations: 0,
+                max_instructions: 256,
+                long_tail_max_instructions: 0,
+                precheck_oracle_max_steps: 32,
+                semantic_search_enabled: true,
+                semantic_window_before: 16,
+                semantic_window_after: 64,
+                semantic_step_stride: 1,
+                semantic_max_trials_per_bucket: 1,
+                stack_size_bytes: 16 * 1024 * 1024,
+            },
+            ConstructiveOpcodeSelectorBackend::default(),
+        )
+        .expect("ordinary benchmark path");
+
+        let bugs = std::fs::read_to_string(&outputs.bugs_path).expect("read persisted bug row");
+        let rows = bugs
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("bug json"))
+            .collect::<Vec<_>>();
+        let metadata = rows
+            .iter()
+            .filter_map(|row| row.get("metadata").and_then(|value| value.as_object()))
+            .find(|metadata| {
+                metadata.get("case_id")
+                    == Some(&json!("Pico-ReadWrite-OpcodeSelector-01"))
+            })
+            .expect("generic paired store/load carrier must persist strict Pico finding");
+        assert_eq!(metadata.get("kind"), Some(&json!("underconstrained_candidate")));
+        assert_eq!(metadata.get("inject_step"), Some(&json!(3)));
+        assert_eq!(metadata.get("semantic_relation_validated"), Some(&json!(true)));
+        assert_eq!(metadata.get("semantic_injection_applied"), Some(&json!(true)));
+        assert_eq!(
+            metadata.get("case_id"),
+            Some(&json!("Pico-ReadWrite-OpcodeSelector-01"))
+        );
+        assert_eq!(metadata.get("source"), Some(&json!("ordinary_generator")));
+        assert_eq!(metadata.get("carrier_family"), Some(&json!("paired_store_load")));
+        assert_eq!(metadata.get("ordinary_generator_budget"), Some(&json!(10)));
+        std::fs::remove_dir_all(&dir).expect("remove test output directory");
     }
 
     #[test]
@@ -857,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_monotonic_candidate_precedes_timestamped_helper_bucket() {
+    fn timestamp_monotonic_and_helper_candidates_share_timestamp_hook() {
         let trace = PicoTrace::from_executed(&[
             PicoExecutedInsn {
                 step_idx: 0,
@@ -931,7 +1171,15 @@ mod tests {
         assert!(candidates.iter().any(|candidate| {
             candidate.bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id
         }));
-        assert_eq!(candidates[0].bucket_id, semantic::time::MONOTONIC_ACCESS_ORDERING.id);
-        assert_eq!(candidates[0].inject_kind, TIMESTAMP_INJECT_KIND);
+        let monotonic = candidates
+            .iter()
+            .find(|candidate| candidate.bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id)
+            .expect("monotonic candidate");
+        let helper = candidates
+            .iter()
+            .find(|candidate| candidate.bucket_id == semantic::memory::TIMESTAMPED_LOAD_PATH.id)
+            .expect("timestamp helper candidate");
+        assert_eq!(monotonic.inject_kind, TIMESTAMP_INJECT_KIND);
+        assert_eq!(helper.inject_kind, TIMESTAMP_INJECT_KIND);
     }
 }

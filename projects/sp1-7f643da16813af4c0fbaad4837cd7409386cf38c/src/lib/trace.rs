@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::observations::{SequenceInsnObservation, SequenceSemanticMatcherProfile};
 use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic, semantic_matchers};
 use serde_json::{Value, json};
 use sp1_core_executor::{
-    ByteOpcode, ExecutionRecord, Executor, ExecutorMode, Instruction as SP1Instruction, Opcode,
-    Program,
+    events::MemoryRecordEnum, ByteOpcode, ExecutionRecord, Executor, ExecutorMode,
+    Instruction as SP1Instruction, Opcode, Program,
 };
 use sp1_stark::SP1CoreOpts;
 
@@ -63,6 +63,45 @@ pub fn build_sp1_program(words: &[u32]) -> Result<Program, String> {
         })?);
     }
     Ok(Program::new(instructions, 0, 0))
+}
+
+/// Reconstruct the four registers that determine an SP1 write ECALL from
+/// executed CPU rows. x5/x10/x11 are also present on the ECALL row, while x12
+/// must be carried forward from earlier executed register writes.
+pub(crate) fn executed_ecall_register_states(
+    records: &[ExecutionRecord],
+) -> BTreeMap<u64, [u32; 4]> {
+    let mut registers = [0u32; 32];
+    if let Some(record) = records.first() {
+        for (idx, register) in registers.iter_mut().enumerate() {
+            if let Some(value) = record.program.memory_image.get(&(idx as u32)) {
+                *register = *value;
+            }
+        }
+    }
+
+    let mut states = BTreeMap::new();
+    let mut step_idx = 0u64;
+    for record in records {
+        for cpu in &record.cpu_events {
+            let instruction = record.program.fetch(cpu.pc);
+            if instruction.opcode == Opcode::ECALL {
+                let x5 = match cpu.a_record {
+                    Some(MemoryRecordEnum::Write(write)) => write.prev_value,
+                    _ => registers[5],
+                };
+                states.insert(step_idx, [x5, cpu.b, cpu.c, registers[12]]);
+            }
+            if let Some(MemoryRecordEnum::Write(write)) = cpu.a_record {
+                let register_idx = instruction.op_a as usize;
+                if register_idx < registers.len() {
+                    registers[register_idx] = if register_idx == 0 { 0 } else { write.value };
+                }
+            }
+            step_idx = step_idx.saturating_add(1);
+        }
+    }
+    states
 }
 
 pub fn decode_word_to_sp1_instruction(word: u32) -> Result<SP1Instruction, String> {
@@ -610,6 +649,7 @@ fn base_details(insn: &Sp1Insn, obligation_id: &str, cell_id: &str) -> HashMap<S
     details.insert("op_idx".to_string(), json!(insn.step_idx));
     details.insert("step_idx".to_string(), json!(insn.step_idx));
     details.insert("pc".to_string(), json!(insn.pc));
+    details.insert("next_pc".to_string(), json!(insn.next_pc));
     details.insert("opcode".to_string(), json!(format!("0x{:08x}", insn.word)));
     details.insert("mnemonic".to_string(), json!(insn.mnemonic));
     if let Some(rd) = insn.rd {
@@ -632,6 +672,18 @@ fn base_details(insn: &Sp1Insn, obligation_id: &str, cell_id: &str) -> HashMap<S
     }
     if let Some(rs2_or_imm_val) = insn.rs2_or_imm_val {
         details.insert("rs2_or_imm_val".to_string(), json!(rs2_or_imm_val));
+    }
+    if let Some([x5, x10, x11, x12]) = insn.ecall_registers {
+        details.insert("control_flow_family".to_string(), json!("ecall"));
+        details.insert("expected_next_pc".to_string(), json!(insn.pc.wrapping_add(4)));
+        details.insert("ecall_x5".to_string(), json!(x5));
+        details.insert("ecall_x10".to_string(), json!(x10));
+        details.insert("ecall_x11".to_string(), json!(x11));
+        details.insert("ecall_x12".to_string(), json!(x12));
+        details.insert(
+            "ecall_registers".to_string(),
+            json!({"x5": x5, "x10": x10, "x11": x11, "x12": x12}),
+        );
     }
     details
 }
@@ -1455,6 +1507,13 @@ fn emit_instruction_obligation_hits(instructions: &[Sp1Insn]) -> Vec<BucketHit> 
             "ecall" => {
                 push_obligation_hit(
                     &mut hits,
+                    semantic::exec::CONTROL_FLOW_BINDING,
+                    insn,
+                    "cf6",
+                    "cf6.normal",
+                );
+                push_obligation_hit(
+                    &mut hits,
                     semantic::control::ECALL_WORD_VALIDITY,
                     insn,
                     "cf7",
@@ -1570,6 +1629,7 @@ impl Sp1Trace {
         words: &[u32],
         records: &[ExecutionRecord],
     ) -> Result<Self, String> {
+        let ecall_register_states = executed_ecall_register_states(records);
         let mut instructions = Vec::new();
         let mut chip_rows = Vec::new();
         let mut interactions = Vec::new();
@@ -1605,6 +1665,7 @@ impl Sp1Trace {
                             rd_val: Some(cpu.a),
                             rs1_val: Some(cpu.b),
                             rs2_or_imm_val: Some(cpu.c),
+                            ecall_registers: ecall_register_states.get(&step_idx).copied(),
                             asm: dec.asm,
                         }
                     } else {
@@ -1625,6 +1686,7 @@ impl Sp1Trace {
                             rd_val: Some(cpu.a),
                             rs1_val: Some(cpu.b),
                             rs2_or_imm_val: Some(cpu.c),
+                            ecall_registers: ecall_register_states.get(&step_idx).copied(),
                             asm: asm_from_parts(&mnemonic, ops),
                         }
                     }
@@ -1646,6 +1708,7 @@ impl Sp1Trace {
                         rd_val: Some(cpu.a),
                         rs1_val: Some(cpu.b),
                         rs2_or_imm_val: Some(cpu.c),
+                        ecall_registers: ecall_register_states.get(&step_idx).copied(),
                         asm: asm_from_parts(&mnemonic, ops),
                     }
                 };
@@ -1794,7 +1857,9 @@ impl Sp1Trace {
                 emit_boolean_on_load_after_store: true,
                 emit_kind_selector: true,
                 emit_digest_route: true,
-                emit_control_flow_bindings: true,
+                // Native instruction hits below carry full executed identity for control flow.
+                // Keeping the shared coarse hit would make exact receipt binding ambiguous.
+                emit_control_flow_bindings: false,
                 emit_memory_alignment: true,
                 emit_memory_address_progression: true,
                 emit_load_value_binding: true,
@@ -1855,5 +1920,43 @@ impl Trace for Sp1Trace {
 
     fn trace_signals(&self) -> &[TraceSignal] {
         &self.trace_signals
+    }
+}
+
+#[cfg(test)]
+mod relation_hit_tests {
+    use super::{Sp1Trace, BACKEND, COMMIT};
+    use beak_core::trace::semantic;
+    use serde_json::json;
+
+    #[test]
+    fn normal_ecall_has_exactly_one_rich_control_flow_hit() {
+        let words = [0x0020_0293, 0x0030_0513, 0x0000_0593, 0x0000_0613, 0x0000_0073];
+        let trace = Sp1Trace::from_words(&words).expect("canonical normal ECALL trace");
+        let ecall = trace
+            .instructions
+            .iter()
+            .find(|insn| insn.mnemonic == "ecall")
+            .expect("executed ECALL instruction");
+        let matching = trace
+            .bucket_hits
+            .iter()
+            .filter(|hit| {
+                let details = &hit.details;
+                hit.bucket_id == semantic::exec::CONTROL_FLOW_BINDING.id
+                    && details.get("obligation_id") == Some(&json!("cf6"))
+                    && details.get("cell_id") == Some(&json!("cf6.normal"))
+                    && details.get("backend") == Some(&json!(BACKEND))
+                    && details.get("commit") == Some(&json!(COMMIT))
+                    && details.get("trace_source") == Some(&json!("instruction"))
+                    && details.get("op_idx") == Some(&json!(ecall.step_idx))
+                    && details.get("pc") == Some(&json!(ecall.pc))
+                    && details.get("opcode")
+                        == Some(&json!(format!("0x{:08x}", ecall.word)))
+                    && details.get("mnemonic") == Some(&json!("ecall"))
+            })
+            .count();
+
+        assert_eq!(matching, 1, "normal ECALL relation hit must be unique");
     }
 }

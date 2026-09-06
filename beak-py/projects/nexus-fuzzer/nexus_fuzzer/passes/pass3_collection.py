@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 NEXUS_BENCHMARK_COMMIT = "636ccb360d0f4ae657ae4bb64e1e275ccec8826"
+NEXUS_MEMORY_SIZE_COMMIT = "41c6c6080f46b97980053c47b078321225b4338a"
+NEXUS_MUL_CARRY_COMMIT = "f1b895b868915fd4d0a794a5bc730e6cb8d840f6"
 NEXUS_F2AD_COMMIT = "f2ad12652c39dc516a116447a53f8557f64a7f7d"
 
 
@@ -13,6 +15,551 @@ def _replace_once(path: Path, old: str, new: str) -> None:
     if old not in contents:
         raise RuntimeError(f"anchor not found in {path}: {old[:80]!r}")
     path.write_text(contents.replace(old, new, 1))
+
+
+def _patch_f1_mul_carry_exception_receipt(nexus_install_path: Path) -> None:
+    nexani_path = (
+        nexus_install_path
+        / "prover"
+        / "src"
+        / "chips"
+        / "instructions"
+        / "m"
+        / "nexani.rs"
+    )
+    _replace_once(
+        nexani_path,
+        """pub(super) fn mull_limb(b: u32, c: u32) -> MulResult {
+    // Convert inputs to limbs (4 bytes each)
+""",
+        """pub(super) fn mull_limb(b: u32, c: u32) -> MulResult {
+    mull_limb_inner(b, c, None)
+}
+
+// BEAK-INSERT: nexus.f1b895b.mul_carry.executed_exception_receipt.entry
+pub(super) fn mull_limb_for_executed_mul(b: u32, c: u32, step: usize) -> MulResult {
+    mull_limb_inner(b, c, Some(step))
+}
+
+fn mull_limb_inner(b: u32, c: u32, executed_mul_step: Option<usize>) -> MulResult {
+    // Convert inputs to limbs (4 bytes each)
+""",
+    )
+    _replace_once(
+        nexani_path,
+        """    // Verify our calculations match the built-in multiplication
+    assert!(carry_1 < 4, "Carry_1 exceeds expected bounds {}", carry_1);
+""",
+        """    // Verify our calculations match the built-in multiplication.
+    // BEAK-INSERT: nexus.f1b895b.mul_carry.executed_exception_receipt.failure
+    if carry_1 >= 4 {
+        if let Some(step) = executed_mul_step {
+            std::env::set_var(
+                "BEAK_NEXUS_EXECUTED_EXCEPTION_RECEIPT",
+                format!(
+                    r#"{{"effect":"multiplication_carry_bound","obligation_id":"md4","cell_id":"md4.mul_overflow","stage":"mul.witness.carry_1_bound","step":{},"context":{{"backend":"nexus","commit":"f1b895b868915fd4d0a794a5bc730e6cb8d840f6","trace_source":"instruction","rs1_val":{},"rs2_val":{},"product_hi":{},"product_lo":{},"carry_1":{},"carry_bound_exclusive":4}}}}"#,
+                    step,
+                    b,
+                    c,
+                    product >> 32,
+                    product as u32,
+                    carry_1,
+                ),
+            );
+        }
+    }
+    assert!(carry_1 < 4, "Carry_1 exceeds expected bounds {}", carry_1);
+""",
+    )
+
+    mul_path = (
+        nexus_install_path
+        / "prover"
+        / "src"
+        / "chips"
+        / "instructions"
+        / "m"
+        / "mul.rs"
+    )
+    _replace_once(
+        mul_path,
+        """use super::{gadget::constrain_mul_partial_product, nexani::mull_limb};
+""",
+        """// BEAK-INSERT: nexus.f1b895b.mul_carry.executed_exception_receipt.import
+use super::{
+    gadget::constrain_mul_partial_product,
+    nexani::mull_limb_for_executed_mul,
+};
+""",
+    )
+    _replace_once(
+        mul_path,
+        """        let mul_result = mull_limb(u32::from_le_bytes(value_b), u32::from_le_bytes(value_c));
+""",
+        """        // BEAK-INSERT: nexus.f1b895b.mul_carry.executed_exception_receipt.call
+        let mul_result = mull_limb_for_executed_mul(
+            u32::from_le_bytes(value_b),
+            u32::from_le_bytes(value_c),
+            row_idx,
+        );
+""",
+    )
+
+
+def _patch_41_memory_table_population_receipt(nexus_install_path: Path) -> None:
+    machine_path = nexus_install_path / "prover" / "src" / "machine.rs"
+    if machine_path.exists():
+        contents = machine_path.read_text()
+        legacy_start = contents.find(
+            "        // BEAK-INSERT: nexus.41c6.memory_table_population_receipt\n"
+        )
+        if legacy_start >= 0:
+            legacy_end_marker = "        // BEAK-INSERT-END\n"
+            legacy_end = contents.find(legacy_end_marker, legacy_start)
+            if legacy_end < 0:
+                raise RuntimeError("unterminated legacy Nexus-41 receipt patch")
+            legacy_end += len(legacy_end_marker)
+            machine_path.write_text(contents[:legacy_start] + contents[legacy_end:])
+
+    sidenote_path = nexus_install_path / "prover" / "src" / "trace" / "sidenote.rs"
+    _replace_once(
+        sidenote_path,
+        """    /// Public output with the exit code.
+    pub(crate) public_output: BTreeMap<u32, u8>,
+}
+""",
+        """    /// Public output with the exit code.
+    pub(crate) public_output: BTreeMap<u32, u8>,
+    // BEAK-INSERT: nexus.41c6.memory_table_public_rows
+    pub(crate) beak_public_rows: usize,
+}
+""",
+    )
+    _replace_once(
+        sidenote_path,
+        """        ret.public_output = public_output;
+        ret
+""",
+        """        // BEAK-INSERT: nexus.41c6.memory_table_public_rows.value
+        ret.beak_public_rows = init_memory
+            .len()
+            .saturating_add(public_output.len())
+            .saturating_add(exit_code.len());
+        ret.public_output = public_output;
+        ret
+""",
+    )
+
+    load_store_path = (
+        nexus_install_path
+        / "prover"
+        / "src"
+        / "chips"
+        / "instructions"
+        / "load_store.rs"
+    )
+    legacy_population_patch = r'''        assert_eq!(row_idx + 1, traces.num_rows());
+
+        // BEAK-INSERT: nexus.41c6.memory_table_population_receipt
+        let beak_population_rows = side_note.rw_mem_check.last_access.len();
+        let beak_allocated_rows = traces.num_rows();
+        let beak_public_rows = side_note.rw_mem_check.beak_public_rows;
+        let beak_boundary_k = beak_allocated_rows.trailing_zeros();
+        let beak_exact_crossing = beak_allocated_rows.is_power_of_two()
+            && beak_population_rows == beak_allocated_rows.saturating_add(1)
+            && beak_public_rows <= beak_allocated_rows;
+        std::env::set_var(
+            "BEAK_NEXUS_MEMORY_TABLE_BOUNDARY_RECEIPT",
+            format!(
+                r#"{{"schema_version":1,"relation":"last_access_population_crosses_allocated_rows_by_one","table_name":"rw_mem_check.last_access","population_rows":{},"allocated_rows":{},"public_rows":{},"boundary_k":{},"exact_crossing":{}}}"#,
+                beak_population_rows,
+                beak_allocated_rows,
+                beak_public_rows,
+                beak_boundary_k,
+                beak_exact_crossing,
+            ),
+        );
+        // BEAK-INSERT-END
+
+        // side_note.rw_mem_check.last_access contains the last access time and value for every address under RW memory checking
+        for (row_idx, (address, (last_access, last_value))) in
+            side_note.rw_mem_check.last_access.iter().enumerate()
+        {
+            if beak_exact_crossing && row_idx == beak_allocated_rows {
+                std::env::set_var(
+                    "BEAK_NEXUS_EXECUTED_EXCEPTION_RECEIPT",
+                    format!(
+                        r#"{{"effect":"memory_table_capacity_write","obligation_id":"pd3","cell_id":"pd3.mem_table","stage":"rw_mem_check.last_access.write","step":{},"context":{{"backend":"nexus","commit":"41c6c6080f46b97980053c47b078321225b4338a","trace_source":"prover.rw_mem_check.last_access","table_name":"rw_mem_check.last_access","relation":"last_access_population_crosses_allocated_rows_at_first_overflow","relation_valid":true,"exact_crossing":true,"failure_observed":true,"failure_manifestation":"capacity_write_out_of_bounds","failing_row_idx":{},"population_rows":{},"allocated_rows":{},"public_rows":{},"boundary_k":{}}}}}"#,
+                        beak_population_rows,
+                        row_idx,
+                        beak_population_rows,
+                        beak_allocated_rows,
+                        beak_public_rows,
+                        beak_boundary_k,
+                    ),
+                );
+            }
+            traces.fill_columns(row_idx, *address, Column::RamInitFinalAddr);
+'''
+    original_population_anchor = '''        assert_eq!(row_idx + 1, traces.num_rows());
+
+        // side_note.rw_mem_check.last_access contains the last access time and value for every address under RW memory checking
+        for (row_idx, (address, (last_access, last_value))) in
+            side_note.rw_mem_check.last_access.iter().enumerate()
+        {
+            traces.fill_columns(row_idx, *address, Column::RamInitFinalAddr);
+'''
+    contents = load_store_path.read_text()
+    if legacy_population_patch in contents:
+        load_store_path.write_text(
+            contents.replace(legacy_population_patch, original_population_anchor, 1)
+        )
+    _replace_once(
+        load_store_path,
+        original_population_anchor,
+        """        assert_eq!(row_idx + 1, traces.num_rows());
+
+        // BEAK-INSERT: nexus.41c6.memory_table_population_receipt
+        let beak_population_rows = side_note.rw_mem_check.last_access.len();
+        let beak_allocated_rows = traces.num_rows();
+        let beak_public_rows = side_note.rw_mem_check.beak_public_rows;
+        let beak_boundary_k = beak_allocated_rows.trailing_zeros();
+        let beak_crossing_row_idx = beak_allocated_rows;
+        let beak_overflow_rows = beak_population_rows.saturating_sub(beak_allocated_rows);
+        let beak_exact_crossing = beak_allocated_rows.is_power_of_two()
+            && beak_population_rows > beak_allocated_rows
+            && beak_public_rows <= beak_allocated_rows;
+        let (beak_failing_address, beak_last_access_timestamp, beak_last_value) =
+            if beak_exact_crossing {
+                side_note
+                    .rw_mem_check
+                    .last_access
+                    .iter()
+                    .nth(beak_crossing_row_idx)
+                    .map(|(address, (last_access, last_value))| {
+                        (*address, *last_access, *last_value)
+                    })
+                    .unwrap_or((0, 0, 0))
+            } else {
+                (0, 0, 0)
+            };
+        std::env::set_var(
+            "BEAK_NEXUS_MEMORY_TABLE_BOUNDARY_RECEIPT",
+            format!(
+                r#"{{"schema_version":1,"relation":"last_access_population_crosses_allocated_rows_at_first_overflow","table_name":"rw_mem_check.last_access","population_rows":{},"allocated_rows":{},"public_rows":{},"boundary_k":{},"crossing_row_idx":{},"overflow_rows":{},"exact_crossing":{},"failing_table_row_idx":{},"failing_address":{},"last_access_timestamp":{},"last_value":{}}}"#,
+                beak_population_rows,
+                beak_allocated_rows,
+                beak_public_rows,
+                beak_boundary_k,
+                beak_crossing_row_idx,
+                beak_overflow_rows,
+                beak_exact_crossing,
+                beak_crossing_row_idx,
+                beak_failing_address,
+                beak_last_access_timestamp,
+                beak_last_value,
+            ),
+        );
+        // BEAK-INSERT-END
+
+        // side_note.rw_mem_check.last_access contains the last access time and value for every address under RW memory checking
+        for (row_idx, (address, (last_access, last_value))) in
+            side_note.rw_mem_check.last_access.iter().enumerate()
+        {
+            if beak_exact_crossing && row_idx == beak_crossing_row_idx {
+                std::env::set_var(
+                    "BEAK_NEXUS_EXECUTED_EXCEPTION_RECEIPT",
+                    format!(
+                        r#"{{"effect":"memory_table_capacity_write","obligation_id":"pd3","cell_id":"pd3.mem_table","stage":"rw_mem_check.last_access.write","step":{},"context":{{"backend":"nexus","commit":"41c6c6080f46b97980053c47b078321225b4338a","trace_source":"prover.rw_mem_check.last_access","table_name":"rw_mem_check.last_access","relation":"last_access_population_crosses_allocated_rows_at_first_overflow","relation_valid":true,"exact_crossing":true,"failure_observed":true,"failure_manifestation":"capacity_write_out_of_bounds","failing_row_idx":{},"population_rows":{},"allocated_rows":{},"public_rows":{},"boundary_k":{},"crossing_row_idx":{},"overflow_rows":{}}}}}"#,
+                        beak_crossing_row_idx,
+                        row_idx,
+                        beak_population_rows,
+                        beak_allocated_rows,
+                        beak_public_rows,
+                        beak_boundary_k,
+                        beak_crossing_row_idx,
+                        beak_overflow_rows,
+                    ),
+                );
+            }
+            traces.fill_columns(row_idx, *address, Column::RamInitFinalAddr);
+""",
+    )
+
+
+def _patch_f2ad_prover2_resource_guard(nexus_install_path: Path) -> None:
+    path = nexus_install_path / "prover2" / "trace" / "src" / "builder.rs"
+    contents = path.read_text()
+    helper_guard = "// BEAK-INSERT: nexus.f2ad126.prover2.trace_builder.resource_guard"
+    helper_anchor = """use super::utils::{self, IntoBaseFields};
+"""
+    helper = """use super::utils::{self, IntoBaseFields};
+
+// BEAK-INSERT: nexus.f2ad126.prover2.trace_builder.resource_guard
+const BEAK_NEXUS_MAX_PROVER_LOG_SIZE_ENV: &str = "BEAK_NEXUS_MAX_PROVER_LOG_SIZE";
+const BEAK_NEXUS_MAX_TRACE_CELLS_ENV: &str = "BEAK_NEXUS_MAX_TRACE_CELLS";
+const BEAK_NEXUS_DEFAULT_MAX_PROVER_LOG_SIZE: u32 = 22;
+const BEAK_NEXUS_DEFAULT_MAX_TRACE_CELLS: usize = 134_217_728;
+
+fn beak_nexus_env_u32(key: &str, default: u32) -> u32 {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(default)
+}
+
+fn beak_nexus_env_usize(key: &str, default: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn beak_nexus_guard_trace_allocation(log_size: u32, columns_num: usize) {
+    if log_size >= usize::BITS {
+        panic!(
+            "beak nexus resource guard: prover trace log_size {log_size} cannot \
+             fit in usize-backed vectors"
+        );
+    }
+
+    let max_log_size = beak_nexus_env_u32(
+        BEAK_NEXUS_MAX_PROVER_LOG_SIZE_ENV,
+        BEAK_NEXUS_DEFAULT_MAX_PROVER_LOG_SIZE,
+    );
+    if log_size > max_log_size {
+        panic!(
+            "beak nexus resource guard: prover trace log_size {log_size} exceeds \
+             {max_log_size}; set {BEAK_NEXUS_MAX_PROVER_LOG_SIZE_ENV} to override"
+        );
+    }
+
+    let rows = 1usize.checked_shl(log_size).unwrap_or(usize::MAX);
+    let cells = rows.checked_mul(columns_num).unwrap_or(usize::MAX);
+    let max_cells = beak_nexus_env_usize(
+        BEAK_NEXUS_MAX_TRACE_CELLS_ENV,
+        BEAK_NEXUS_DEFAULT_MAX_TRACE_CELLS,
+    );
+    if cells > max_cells {
+        panic!(
+            "beak nexus resource guard: prover trace allocation would create \
+             {cells} cells ({columns_num} columns * 2^{log_size} rows), exceeding \
+             {max_cells}; set {BEAK_NEXUS_MAX_TRACE_CELLS_ENV} to override"
+        );
+    }
+}
+"""
+    if helper_guard not in contents:
+        _replace_once(path, helper_anchor, helper)
+
+    contents = path.read_text()
+    call_guard = "// BEAK-INSERT: nexus.f2ad126.prover2.trace_builder.resource_guard.call"
+    call_anchor = """    pub fn new(log_size: u32) -> Self {
+        assert!(log_size >= LOG_N_LANES);
+        Self {
+            cols: vec![vec![BaseField::zero(); 1 << log_size]; C::COLUMNS_NUM],
+            log_size,
+            phantom_data: PhantomData,
+        }
+    }
+"""
+    call = """    pub fn new(log_size: u32) -> Self {
+        assert!(log_size >= LOG_N_LANES);
+        // BEAK-INSERT: nexus.f2ad126.prover2.trace_builder.resource_guard.call
+        beak_nexus_guard_trace_allocation(log_size, C::COLUMNS_NUM);
+        Self {
+            cols: vec![vec![BaseField::zero(); 1 << log_size]; C::COLUMNS_NUM],
+            log_size,
+            phantom_data: PhantomData,
+        }
+    }
+"""
+    if call_guard not in contents:
+        _replace_once(path, call_anchor, call)
+
+
+def _patch_f2ad_vm_resource_guards(nexus_install_path: Path) -> None:
+    executor_path = nexus_install_path / "vm" / "src" / "emulator" / "executor.rs"
+    contents = executor_path.read_text()
+    helper_guard = "// BEAK-INSERT: nexus.f2ad126.vm.execution_resource_guard"
+    helper_anchor = """use std::{
+    cmp::max,
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    rc::Rc,
+};
+"""
+    helper = """use std::{
+    cmp::max,
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    rc::Rc,
+};
+
+// BEAK-INSERT: nexus.f2ad126.vm.execution_resource_guard
+const BEAK_NEXUS_MAX_EXEC_STEPS_ENV: &str = "BEAK_NEXUS_MAX_EXEC_STEPS";
+const BEAK_NEXUS_DEFAULT_MAX_EXEC_STEPS: usize = 262_144;
+
+fn beak_nexus_max_exec_steps() -> usize {
+    std::env::var(BEAK_NEXUS_MAX_EXEC_STEPS_ENV)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(BEAK_NEXUS_DEFAULT_MAX_EXEC_STEPS)
+}
+"""
+    if helper_guard not in contents:
+        _replace_once(executor_path, helper_anchor, helper)
+
+    contents = executor_path.read_text()
+    call_guard = "// BEAK-INSERT: nexus.f2ad126.vm.execution_resource_guard.call"
+    call_anchor = """    ) -> Result<(Vec<InstructionResult>, MemoryTranscript)> {
+        let mut results: Vec<InstructionResult> = Vec::new();
+        let mut transcript: MemoryTranscript = Vec::new();
+
+        loop {
+            let basic_block_entry = self.fetch_block(self.get_executor().cpu.pc.value)?;
+            let (res, mem) =
+                self.execute_basic_block(&basic_block_entry, force_provable_transcript)?;
+
+            results.extend(res);
+            transcript.extend(mem);
+        }
+    }
+"""
+    call = """    ) -> Result<(Vec<InstructionResult>, MemoryTranscript)> {
+        let mut results: Vec<InstructionResult> = Vec::new();
+        let mut transcript: MemoryTranscript = Vec::new();
+        // BEAK-INSERT: nexus.f2ad126.vm.execution_resource_guard.call
+        let max_exec_steps = beak_nexus_max_exec_steps();
+
+        loop {
+            let basic_block_entry = self.fetch_block(self.get_executor().cpu.pc.value)?;
+            let (res, mem) =
+                self.execute_basic_block(&basic_block_entry, force_provable_transcript)?;
+
+            results.extend(res);
+            transcript.extend(mem);
+            if results.len() > max_exec_steps {
+                Err(VMErrorKind::VMOutOfInstructions)?;
+            }
+        }
+    }
+"""
+    if call_guard not in contents:
+        _replace_once(executor_path, call_anchor, call)
+
+    trace_path = nexus_install_path / "vm" / "src" / "trace.rs"
+    contents = trace_path.read_text()
+    trace_helper_guard = "// BEAK-INSERT: nexus.f2ad126.vm.trace_resource_guard"
+    trace_helper_anchor = """use crate::{
+    cpu::{instructions::InstructionResult, RegisterFile},
+    elf::ElfFile,
+    emulator::{Emulator, HarvardEmulator, InternalView, LinearEmulator, LinearMemoryLayout, View},
+    error::{Result, VMError, VMErrorKind},
+    memory::MemoryRecords,
+    riscv::{BasicBlock, Instruction},
+    WORD_SIZE,
+};
+"""
+    trace_helper = """use crate::{
+    cpu::{instructions::InstructionResult, RegisterFile},
+    elf::ElfFile,
+    emulator::{Emulator, HarvardEmulator, InternalView, LinearEmulator, LinearMemoryLayout, View},
+    error::{Result, VMError, VMErrorKind},
+    memory::MemoryRecords,
+    riscv::{BasicBlock, Instruction},
+    WORD_SIZE,
+};
+
+// BEAK-INSERT: nexus.f2ad126.vm.trace_resource_guard
+const BEAK_NEXUS_MAX_TRACE_STEPS_ENV: &str = "BEAK_NEXUS_MAX_TRACE_STEPS";
+const BEAK_NEXUS_MAX_EXEC_STEPS_ENV: &str = "BEAK_NEXUS_MAX_EXEC_STEPS";
+const BEAK_NEXUS_DEFAULT_MAX_TRACE_STEPS: usize = 262_144;
+
+fn beak_nexus_env_usize(key: &str) -> Option<usize> {
+    std::env::var(key).ok().and_then(|s| s.parse::<usize>().ok())
+}
+
+fn beak_nexus_max_trace_steps() -> usize {
+    beak_nexus_env_usize(BEAK_NEXUS_MAX_TRACE_STEPS_ENV)
+        .or_else(|| beak_nexus_env_usize(BEAK_NEXUS_MAX_EXEC_STEPS_ENV))
+        .unwrap_or(BEAK_NEXUS_DEFAULT_MAX_TRACE_STEPS)
+}
+"""
+    if trace_helper_guard not in contents:
+        _replace_once(trace_path, trace_helper_anchor, trace_helper)
+
+    contents = trace_path.read_text()
+    trace_call_guard = "// BEAK-INSERT: nexus.f2ad126.vm.trace_resource_guard.call"
+    trace_call_anchor = """    let mut trace = UniformTrace {
+        memory_layout: LinearMemoryLayout::default(), // dummy
+        k,
+        start: 0,
+        blocks: Vec::new(),
+    };
+
+    loop {
+        match k_step(&mut harvard, k, true) {
+            (Some(block), Ok(())) => trace.blocks.push(block),
+            (Some(block), Err(e)) => {
+                if !block.steps.is_empty() {
+                    trace.blocks.push(block);
+                }
+
+                match e.source {
+                    VMErrorKind::VMExited(_) | VMErrorKind::VMOutOfInstructions => {
+                        return Ok((harvard.finalize(), trace))
+                    }
+                    _ => return Err(e),
+                }
+            }
+            (None, Err(e)) => return Err(e),
+            (None, Ok(())) => unreachable!(),
+        }
+    }
+}
+"""
+    trace_call = """    let mut trace = UniformTrace {
+        memory_layout: LinearMemoryLayout::default(), // dummy
+        k,
+        start: 0,
+        blocks: Vec::new(),
+    };
+    // BEAK-INSERT: nexus.f2ad126.vm.trace_resource_guard.call
+    let max_trace_steps = beak_nexus_max_trace_steps();
+    let mut observed_trace_steps = 0usize;
+
+    loop {
+        match k_step(&mut harvard, k, true) {
+            (Some(block), Ok(())) => {
+                observed_trace_steps = observed_trace_steps.saturating_add(block.steps.len());
+                if observed_trace_steps > max_trace_steps {
+                    return Err(VMErrorKind::VMOutOfInstructions.into());
+                }
+                trace.blocks.push(block);
+            }
+            (Some(block), Err(e)) => {
+                observed_trace_steps = observed_trace_steps.saturating_add(block.steps.len());
+                if observed_trace_steps > max_trace_steps {
+                    return Err(VMErrorKind::VMOutOfInstructions.into());
+                }
+                if !block.steps.is_empty() {
+                    trace.blocks.push(block);
+                }
+
+                match e.source {
+                    VMErrorKind::VMExited(_) | VMErrorKind::VMOutOfInstructions => {
+                        return Ok((harvard.finalize(), trace))
+                    }
+                    _ => return Err(e),
+                }
+            }
+            (None, Err(e)) => return Err(e),
+            (None, Ok(())) => unreachable!(),
+        }
+    }
+}
+"""
+    if trace_call_guard not in contents:
+        _replace_once(trace_path, trace_call_anchor, trace_call)
 
 
 def _patch_load_store_semantic_injection(nexus_install_path: Path) -> None:
@@ -32,6 +579,13 @@ const BEAK_NEXUS_INJECTION_APPLIED_ENV: &str = "BEAK_NEXUS_INJECTION_APPLIED";
 const BEAK_NEXUS_FLOW_ADDR_ENV: &str = "BEAK_NEXUS_STORE_LOAD_FLOW_ADDR";
 const BEAK_NEXUS_FLOW_CLK_ENV: &str = "BEAK_NEXUS_STORE_LOAD_FLOW_CLK";
 const BEAK_NEXUS_FLOW_BYTE_ENV: &str = "BEAK_NEXUS_STORE_LOAD_FLOW_BYTE";
+const BEAK_NEXUS_FLOW_STORE_STEP_ENV: &str = "BEAK_NEXUS_STORE_LOAD_FLOW_STORE_STEP";
+const BEAK_NEXUS_FLOW_BEFORE_ENV: &str = "BEAK_NEXUS_STORE_LOAD_FLOW_BEFORE";
+const BEAK_NEXUS_FLOW_AFTER_ENV: &str = "BEAK_NEXUS_STORE_LOAD_FLOW_AFTER";
+const BEAK_NEXUS_FLOW_PC_ENV: &str = "BEAK_NEXUS_STORE_LOAD_FLOW_PC";
+const BEAK_NEXUS_FLOW_RAW_ENV: &str = "BEAK_NEXUS_STORE_LOAD_FLOW_RAW";
+const BEAK_NEXUS_FLOW_WIDTH_ENV: &str = "BEAK_NEXUS_STORE_LOAD_FLOW_WIDTH";
+const BEAK_NEXUS_SEMANTIC_RECEIPT_ENV: &str = "BEAK_NEXUS_SEMANTIC_MUTATION_RECEIPT";
 
 fn beak_nexus_base_inject_kind(kind: &str) -> &str {
     kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
@@ -88,13 +642,28 @@ fn beak_nexus_mutated_payload_byte(old: u8) -> u8 {
     }
 }
 
-fn beak_nexus_arm_store_load_flow(address: u32, clk: u32, byte: u8) {
+fn beak_nexus_arm_store_load_flow(
+    address: u32,
+    clk: u32,
+    store_step: usize,
+    before: u32,
+    after: u32,
+    pc: u32,
+    raw_word: u32,
+    width: usize,
+) {
     std::env::set_var(BEAK_NEXUS_FLOW_ADDR_ENV, address.to_string());
     std::env::set_var(BEAK_NEXUS_FLOW_CLK_ENV, clk.to_string());
-    std::env::set_var(BEAK_NEXUS_FLOW_BYTE_ENV, byte.to_string());
+    std::env::set_var(BEAK_NEXUS_FLOW_BYTE_ENV, (after as u8).to_string());
+    std::env::set_var(BEAK_NEXUS_FLOW_STORE_STEP_ENV, store_step.to_string());
+    std::env::set_var(BEAK_NEXUS_FLOW_BEFORE_ENV, before.to_string());
+    std::env::set_var(BEAK_NEXUS_FLOW_AFTER_ENV, after.to_string());
+    std::env::set_var(BEAK_NEXUS_FLOW_PC_ENV, pc.to_string());
+    std::env::set_var(BEAK_NEXUS_FLOW_RAW_ENV, raw_word.to_string());
+    std::env::set_var(BEAK_NEXUS_FLOW_WIDTH_ENV, width.to_string());
 }
 
-fn beak_nexus_store_load_flow_context() -> Option<(u32, u32, u8)> {
+fn beak_nexus_store_load_flow_context() -> Option<(u32, u32, u8, usize, u32, u32, u32, u32, usize)> {
     let active_kind = std::env::var(BEAK_NEXUS_INJECT_KIND_ENV).ok()?;
     if beak_nexus_base_inject_kind(&active_kind)
         != "nexus.semantic.memory.store_load_payload_flow"
@@ -104,14 +673,43 @@ fn beak_nexus_store_load_flow_context() -> Option<(u32, u32, u8)> {
     let address = std::env::var(BEAK_NEXUS_FLOW_ADDR_ENV).ok()?.parse::<u32>().ok()?;
     let clk = std::env::var(BEAK_NEXUS_FLOW_CLK_ENV).ok()?.parse::<u32>().ok()?;
     let byte = std::env::var(BEAK_NEXUS_FLOW_BYTE_ENV).ok()?.parse::<u8>().ok()?;
-    Some((address, clk, byte))
+    let store_step = std::env::var(BEAK_NEXUS_FLOW_STORE_STEP_ENV).ok()?.parse::<usize>().ok()?;
+    let before = std::env::var(BEAK_NEXUS_FLOW_BEFORE_ENV).ok()?.parse::<u32>().ok()?;
+    let after = std::env::var(BEAK_NEXUS_FLOW_AFTER_ENV).ok()?.parse::<u32>().ok()?;
+    let pc = std::env::var(BEAK_NEXUS_FLOW_PC_ENV).ok()?.parse::<u32>().ok()?;
+    let raw_word = std::env::var(BEAK_NEXUS_FLOW_RAW_ENV).ok()?.parse::<u32>().ok()?;
+    let width = std::env::var(BEAK_NEXUS_FLOW_WIDTH_ENV).ok()?.parse::<usize>().ok()?;
+    Some((address, clk, byte, store_step, before, after, pc, raw_word, width))
 }
+
+fn beak_nexus_mem_mnemonic(raw_word: u32) -> &'static str {
+    match (raw_word & 0x7f, (raw_word >> 12) & 0x7) {
+        (0x23, 0) => "sb",
+        (0x23, 1) => "sh",
+        (0x23, 2) => "sw",
+        (0x03, 0) => "lb",
+        (0x03, 1) => "lh",
+        (0x03, 2) => "lw",
+        (0x03, 4) => "lbu",
+        (0x03, 5) => "lhu",
+        _ => "unknown",
+    }
+}
+
+#[allow(clippy::type_complexity)]
+
+#[allow(clippy::type_complexity)]
 
 fn beak_nexus_store_load_flow_raw_load_value(
     memory_record: &nexus_common::memory::MemoryRecord,
     side_note: &SideNote,
+    load_step: usize,
+    load_pc: u32,
+    load_raw_word: u32,
+    load_timestamp: u32,
 ) -> Option<u32> {
-    let (address, clk, byte) = beak_nexus_store_load_flow_context()?;
+    let (address, clk, byte, store_step, store_before, store_after, store_pc, store_raw_word, store_width) =
+        beak_nexus_store_load_flow_context()?;
     if memory_record.get_address() != address {
         return None;
     }
@@ -123,7 +721,53 @@ fn beak_nexus_store_load_flow_raw_load_value(
     }
     let mut raw = memory_record.get_value().to_le_bytes();
     raw[0] = byte;
-    Some(u32::from_le_bytes(raw))
+    let load_before = memory_record.get_value();
+    let load_after = u32::from_le_bytes(raw);
+    let expected_store_after = (store_before & 0xffff_ff00)
+        | u32::from(beak_nexus_mutated_payload_byte(store_before as u8));
+    let load_width = memory_record.get_size() as usize;
+    if memory_record.get_size() == MemAccessSize::Word
+        && store_before == load_before
+        && store_after == expected_store_after
+        && store_after == load_after
+        && store_step < load_step
+    {
+        let store_mnemonic = beak_nexus_mem_mnemonic(store_raw_word);
+        let load_mnemonic = beak_nexus_mem_mnemonic(load_raw_word);
+        std::env::set_var(
+            BEAK_NEXUS_SEMANTIC_RECEIPT_ENV,
+            format!(
+                r#"{{"inject_kind":"nexus.semantic.memory.store_load_payload_flow","site":"load_store.store_value_lower_byte","field":"load_store.payload","step":{},"before":{},"after":{},"effect":{{"relation":"store_load_payload_equation","context":{{"bucket_id":"sem.memory.store_load_payload_flow","obligation_id":"me1","cell_id":"me1.sw_lw","backend":"nexus","commit":"636ccb360d0f4ae657ae4bb64e1e275ccec8826","trace_source":"memory","executed_store":true,"executed_load":true,"mutation_mode":"replace_low_byte_5a_a5","manifestation":"store_and_load_payload_changed","store_step":{},"store_step_idx":{},"load_step":{},"load_step_idx":{},"store_timestamp":{},"load_timestamp":{},"store_pc":{},"load_pc":{},"store_raw_word":{},"load_raw_word":{},"store_opcode":"0x{:08x}","load_opcode":"0x{:08x}","store_mnemonic":"{}","load_mnemonic":"{}","store_address":{},"load_address":{},"store_width":{},"load_width":{},"store_value":{},"store_value_before":{},"store_value_after":{},"load_value_before":{},"load_value_after":{},"width":4}}}}}}"#,
+                store_step,
+                store_before,
+                store_after,
+                store_step,
+                store_step,
+                load_step,
+                load_step,
+                clk,
+                load_timestamp,
+                store_pc,
+                load_pc,
+                store_raw_word,
+                load_raw_word,
+                store_raw_word,
+                load_raw_word,
+                store_mnemonic,
+                load_mnemonic,
+                address,
+                address,
+                store_width,
+                load_width,
+                store_before,
+                store_before,
+                store_after,
+                load_before,
+                load_after,
+            ),
+        );
+    }
+    Some(load_after)
 }
 
 fn beak_nexus_extend_load_value(raw_value: u32, opcode: Option<BuiltinOpcode>) -> u32 {
@@ -167,6 +811,13 @@ fn beak_nexus_mutate_load_store_trace(
     }
 }
 """
+    if helper_guard in contents:
+        helper_start = contents.index(helper_guard)
+        helper_end = contents.index("impl MachineChip for LoadStoreChip", helper_start)
+        helper_payload = helper[helper.index(helper_guard) :]
+        if contents[helper_start:helper_end].strip() != helper_payload.strip():
+            contents = contents[:helper_start] + helper_payload + "\n" + contents[helper_end:]
+            path.write_text(contents)
     if helper_guard not in contents:
         _replace_once(path, helper_anchor, helper)
 
@@ -190,7 +841,9 @@ fn beak_nexus_mutate_load_store_trace(
         _replace_once(path, call_anchor, call)
 
     contents = path.read_text()
-    flow_value_guard = "beak_nexus_store_load_flow_raw_load_value(memory_record, side_note)"
+    flow_value_guard = (
+        "beak_nexus_store_load_flow_raw_load_value(memory_record, side_note, row_idx)"
+    )
     flow_value_anchor = """            if is_load {
                 let cur_value_extended =
                     vm_step.step.result.expect("load operation should have a result");
@@ -252,8 +905,14 @@ fn beak_nexus_mutate_load_store_trace(
             }
             let cur_value: Word = memory_record.get_value().to_le_bytes();
 """
-    flow_value_patch = """            let injected_load_raw_value =
-                beak_nexus_store_load_flow_raw_load_value(memory_record, side_note);
+    flow_value_patch = """            let injected_load_raw_value = beak_nexus_store_load_flow_raw_load_value(
+                memory_record,
+                side_note,
+                row_idx,
+                vm_step.step.pc,
+                vm_step.step.raw_instruction,
+                clk,
+            );
             if is_load {
                 let raw_value_for_assert =
                     injected_load_raw_value.unwrap_or_else(|| memory_record.get_value());
@@ -299,7 +958,16 @@ fn beak_nexus_mutate_load_store_trace(
                 )
             {
                 cur_value[0] = beak_nexus_mutated_payload_byte(cur_value[0]);
-                beak_nexus_arm_store_load_flow(byte_address, clk, cur_value[0]);
+                beak_nexus_arm_store_load_flow(
+                    byte_address,
+                    clk,
+                    row_idx,
+                    memory_record.get_value(),
+                    u32::from_le_bytes(cur_value),
+                    vm_step.step.pc,
+                    vm_step.step.raw_instruction,
+                    memory_record.get_size() as usize,
+                );
                 beak_nexus_note_injection(
                     "nexus.semantic.memory.store_load_payload_flow",
                     row_idx,
@@ -307,6 +975,63 @@ fn beak_nexus_mutate_load_store_trace(
                 );
             }
 """
+    contents = path.read_text()
+    if "BEAK_NEXUS_FLOW_STORE_STEP_ENV" in contents:
+        contents = contents.replace(
+            "beak_nexus_store_load_flow_raw_load_value(memory_record, side_note);",
+            """beak_nexus_store_load_flow_raw_load_value(
+                memory_record,
+                side_note,
+                row_idx,
+                vm_step.step.pc,
+                vm_step.step.raw_instruction,
+                clk,
+            );""",
+        )
+        contents = contents.replace(
+            "beak_nexus_store_load_flow_raw_load_value(memory_record, side_note, row_idx);",
+            """beak_nexus_store_load_flow_raw_load_value(
+                memory_record,
+                side_note,
+                row_idx,
+                vm_step.step.pc,
+                vm_step.step.raw_instruction,
+                clk,
+            );""",
+        )
+        contents = contents.replace(
+            "beak_nexus_arm_store_load_flow(byte_address, clk, cur_value[0]);",
+            """beak_nexus_arm_store_load_flow(
+                    byte_address,
+                    clk,
+                    row_idx,
+                    memory_record.get_value(),
+                    u32::from_le_bytes(cur_value),
+                    vm_step.step.pc,
+                    vm_step.step.raw_instruction,
+                    memory_record.get_size() as usize,
+                );""",
+        )
+        contents = contents.replace(
+            """beak_nexus_arm_store_load_flow(
+                    byte_address,
+                    clk,
+                    row_idx,
+                    memory_record.get_value(),
+                    u32::from_le_bytes(cur_value),
+                );""",
+            """beak_nexus_arm_store_load_flow(
+                    byte_address,
+                    clk,
+                    row_idx,
+                    memory_record.get_value(),
+                    u32::from_le_bytes(cur_value),
+                    vm_step.step.pc,
+                    vm_step.step.raw_instruction,
+                    memory_record.get_size() as usize,
+                );""",
+        )
+        path.write_text(contents)
     if flow_value_guard not in contents:
         if flow_value_anchor in contents:
             _replace_once(path, flow_value_anchor, flow_value_patch)
@@ -2347,8 +3072,61 @@ fn beak_nexus_mutate_jalr_control_trace(
         _replace_once(path, call_anchor, call)
 
 
+
+def _patch_execute_step_budget(nexus_install_path: Path) -> None:
+    """Bound the Harvard emulator execute loop.
+
+    Fuzzed programs can be non-terminating (e.g. a zero-offset taken branch).
+    The upstream loop appends trace records without any step bound, growing
+    memory until the process aborts on allocation failure (uncatchable). Failing
+    with a panic instead makes it catchable by the benchmark harness.
+    """
+    path = nexus_install_path / "vm" / "src" / "emulator" / "executor.rs"
+    if not path.exists():
+        return
+    c = path.read_text()
+    old = """        let mut results: Vec<InstructionResult> = Vec::new();
+        let mut transcript: MemoryTranscript = Vec::new();
+
+        loop {
+"""
+    new = """        let mut results: Vec<InstructionResult> = Vec::new();
+        let mut transcript: MemoryTranscript = Vec::new();
+
+        // BEAK-INSERT: nexus.execute_step_budget
+        let beak_step_budget: u64 = std::env::var("BEAK_NEXUS_EXECUTE_STEP_BUDGET")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1_000_000);
+        let mut beak_steps: u64 = 0;
+
+        loop {
+            beak_steps += 1;
+            if beak_steps > beak_step_budget {
+                panic!(
+                    "beak nexus execute step budget ({beak_step_budget}) exceeded: non-terminating program"
+                );
+            }
+"""
+    marker = "// BEAK-INSERT: nexus.execute_step_budget"
+    if marker not in c:
+        if old not in c:
+            raise RuntimeError("nexus execute step budget anchor not found")
+        c = c.replace(old, new, 1)
+        path.write_text(c)
+
+
 def apply(*, nexus_install_path: Path, commit_or_branch: str) -> None:
+    _patch_execute_step_budget(nexus_install_path)
+    if commit_or_branch == NEXUS_MEMORY_SIZE_COMMIT:
+        _patch_41_memory_table_population_receipt(nexus_install_path)
+        return
+    if commit_or_branch == NEXUS_MUL_CARRY_COMMIT:
+        _patch_f1_mul_carry_exception_receipt(nexus_install_path)
+        return
     if commit_or_branch == NEXUS_F2AD_COMMIT:
+        _patch_f2ad_vm_resource_guards(nexus_install_path)
+        _patch_f2ad_prover2_resource_guard(nexus_install_path)
         _patch_f2ad_program_memory_semantic_injection(nexus_install_path)
         _patch_f2ad_register_memory_semantic_injection(nexus_install_path)
         _patch_f2ad_cpu_boundary_semantic_injection(nexus_install_path)

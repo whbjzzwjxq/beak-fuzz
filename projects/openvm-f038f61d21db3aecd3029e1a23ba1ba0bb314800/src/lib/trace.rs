@@ -15,6 +15,11 @@ use crate::insn::OpenVMInsn;
 use crate::interaction::OpenVMInteraction;
 
 const OPENVM_COMMIT: &str = "f038f61d21db3aecd3029e1a23ba1ba0bb314800";
+// This pinned snapshot runs `MemoryConfig::default()` through `build_vm_config`:
+// pointer_max_bits=29. VolatileBoundaryChip finalizes an equipartition of block size 1.
+const OPENVM_VOLATILE_POINTER_START: u32 = 0;
+const OPENVM_VOLATILE_POINTER_END: u32 = 1 << 29;
+const OPENVM_VOLATILE_BOUNDARY_WIDTH: u32 = 1;
 
 #[derive(Debug, Clone)]
 pub struct OpenVMTrace {
@@ -102,6 +107,13 @@ pub struct OpenVMVolatileBoundaryRow {
     address_space: u32,
     pointer: u32,
     is_valid: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenVMTimestampBoundaryOrigin {
+    seq: u64,
+    step_idx: u64,
+    timestamp: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -441,6 +453,58 @@ fn record_signal(
     }
 }
 
+fn boundary_origin_obligation_hits(observations: &[BoundaryOriginObservation]) -> Vec<BucketHit> {
+    observations
+        .iter()
+        .filter(|obs| obs.from_timestamp == Some(0))
+        .map(|obs| {
+            BucketHit::semantic(
+                semantic::time::BOUNDARY_ORIGIN_CONSISTENCY,
+                HashMap::from([
+                    ("obligation_id".to_string(), json!("ts1")),
+                    ("cell_id".to_string(), json!("ts1.standard")),
+                    ("step_idx".to_string(), json!(obs.step_idx)),
+                    ("op_idx".to_string(), json!(obs.op_idx)),
+                    ("backend".to_string(), json!("openvm")),
+                    ("commit".to_string(), json!(OPENVM_COMMIT)),
+                    ("trace_source".to_string(), json!("connector_boundary")),
+                    ("kind".to_string(), json!(obs.kind)),
+                    ("chip_name".to_string(), json!(obs.chip_name)),
+                    ("from_timestamp".to_string(), json!(obs.from_timestamp)),
+                    ("to_timestamp".to_string(), json!(obs.to_timestamp)),
+                    ("is_terminate".to_string(), json!(obs.is_terminate)),
+                ]),
+            )
+        })
+        .collect()
+}
+
+fn timestamp_boundary_origin_hits(
+    observations: &[OpenVMTimestampBoundaryOrigin],
+) -> Vec<BucketHit> {
+    observations
+        .iter()
+        .filter(|obs| obs.timestamp == 0)
+        .map(|obs| {
+            BucketHit::semantic(
+                semantic::time::BOUNDARY_ORIGIN_CONSISTENCY,
+                HashMap::from([
+                    ("obligation_id".to_string(), json!("ts1")),
+                    ("cell_id".to_string(), json!("ts1.standard")),
+                    ("step_idx".to_string(), json!(obs.step_idx)),
+                    ("backend".to_string(), json!("openvm")),
+                    ("commit".to_string(), json!(OPENVM_COMMIT)),
+                    ("trace_source".to_string(), json!("memory_initial_block")),
+                    ("kind".to_string(), json!("initial_block_data")),
+                    ("chip_name".to_string(), json!("OfflineMemory")),
+                    ("from_timestamp".to_string(), json!(obs.timestamp)),
+                    ("source_seq".to_string(), json!(obs.seq)),
+                ]),
+            )
+        })
+        .collect()
+}
+
 fn derive_semantic_feedback(
     trace: &OpenVMTrace,
     profile: OpenVmObservationProfile,
@@ -460,7 +524,6 @@ fn derive_semantic_feedback(
 
     let mut saw_system_terminate = false;
     let mut saw_missing_row_timestamp = false;
-    let mut saw_memory_access = false;
     let has_memory_access_records = !trace.memory_accesses.is_empty();
 
     for row in trace.chip_rows() {
@@ -555,7 +618,6 @@ fn derive_semantic_feedback(
                 is_load,
                 ..
             } => {
-                saw_memory_access = true;
                 if *is_load {
                     record_signal(&mut signals, &mut seen_signals, TraceSignal::HasLoad);
                     record_signal(&mut signals, &mut seen_signals, TraceSignal::HasLoadStore);
@@ -612,7 +674,6 @@ fn derive_semantic_feedback(
                 needs_write,
                 ..
             } => {
-                saw_memory_access = true;
                 record_signal(&mut signals, &mut seen_signals, TraceSignal::HasLoad);
                 record_signal(&mut signals, &mut seen_signals, TraceSignal::HasLoadStore);
                 timestamped_load_path.push(TimestampedLoadPathObservation {
@@ -657,10 +718,7 @@ fn derive_semantic_feedback(
                     saw_system_terminate = true;
                     record_signal(&mut signals, &mut seen_signals, TraceSignal::HasEcall);
                 }
-                if profile.emit_boundary_origin_semantic
-                    && saw_memory_access
-                    && matches!(from_timestamp, Some(0))
-                {
+                if profile.emit_boundary_origin_semantic && matches!(from_timestamp, Some(0)) {
                     boundary_origin.push(BoundaryOriginObservation {
                         step_idx: base.step_idx,
                         op_idx: base.op_idx,
@@ -740,7 +798,7 @@ fn derive_semantic_feedback(
     ));
     bucket_hits
         .extend(semantic_matchers::match_memory_address_space_semantic_hits(&memory_address_space));
-    bucket_hits.extend(semantic_matchers::match_boundary_origin_semantic_hits(&boundary_origin));
+    bucket_hits.extend(boundary_origin_obligation_hits(&boundary_origin));
     bucket_hits.extend(semantic_matchers::match_timestamped_load_path_semantic_hits(
         &timestamped_load_path,
     ));
@@ -780,6 +838,9 @@ fn volatile_boundary_obligation_hits(row: &OpenVMVolatileBoundaryRow) -> Vec<Buc
                     ("addr_space".to_string(), json!(row.address_space)),
                     ("address_space".to_string(), json!(row.address_space)),
                     ("pointer".to_string(), json!(row.pointer)),
+                    ("width".to_string(), json!(OPENVM_VOLATILE_BOUNDARY_WIDTH)),
+                    ("volatile_start".to_string(), json!(OPENVM_VOLATILE_POINTER_START)),
+                    ("volatile_end".to_string(), json!(OPENVM_VOLATILE_POINTER_END)),
                     ("is_valid".to_string(), json!(row.is_valid)),
                 ]),
             )
@@ -805,6 +866,7 @@ impl OpenVMTrace {
         let mut memory_inits = Vec::new();
         let mut memory_finalizations = Vec::new();
         let mut volatile_boundary_hits = Vec::new();
+        let mut timestamp_boundary_origins = Vec::new();
 
         for (idx, log) in logs.into_iter().enumerate() {
             let obj = log.as_object().ok_or_else(|| format!("log[{}]: not an object", idx))?;
@@ -853,6 +915,11 @@ impl OpenVMTrace {
                         .map_err(|e| format!("log[{}] volatile_boundary: {}", idx, e))?;
                     volatile_boundary_hits.extend(volatile_boundary_obligation_hits(&row));
                 }
+                "timestamp_boundary_origin" => {
+                    let origin: OpenVMTimestampBoundaryOrigin = serde_json::from_value(data)
+                        .map_err(|e| format!("log[{}] timestamp_boundary_origin: {}", idx, e))?;
+                    timestamp_boundary_origins.push(origin);
+                }
                 _ => return Err(format!("log[{}]: unknown type \"{}\"", idx, ty)),
             }
         }
@@ -866,6 +933,15 @@ impl OpenVMTrace {
             memory_finalizations,
         );
         trace.bucket_hits.extend(volatile_boundary_hits);
+        let has_full_connector_origin = trace.bucket_hits.iter().any(|hit| {
+            hit.bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id
+                && hit.details.get("cell_id").and_then(Value::as_str) == Some("ts1.standard")
+        });
+        if !has_full_connector_origin {
+            trace
+                .bucket_hits
+                .extend(timestamp_boundary_origin_hits(&timestamp_boundary_origins));
+        }
         Ok(trace)
     }
 
@@ -1935,23 +2011,6 @@ impl OpenVMTrace {
         let Some(first) = self.instructions.first() else {
             return;
         };
-        if first.timestamp == 0 {
-            hits.push(BucketHit::semantic(
-                semantic::time::BOUNDARY_ORIGIN_CONSISTENCY,
-                HashMap::from([
-                    ("obligation_id".to_string(), json!("ts1")),
-                    ("cell_id".to_string(), json!("ts1.standard")),
-                    ("op_idx".to_string(), json!(first.step_idx)),
-                    ("pc".to_string(), json!(first.pc)),
-                    ("opcode".to_string(), json!(first.opcode)),
-                    ("backend".to_string(), json!("openvm")),
-                    ("commit".to_string(), json!(OPENVM_COMMIT)),
-                    ("trace_source".to_string(), json!("instruction")),
-                    ("timestamp".to_string(), json!(first.timestamp)),
-                    ("next_timestamp".to_string(), json!(first.next_timestamp)),
-                ]),
-            ));
-        }
         hits.push(BucketHit::semantic(
             semantic::time::BOUNDARY_ORIGIN_CONSISTENCY,
             HashMap::from([
@@ -2849,6 +2908,91 @@ mod tests {
         value.to_le_bytes().to_vec()
     }
 
+    fn connector_row(from_timestamp: Option<u32>) -> OpenVMChipRowEnvelope {
+        OpenVMChipRowEnvelope {
+            base: row_base(0, OpenVMChipRowKind::Connector),
+            kind: OpenVMChipRowKind::Connector,
+            payload: OpenVMChipRowPayload::Connector {
+                from_pc: 0,
+                to_pc: 1,
+                from_timestamp,
+                to_timestamp: Some(1),
+                is_terminate: true,
+                exit_code: Some(0),
+            },
+        }
+    }
+
+    #[test]
+    fn ts1_uses_connector_origin_without_memory_access_and_fails_closed() {
+        let trace = OpenVMTrace::new(
+            Vec::new(),
+            vec![connector_row(Some(0))],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let ts1 = trace.bucket_hits().iter().find(|hit| {
+            hit.bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id
+                && hit.details.get("cell_id").and_then(|value| value.as_str())
+                    == Some("ts1.standard")
+        });
+        let ts1 = ts1.expect("zero connector origin must emit ts1.standard");
+        assert_eq!(
+            ts1.details.get("trace_source").and_then(|value| value.as_str()),
+            Some("connector_boundary")
+        );
+        assert_eq!(ts1.details.get("from_timestamp").and_then(|value| value.as_u64()), Some(0));
+
+        let nonzero = OpenVMTrace::new(
+            Vec::new(),
+            vec![connector_row(Some(1))],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(nonzero.bucket_hits().iter().all(|hit| {
+            hit.details.get("cell_id").and_then(|value| value.as_str()) != Some("ts1.standard")
+        }));
+    }
+
+    #[test]
+    fn timestamp_boundary_origin_log_is_typed_and_fails_closed() {
+        let origin_log = |timestamp: u32| {
+            serde_json::json!({
+                "type": "timestamp_boundary_origin",
+                "data": {
+                    "seq": 0,
+                    "step_idx": 0,
+                    "timestamp": timestamp,
+                }
+            })
+        };
+
+        let zero = OpenVMTrace::from_logs(vec![origin_log(0)]).expect("zero-origin trace");
+        let ts1: Vec<_> = zero
+            .bucket_hits()
+            .iter()
+            .filter(|hit| {
+                hit.bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id
+                    && hit.details.get("cell_id").and_then(|value| value.as_str())
+                        == Some("ts1.standard")
+            })
+            .collect();
+        assert_eq!(ts1.len(), 1);
+        assert_eq!(
+            ts1[0].details.get("trace_source").and_then(|value| value.as_str()),
+            Some("memory_initial_block")
+        );
+
+        let nonzero = OpenVMTrace::from_logs(vec![origin_log(1)]).expect("nonzero-origin trace");
+        assert!(nonzero.bucket_hits().iter().all(|hit| {
+            hit.details.get("cell_id").and_then(|value| value.as_str()) != Some("ts1.standard")
+        }));
+    }
+
     #[test]
     fn group_4_muldiv_hits_use_chip_row_operands_and_registered_buckets() {
         let decoded = ["divu", "div", "remu", "mul", "mulhsu"]
@@ -3194,6 +3338,10 @@ mod tests {
                     == Some("rc3.volatile_addr_space")
                 && hit.details.get("addr_space").and_then(|v| v.as_u64()) == Some(2)
                 && hit.details.get("pointer").and_then(|v| v.as_u64()) == Some(4096)
+                && hit.details.get("width").and_then(|v| v.as_u64()) == Some(1)
+                && hit.details.get("volatile_start").and_then(|v| v.as_u64()) == Some(0)
+                && hit.details.get("volatile_end").and_then(|v| v.as_u64())
+                    == Some(1u64 << 29)
         }));
         assert!(trace.bucket_hits().iter().any(|hit| {
             hit.bucket_id == semantic::memory::VOLATILE_BOUNDARY_RANGE.id
@@ -3202,6 +3350,10 @@ mod tests {
                     == Some("rc3.volatile_pointer")
                 && hit.details.get("addr_space").and_then(|v| v.as_u64()) == Some(2)
                 && hit.details.get("pointer").and_then(|v| v.as_u64()) == Some(4096)
+                && hit.details.get("width").and_then(|v| v.as_u64()) == Some(1)
+                && hit.details.get("volatile_start").and_then(|v| v.as_u64()) == Some(0)
+                && hit.details.get("volatile_end").and_then(|v| v.as_u64())
+                    == Some(1u64 << 29)
         }));
     }
 }

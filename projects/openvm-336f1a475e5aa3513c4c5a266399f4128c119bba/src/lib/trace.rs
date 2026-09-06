@@ -4,7 +4,7 @@ use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::observations::{
     ArithmeticSpecialCaseObservation, AuipcPcLimbObservation, BoundaryOriginObservation,
     ImmediateLimbObservation, MemoryAddressSpaceObservation, MemoryImmediateSignObservation,
-    TimestampedLoadPathObservation, VolatileBoundaryObservation, XorMultiplicityObservation,
+    TimestampedLoadPathObservation, VolatileBoundaryObservation,
 };
 use beak_core::trace::{semantic, semantic_matchers, BucketHit, Trace, TraceSignal};
 use serde::Deserialize;
@@ -102,6 +102,18 @@ pub struct OpenVMLookupMultiplicity {
     row_idx: u64,
     multiplicity: u32,
     is_real: bool,
+}
+
+/// Marker emitted by the instrumented OpenVM runtime for the timestamp
+/// boundary origin.  The origin is consumed by backend/prover instrumentation;
+/// the trace currently derives boundary-origin semantic hits from connector
+/// rows, so retain and validate this record while parsing without storing it.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+struct OpenVMTimestampBoundaryOrigin {
+    seq: u64,
+    step_idx: u64,
+    timestamp: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -448,7 +460,6 @@ fn derive_semantic_feedback(
     let mut signals = Vec::new();
     let mut seen_signals = HashSet::new();
     let mut immediate_limb = Vec::new();
-    let mut xor_multiplicity = Vec::new();
     let mut auipc_pc_limb = Vec::new();
     let mut memory_immediate_sign = Vec::new();
     let mut memory_address_space = Vec::new();
@@ -499,22 +510,9 @@ fn derive_semantic_feedback(
                         });
                     }
                 }
-                if profile.emit_xor_multiplicity_semantic {
-                    if let (Some(out), Some(lhs), Some(rhs)) =
-                        (le_u32_from_bytes(a), le_u32_from_bytes(b), le_u32_from_bytes(c))
-                    {
-                        if out == (lhs ^ rhs) && (lhs & rhs) != 0 {
-                            xor_multiplicity.push(XorMultiplicityObservation {
-                                step_idx: base.step_idx,
-                                op_idx: base.op_idx,
-                                kind: kind.clone(),
-                                chip_name: base.chip_name.clone(),
-                                lhs,
-                                rhs,
-                            });
-                        }
-                    }
-                }
+                // xor_multiplicity_consistency hits come exclusively from the
+                // preprocessed lookup-table observation emitted by the install
+                // source (table rows, not execution rows).
             }
             OpenVMChipRowPayload::DivRem { b, c, .. } => {
                 if profile.emit_arithmetic_special_case_semantic {
@@ -733,11 +731,55 @@ fn derive_semantic_feedback(
 
     let mut bucket_hits = Vec::new();
     bucket_hits.extend(semantic_matchers::match_immediate_limb_semantic_hits(&immediate_limb));
-    bucket_hits.extend(semantic_matchers::match_xor_multiplicity_semantic_hits(&xor_multiplicity));
-    bucket_hits.extend(semantic_matchers::match_auipc_pc_limb_semantic_hits(&auipc_pc_limb));
-    bucket_hits.extend(semantic_matchers::match_memory_immediate_sign_semantic_hits(
-        &memory_immediate_sign,
-    ));
+    bucket_hits.extend(
+        semantic_matchers::match_auipc_pc_limb_semantic_hits(&auipc_pc_limb)
+            .into_iter()
+            .map(|mut hit| {
+                let from_pc = hit.details.get("from_pc").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let imm = hit.details.get("imm").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let cell_id = if from_pc.checked_add(imm).is_some() {
+                    "id3.auipc_no_wrap"
+                } else {
+                    "id3.auipc_wrap"
+                };
+                hit.details.insert("obligation_id".to_string(), json!("id3"));
+                hit.details.insert("cell_id".to_string(), json!(cell_id));
+                hit.details.insert("backend".to_string(), json!("openvm"));
+                hit.details.insert("commit".to_string(), json!(OPENVM_COMMIT));
+                hit.details
+                    .insert("trace_source".to_string(), json!("instruction"));
+                hit
+            }),
+    );
+    bucket_hits.extend(
+        semantic_matchers::match_memory_immediate_sign_semantic_hits(&memory_immediate_sign)
+            .into_iter()
+            .map(|mut hit| {
+                let is_store = hit
+                    .details
+                    .get("is_store")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let imm_sign = hit
+                    .details
+                    .get("imm_sign")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let cell_id = match (is_store, imm_sign) {
+                    (true, false) => "id2.s_pos",
+                    (true, true) => "id2.s_neg",
+                    (false, false) => "id2.i_pos",
+                    (false, true) => "id2.i_neg",
+                };
+                hit.details.insert("obligation_id".to_string(), json!("id2"));
+                hit.details.insert("cell_id".to_string(), json!(cell_id));
+                hit.details.insert("backend".to_string(), json!("openvm"));
+                hit.details.insert("commit".to_string(), json!(OPENVM_COMMIT));
+                hit.details
+                    .insert("trace_source".to_string(), json!("instruction"));
+                hit
+            }),
+    );
     bucket_hits
         .extend(semantic_matchers::match_memory_address_space_semantic_hits(&memory_address_space));
     bucket_hits.extend(semantic_matchers::match_boundary_origin_semantic_hits(&boundary_origin));
@@ -777,6 +819,28 @@ fn derive_semantic_feedback(
 }
 
 fn lookup_multiplicity_obligation_hit(row: &OpenVMLookupMultiplicity) -> Option<BucketHit> {
+    // Preprocessed bitwise-op-lookup table rows carrying a nonzero xor shadow
+    // multiplicity. The mutation receipt's row_idx is the lookup-table row
+    // index, so op_idx/step_idx are aliased to row_idx for exact binding.
+    if row.table_name == "bitwise_op_lookup.xor_shadow_mult" && row.is_real {
+        return Some(BucketHit::semantic(
+            semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY,
+            HashMap::from([
+                ("obligation_id".to_string(), json!("bu1")),
+                ("cell_id".to_string(), json!("bu1.xor_shadow_mult")),
+                ("op_idx".to_string(), json!(row.row_idx)),
+                ("step_idx".to_string(), json!(row.row_idx)),
+                ("backend".to_string(), json!("openvm")),
+                ("commit".to_string(), json!(OPENVM_COMMIT)),
+                ("trace_source".to_string(), json!("lookup_multiplicity")),
+                ("lookup_seq".to_string(), json!(row.seq)),
+                ("table_name".to_string(), json!(row.table_name)),
+                ("row_idx".to_string(), json!(row.row_idx)),
+                ("multiplicity".to_string(), json!(row.multiplicity)),
+                ("is_real".to_string(), json!(row.is_real)),
+            ]),
+        ));
+    }
     if !row.is_real && row.multiplicity == 0 {
         return None;
     }
@@ -876,6 +940,17 @@ impl OpenVMTrace {
                         lookup_multiplicity_hits.push(hit);
                     }
                 }
+                "timestamp_boundary_origin" => {
+                    // This marker is emitted once per execution by the
+                    // instrumented runtime.  Connector rows remain the
+                    // source of boundary-origin semantic observations; parse
+                    // and validate the marker so it does not abort an
+                    // otherwise ordinary trace replay.
+                    let _origin: OpenVMTimestampBoundaryOrigin =
+                        serde_json::from_value(data).map_err(|e| {
+                            format!("log[{}] timestamp_boundary_origin: {}", idx, e)
+                        })?;
+                }
                 _ => return Err(format!("log[{}]: unknown type \"{}\"", idx, ty)),
             }
         }
@@ -889,13 +964,35 @@ impl OpenVMTrace {
             memory_finalizations,
         );
         trace.bucket_hits.extend(lookup_multiplicity_hits);
+        trace.dedupe_bucket_hits();
         Ok(trace)
     }
 
     pub fn from_logs_with_words(logs: Vec<Value>, words: &[u32]) -> Result<Self, String> {
         let mut trace = Self::from_logs(logs)?;
         trace.extend_instruction_local_obligation_hits(words);
+        trace.dedupe_bucket_hits();
         Ok(trace)
+    }
+
+    /// Collapse observations that are identical modulo the global log seq.
+    ///
+    /// generate_trace runs twice per chip in this snapshot, so every trace
+    /// derived observation appears twice; duplicated hits would otherwise
+    /// break the exactly-one baseline-hit binding check.
+    fn dedupe_bucket_hits(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        self.bucket_hits.retain(|hit| {
+            let mut sig: Vec<(String, String)> = hit
+                .details
+                .iter()
+                .filter(|(k, _)| k.as_str() != "seq" && k.as_str() != "lookup_seq")
+                .map(|(k, v)| (k.clone(), v.to_string()))
+                .collect();
+            sig.push(("#bucket".to_string(), hit.bucket_id.clone()));
+            sig.sort();
+            seen.insert(sig)
+        });
     }
 }
 
@@ -1958,7 +2055,10 @@ impl OpenVMTrace {
         let Some(first) = self.instructions.first() else {
             return;
         };
-        if first.timestamp == 0 {
+        // The first boundary row's pre-execution timestamp equals the initial
+        // OnlineMemory origin (INITIAL_TIMESTAMP + 1 = 1), so a ts1.standard
+        // hit is emitted for every runnable seed.
+        if first.timestamp == 1 {
             hits.push(BucketHit::semantic(
                 semantic::time::BOUNDARY_ORIGIN_CONSISTENCY,
                 HashMap::from([
@@ -2785,10 +2885,12 @@ impl Trace for OpenVMTrace {
 mod tests {
     use beak_core::rv32im::instruction::RV32IMInstruction;
     use beak_core::trace::{semantic, Trace};
+    use openvm_instructions::VmOpcode;
 
     use crate::chip_row::{
         OpenVMChipRowBase, OpenVMChipRowEnvelope, OpenVMChipRowKind, OpenVMChipRowPayload,
     };
+    use crate::insn::OpenVMInsn;
 
     use super::{OpenVMMemoryAccess, OpenVMTrace};
 
@@ -3219,5 +3321,80 @@ mod tests {
                 && hit.details.get("multiplicity").and_then(|v| v.as_u64()) == Some(2)
                 && hit.details.get("is_real").and_then(|v| v.as_bool()) == Some(true)
         }));
+    }
+
+    #[test]
+    fn xor_shadow_table_observations_dedupe_across_generate_trace_passes() {
+        let mk = |seq: u64| {
+            serde_json::json!({
+                "type": "lookup_multiplicity",
+                "data": {
+                    "seq": seq,
+                    "step_idx": 0,
+                    "table_name": "bitwise_op_lookup.xor_shadow_mult",
+                    "row_idx": 0,
+                    "multiplicity": 3,
+                    "is_real": true
+                }
+            })
+        };
+        let trace = OpenVMTrace::from_logs(vec![mk(5), mk(11)]).expect("trace");
+        let xor_hits = trace
+            .bucket_hits()
+            .iter()
+            .filter(|hit| hit.bucket_id == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id)
+            .count();
+        assert_eq!(xor_hits, 1, "identical table observations must dedupe");
+    }
+
+    fn trace_with_first_timestamp(timestamp: u32) -> OpenVMTrace {
+        OpenVMTrace::new(
+            vec![OpenVMInsn {
+                seq: 0,
+                step_idx: 0,
+                pc: 0,
+                timestamp,
+                next_pc: 4,
+                next_timestamp: timestamp + 1,
+                opcode: VmOpcode::from_usize(0),
+                operands: [0; 7],
+            }],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn first_instruction_with_initial_origin_emits_exactly_one_ts1_standard_hit() {
+        let trace = trace_with_first_timestamp(1);
+        let mut hits = Vec::new();
+        trace.derive_timestamp_obligation_hits(&mut hits);
+
+        let ts1_standard = hits
+            .iter()
+            .filter(|hit| {
+                hit.bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id
+                    && hit.details.get("obligation_id").and_then(|v| v.as_str()) == Some("ts1")
+                    && hit.details.get("cell_id").and_then(|v| v.as_str()) == Some("ts1.standard")
+            })
+            .count();
+        assert_eq!(ts1_standard, 1, "initial origin (timestamp=1) must emit one ts1.standard hit");
+        assert!(hits.iter().any(|hit| {
+            hit.bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id
+                && hit.details.get("cell_id").and_then(|v| v.as_str()) == Some("ts3.standard")
+        }));
+
+        let trace = trace_with_first_timestamp(5);
+        let mut hits = Vec::new();
+        trace.derive_timestamp_obligation_hits(&mut hits);
+        assert!(
+            hits.iter().all(|hit| {
+                hit.details.get("cell_id").and_then(|v| v.as_str()) != Some("ts1.standard")
+            }),
+            "a non-initial first timestamp must not emit a ts1.standard hit"
+        );
     }
 }

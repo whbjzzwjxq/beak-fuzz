@@ -65,6 +65,12 @@ fn main() {
                 .help("Maximum number of RISC-V instruction words in a seed."),
         )
         .arg(
+            Arg::new("long_tail_max_instructions")
+                .long("long-tail-max-instructions")
+                .default_value("0")
+                .help("Absolute length ceiling for long-tail scheduling; 0 keeps the hard cap at max-instructions."),
+        )
+        .arg(
             Arg::new("semantic_window_before")
                 .long("semantic-window-before")
                 .default_value("16")
@@ -129,6 +135,12 @@ fn main() {
         matches.get_one::<String>("mutation_iters").unwrap().parse().expect("mutation-iters");
     let max_instructions: usize =
         matches.get_one::<String>("max_instructions").unwrap().parse().expect("max-instructions");
+    let long_tail_max_instructions: usize = matches
+        .get_one::<String>("long_tail_max_instructions")
+        .unwrap()
+        .parse()
+        .expect("long-tail-max-instructions");
+    let backend_max_instructions = long_tail_max_instructions.max(max_instructions);
     let semantic_window_before: u64 = matches
         .get_one::<String>("semantic_window_before")
         .unwrap()
@@ -174,6 +186,7 @@ fn main() {
         initial_limit,
         mutation_iterations,
         max_instructions,
+        long_tail_max_instructions,
         precheck_oracle_max_steps: 0,
         semantic_search_enabled: true,
         semantic_window_before,
@@ -183,7 +196,7 @@ fn main() {
         stack_size_bytes: 256 * 1024 * 1024,
     };
 
-    let res = run_benchmark_threaded(cfg, move || OpenVmBackend::new(max_instructions));
+    let res = run_benchmark_threaded(cfg, move || OpenVmBackend::new(backend_max_instructions));
     match res {
         Ok(out) => {
             println!("Wrote corpus JSONL: {}", out.corpus_path.display());

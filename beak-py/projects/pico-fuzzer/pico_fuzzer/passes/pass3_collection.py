@@ -137,7 +137,7 @@ struct BeakTs2MemoryPlan {
 
 fn beak_ts2_aligned_addr(event: &CpuEvent) -> u32 {
     let memory_addr = event.b.wrapping_add(event.c);
-    (memory_addr - memory_addr % WORD_BYTE_SIZE as u64) as u32
+    memory_addr - memory_addr % WORD_SIZE as u32
 }
 
 fn beak_ts2_memory_plan(input: &EmulationRecord, inject_step: u64) -> Option<BeakTs2MemoryPlan> {
@@ -366,13 +366,29 @@ def _patch_local_constraints(path: Path) -> None:
     path.write_text(c)
 
 
-def _patch_rw_traces(path: Path) -> None:
+def _patch_rw_traces(path: Path, *, narrow_45e_types: bool = False) -> None:
     c = path.read_text()
-    c = c.replace(
-        "    memory_addr - memory_addr % WORD_SIZE as u32\n",
-        "    (memory_addr - memory_addr % WORD_BYTE_SIZE as u64) as u32\n",
-    )
-    c = c.replace("        event.clk = plan.high_timestamp;\n", "        event.clk = plan.high_timestamp as u64;\n")
+    if narrow_45e_types:
+        # Pico 45e stores CpuEvent operands/clocks and memory event addresses as
+        # u32.  The newer 22b0 snapshot widened these fields to u64 and uses the
+        # WORD_BYTE_SIZE name, so keep the generated helper commit-aware.
+        c = c.replace(
+            "    (memory_addr - memory_addr % WORD_BYTE_SIZE as u64) as u32\n",
+            "    memory_addr - memory_addr % WORD_SIZE as u32\n",
+        )
+        c = c.replace(
+            "        event.clk = plan.high_timestamp as u64;\n",
+            "        event.clk = plan.high_timestamp;\n",
+        )
+    else:
+        c = c.replace(
+            "    memory_addr - memory_addr % WORD_SIZE as u32\n",
+            "    (memory_addr - memory_addr % WORD_BYTE_SIZE as u64) as u32\n",
+        )
+        c = c.replace(
+            "        event.clk = plan.high_timestamp;\n",
+            "        event.clk = plan.high_timestamp as u64;\n",
+        )
     c = c.replace(
         "    iter::{IndexedPicoIterator, IntoPicoRefIterator, PicoIterator, PicoSlice, PicoSliceMut},\n",
         "    iter::{IntoPicoRefIterator, PicoIterator, PicoSlice},\n",
@@ -630,12 +646,19 @@ fn beak_ts2_add_consumer_range_events(
 }
 
 """
+    if narrow_45e_types:
+        ts2_helper = ts2_helper.replace(
+            "    (memory_addr - memory_addr % WORD_BYTE_SIZE as u64) as u32\n",
+            "    memory_addr - memory_addr % WORD_SIZE as u32\n",
+        ).replace(
+            "        event.clk = plan.high_timestamp as u64;\n",
+            "        event.clk = plan.high_timestamp;\n",
+        )
     memory_hook = """
             // BEAK-INSERT pico semantic memory rw hooks
             if !injected_once
                 && (inject_step == u64::MAX
-                    || inject_step == event_idx as u64
-                    || inject_step == event.clk as u64
+                    || inject_step == (event.clk as u64 / 4)
                     || (inject_step == 0 && !injected_once))
             {
                 let mut beak_applied = false;
@@ -658,6 +681,18 @@ fn beak_ts2_add_consumer_range_events(
                     }
                     Some("pico.semantic.exec.op_selector_binding.read_write") => {
                         beak_applied = disable_non_x0_load_value_binding(cols);
+                        if beak_applied {
+                            std::env::set_var(
+                                "BEAK_PICO_OPCODE_SELECTOR_MUTATION_STEP",
+                                (event.clk as u64 / 4).to_string(),
+                            );
+                            std::env::set_var(
+                                "BEAK_PICO_OPCODE_SELECTOR_MEMORY_EVENT_INDEX",
+                                event_idx.to_string(),
+                            );
+                            std::env::set_var("BEAK_PICO_OPCODE_SELECTOR_BEFORE", "0");
+                            std::env::set_var("BEAK_PICO_OPCODE_SELECTOR_AFTER", "1");
+                        }
                     }
                     _ => {}
                 }
@@ -693,6 +728,18 @@ fn beak_ts2_add_consumer_range_events(
         "                    }",
         'Some("pico.semantic.exec.op_selector_binding.read_write") => {\n'
         "                        beak_applied = disable_non_x0_load_value_binding(cols);\n"
+        "                        if beak_applied {\n"
+        "                            std::env::set_var(\n"
+        '                                "BEAK_PICO_OPCODE_SELECTOR_MUTATION_STEP",\n'
+        "                                (event.clk as u64 / 4).to_string(),\n"
+        "                            );\n"
+        "                            std::env::set_var(\n"
+        '                                "BEAK_PICO_OPCODE_SELECTOR_MEMORY_EVENT_INDEX",\n'
+        "                                event_idx.to_string(),\n"
+        "                            );\n"
+        '                            std::env::set_var("BEAK_PICO_OPCODE_SELECTOR_BEFORE", "0");\n'
+        '                            std::env::set_var("BEAK_PICO_OPCODE_SELECTOR_AFTER", "1");\n'
+        "                        }\n"
         "                    }",
     )
     c = _replace_once(
@@ -779,7 +826,7 @@ fn beak_ts2_add_consumer_range_events(
     path.write_text(c)
 
 
-def _patch_init_final_traces(path: Path) -> None:
+def _patch_init_final_traces(path: Path, *, narrow_45e_types: bool = False) -> None:
     c = path.read_text()
     ts2_helper = """
 const BEAK_TS2_INJECT_KIND: &str = "pico.semantic.memory.timestamped_load_path";
@@ -884,6 +931,19 @@ fn beak_ts2_finalize_event_matches(
 }
 
 """
+    if narrow_45e_types:
+        narrow_replacements = {
+            "const WORD_SIZE_U64: u64 = 4;": "const WORD_SIZE_U32: u32 = 4;",
+            "    addr: u64,": "    addr: u32,",
+            "fn beak_ts2_aligned_addr(event: &CpuEvent) -> u64 {":
+                "fn beak_ts2_aligned_addr(event: &CpuEvent) -> u32 {",
+            "    memory_addr - memory_addr % WORD_SIZE_U64":
+                "    memory_addr - memory_addr % WORD_SIZE_U32",
+            "hashbrown::HashMap::<u64, usize>": "hashbrown::HashMap::<u32, usize>",
+        }
+        for old, new in narrow_replacements.items():
+            c = c.replace(old, new)
+            ts2_helper = ts2_helper.replace(old, new)
     c = _remove_init_final_ts2_hook(c)
     c = c.replace(
         "    chips::chips::{\n        riscv_global::event::GlobalInteractionEvent,\n        riscv_memory::event::MemoryInitializeFinalizeEvent,\n    },\n",
@@ -1663,5 +1723,7 @@ def apply(*, pico_install_path: Path, commit_or_branch: str) -> None:
     _patch_columns(vm / "local" / "columns.rs")
     _patch_local_traces(vm / "local" / "traces.rs")
     _patch_local_constraints(vm / "local" / "constraints.rs")
-    _patch_rw_traces(vm / "read_write" / "traces.rs")
-    _patch_init_final_traces(vm / "initialize_finalize" / "traces.rs")
+    _patch_rw_traces(vm / "read_write" / "traces.rs", narrow_45e_types=True)
+    _patch_init_final_traces(
+        vm / "initialize_finalize" / "traces.rs", narrow_45e_types=True
+    )

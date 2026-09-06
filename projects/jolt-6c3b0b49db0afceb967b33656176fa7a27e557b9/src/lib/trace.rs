@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use beak_core::trace::{semantic, BucketHit, Trace};
-use common::rv_trace::{ELFInstruction, RV32IM};
+use common::rv_trace::ELFInstruction;
 use serde_json::{json, Value};
 
 const BACKEND: &str = "jolt";
@@ -36,92 +36,108 @@ fn push_table_hit_extra(
     hits.push(BucketHit::semantic(bucket, details));
 }
 
-fn expanded_bytecode_instruction_len(instruction: &ELFInstruction) -> usize {
-    match instruction.opcode {
-        RV32IM::MULH => 7,
-        RV32IM::MULHSU => 4,
-        RV32IM::DIV => 8,
-        RV32IM::DIVU => 9,
-        RV32IM::REM => 7,
-        RV32IM::REMU => 8,
-        RV32IM::SH => 12,
-        RV32IM::SB => 11,
-        RV32IM::LBU | RV32IM::LB => 7,
-        RV32IM::LHU | RV32IM::LH => 8,
-        _ => 1,
-    }
-}
-
-fn virtualized_bytecode_len(bytecode: &[ELFInstruction]) -> usize {
-    bytecode.iter().map(expanded_bytecode_instruction_len).sum::<usize>().max(1)
-}
-
-fn bytecode_boundary_cell(
-    bytecode_len: usize,
-    virtualized_len: usize,
-    padded_len: usize,
-) -> &'static str {
-    if bytecode_len < 16 {
-        return "pd4.small_program";
-    }
-    if bytecode_len > (1 << 14) {
-        return "pd4.large_program";
+pub fn bytecode_boundary_hit_from_receipt(raw: &str) -> Option<BucketHit> {
+    let receipt: Value = serde_json::from_str(raw).ok()?;
+    let receipt = receipt.as_object()?;
+    let schema_version = receipt.get("schema_version")?.as_u64()?;
+    let relation = receipt.get("relation")?.as_str()?;
+    let table_name = receipt.get("table_name")?.as_str()?;
+    let population_start = usize::try_from(receipt.get("population_start")?.as_u64()?).ok()?;
+    let population_end = usize::try_from(receipt.get("population_end")?.as_u64()?).ok()?;
+    let population_rows = usize::try_from(receipt.get("population_rows")?.as_u64()?).ok()?;
+    let allocated_rows = usize::try_from(receipt.get("allocated_rows")?.as_u64()?).ok()?;
+    let boundary_k = u32::try_from(receipt.get("boundary_k")?.as_u64()?).ok()?;
+    let receipt_exact_crossing = receipt.get("exact_crossing")?.as_bool()?;
+    let expected_end = population_start.checked_add(population_rows)?;
+    let boundary_rows = 1usize.checked_shl(boundary_k)?;
+    let exact_crossing = schema_version == 1
+        && relation == "preprocessed_bytecode_end_crosses_allocated_rows_by_one"
+        && table_name == "read_write_memory.v_init"
+        && receipt_exact_crossing
+        && population_rows > 0
+        && allocated_rows.is_power_of_two()
+        && boundary_rows == allocated_rows
+        && expected_end == population_end
+        && population_end > allocated_rows;
+    if !exact_crossing {
+        return None;
     }
 
-    let len = virtualized_len.max(1);
-    let upper = len.next_power_of_two();
-    let lower = if len.is_power_of_two() { len } else { upper / 2 };
-    if len == lower.saturating_add(1) {
-        "pd4.just_over"
-    } else if len.saturating_add(1) == padded_len {
-        "pd4.just_under"
-    } else if len.saturating_sub(lower) <= padded_len.saturating_sub(len) {
-        "pd4.just_over"
-    } else {
-        "pd4.just_under"
-    }
-}
-
-fn emit_bytecode_table_boundary_hit(hits: &mut Vec<BucketHit>, bytecode: &[ELFInstruction]) {
-    let bytecode_len = bytecode.len();
-    let virtualized_len = virtualized_bytecode_len(bytecode);
-    let preprocessed_len = virtualized_len.saturating_add(1);
-    let padded_len = preprocessed_len.max(1).next_power_of_two();
-    let crossed_k = padded_len.trailing_zeros();
-    let min_address = bytecode.iter().map(|instruction| instruction.address).min();
-    let max_address = bytecode.iter().map(|instruction| instruction.address).max();
+    let mut hits = Vec::new();
     push_table_hit_extra(
-        hits,
+        &mut hits,
         semantic::row::BYTECODE_TABLE_BOUNDARY,
         "pd4",
-        bytecode_boundary_cell(bytecode_len, virtualized_len, padded_len),
-        "jolt_program.decode.bytecode",
-        virtualized_len as u64,
+        "pd4.just_over",
+        "jolt.read_write_memory.preprocessed_bytecode",
+        allocated_rows as u64,
         &[
-            ("table_name", json!("bytecode")),
-            ("bytecode_len", json!(bytecode_len)),
-            ("virtualized_bytecode_len", json!(virtualized_len)),
-            ("preprocessed_bytecode_len", json!(preprocessed_len)),
-            ("padded_bytecode_len", json!(padded_len)),
-            ("padding_rows", json!(padded_len.saturating_sub(preprocessed_len))),
-            ("crossed_k", json!(crossed_k)),
-            ("has_prepended_noop", json!(true)),
-            ("bytecode_address_min", json!(min_address)),
-            ("bytecode_address_max", json!(max_address)),
+            ("table_name", json!(table_name)),
+            ("population_start", json!(population_start)),
+            ("population_end", json!(population_end)),
+            ("population_rows", json!(population_rows)),
+            ("allocated_rows", json!(allocated_rows)),
+            ("boundary_k", json!(boundary_k)),
+            ("exact_crossing", json!(true)),
+            ("relation", json!(relation)),
+            ("relation_valid", json!(true)),
         ],
     );
+    hits.pop()
 }
 
 impl JoltTrace {
     pub fn from_execution(bytecode: &[ELFInstruction]) -> Result<Self, String> {
-        let mut bucket_hits = Vec::new();
-        emit_bytecode_table_boundary_hit(&mut bucket_hits, bytecode);
-        Ok(Self { bucket_hits, instruction_count: bytecode.len() })
+        Ok(Self { bucket_hits: Vec::new(), instruction_count: bytecode.len() })
     }
 
     #[allow(dead_code)]
     pub fn instruction_count(&self) -> usize {
         self.instruction_count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bytecode_boundary_hit_from_receipt;
+
+    fn receipt(population_start: usize, population_rows: usize, allocated_rows: usize) -> String {
+        let population_end = population_start + population_rows;
+        format!(
+            r#"{{"schema_version":1,"relation":"preprocessed_bytecode_end_crosses_allocated_rows_by_one","table_name":"read_write_memory.v_init","population_start":{population_start},"population_end":{population_end},"population_rows":{population_rows},"allocated_rows":{allocated_rows},"boundary_k":{},"exact_crossing":{}}}"#,
+            allocated_rows.trailing_zeros(),
+            population_end == allocated_rows + 1,
+        )
+    }
+
+    #[test]
+    fn exact_preprocessed_bytecode_crossing_emits_pd4() {
+        let hit = bytecode_boundary_hit_from_receipt(&receipt(12, 5, 16)).unwrap();
+        assert_eq!(hit.bucket_id, "sem.row.bytecode_table_boundary");
+        assert_eq!(hit.details["cell_id"], "pd4.just_over");
+        assert_eq!(hit.details["population_end"], 17);
+        assert_eq!(hit.details["allocated_rows"], 16);
+        assert_eq!(hit.details["step_idx"], 16);
+        assert_eq!(hit.details["relation_valid"], true);
+    }
+
+    #[test]
+    fn nearby_and_invalid_population_receipts_stay_clean() {
+        assert!(bytecode_boundary_hit_from_receipt(&receipt(12, 4, 16)).is_none());
+        assert!(bytecode_boundary_hit_from_receipt(&receipt(12, 6, 16)).is_none());
+        assert!(bytecode_boundary_hit_from_receipt("{}").is_none());
+        assert!(bytecode_boundary_hit_from_receipt(
+            r#"{"schema_version":1,"relation":"unsupported","table_name":"read_write_memory.v_init","population_start":12,"population_end":17,"population_rows":5,"allocated_rows":16,"boundary_k":4,"exact_crossing":true}"#,
+        )
+        .is_none());
+        assert!(bytecode_boundary_hit_from_receipt(
+            r#"{"schema_version":1,"relation":"preprocessed_bytecode_end_crosses_allocated_rows_by_one","table_name":"read_write_memory.v_init","population_start":12,"population_end":17,"population_rows":5,"allocated_rows":16,"boundary_k":4,"exact_crossing":false}"#,
+        )
+        .is_none());
+        assert!(bytecode_boundary_hit_from_receipt(
+            r#"{"schema_version":1,"relation":"preprocessed_bytecode_end_crosses_allocated_rows_by_one","table_name":"read_write_memory.v_init","population_start":12,"population_end":17,"population_rows":5,"allocated_rows":16,"exact_crossing":true}"#,
+        )
+        .is_none());
     }
 }
 

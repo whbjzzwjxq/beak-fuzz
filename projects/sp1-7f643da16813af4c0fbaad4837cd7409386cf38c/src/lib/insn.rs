@@ -20,6 +20,8 @@ pub struct Sp1Insn {
     pub rd_val: Option<u32>,
     pub rs1_val: Option<u32>,
     pub rs2_or_imm_val: Option<u32>,
+    /// Executed SP1 ECALL input state: x5/syscall, x10, x11, and x12.
+    pub ecall_registers: Option<[u32; 4]>,
     pub asm: String,
 }
 
@@ -47,6 +49,7 @@ impl Sp1Insn {
             rd_val: None,
             rs1_val: None,
             rs2_or_imm_val: None,
+            ecall_registers: None,
             asm: insn.asm,
         }
     }

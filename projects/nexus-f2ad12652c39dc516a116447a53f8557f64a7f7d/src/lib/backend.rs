@@ -294,6 +294,19 @@ pub fn run_backend_once(
     inject_kind: Option<&str>,
     inject_step: u64,
 ) -> Result<RunResponse, String> {
+    match catch_unwind_nonfatal(std::panic::AssertUnwindSafe(|| {
+        run_backend_once_inner(words, inject_kind, inject_step)
+    })) {
+        Ok(result) => result,
+        Err(payload) => Err(format!("nexus backend {}", panic_payload_to_string(&*payload))),
+    }
+}
+
+fn run_backend_once_inner(
+    words: &[u32],
+    inject_kind: Option<&str>,
+    inject_step: u64,
+) -> Result<RunResponse, String> {
     let final_regs = execute_final_regs(words)?;
 
     let program = nexus_vm::riscv::decode_instructions(words);
@@ -364,11 +377,24 @@ impl BenchmarkBackend for NexusBackend {
 
     fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
         self.eval = BackendEval::default();
-        let resp = run_backend_once(
-            words,
-            self.pending_injection.as_ref().map(|p| p.kind.as_str()),
-            self.pending_injection.as_ref().map(|p| p.step).unwrap_or(0),
-        )?;
+        let resp = match catch_unwind_nonfatal(std::panic::AssertUnwindSafe(|| {
+            run_backend_once(
+                words,
+                self.pending_injection.as_ref().map(|p| p.kind.as_str()),
+                self.pending_injection.as_ref().map(|p| p.step).unwrap_or(0),
+            )
+        })) {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => {
+                self.eval.backend_error = Some(e.clone());
+                return Err(e);
+            }
+            Err(payload) => {
+                let msg = format!("nexus backend {}", panic_payload_to_string(&*payload));
+                self.eval.backend_error = Some(msg.clone());
+                return Err(msg);
+            }
+        };
         self.last_observed_injection_sites = resp.observed_injection_sites;
         self.eval.final_regs = resp.final_regs;
         self.eval.micro_op_count = resp.micro_op_count;

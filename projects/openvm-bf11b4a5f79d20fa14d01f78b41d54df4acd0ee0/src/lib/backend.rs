@@ -20,9 +20,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn build_sdk() -> Sdk {
     let mut app_config = AppConfig::riscv32();
@@ -128,6 +128,7 @@ pub struct WorkerResponse {
 }
 
 const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
+const DEFAULT_WORKER_TIMEOUT_SECS: u64 = 30 * 60;
 
 fn base_inject_kind(kind: &str) -> &str {
     kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
@@ -643,11 +644,25 @@ impl OpenVmBackend {
 
     fn stop_worker(&mut self) {
         if let Some(mut worker) = self.worker.take() {
+            let worker_pid = worker.child.id();
+            let _ =
+                Command::new("pkill").arg("-KILL").arg("-P").arg(worker_pid.to_string()).status();
             let _ = worker.child.kill();
             let _ = worker.child.wait();
+            let _ =
+                Command::new("pkill").arg("-KILL").arg("-P").arg(worker_pid.to_string()).status();
             drop(worker.stdin);
             let _ = worker.reader_thread.join();
         }
+    }
+
+    fn worker_timeout() -> Duration {
+        let secs = std::env::var("BEAK_OPENVM_WORKER_TIMEOUT_SECS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|secs| *secs > 0)
+            .unwrap_or(DEFAULT_WORKER_TIMEOUT_SECS);
+        Duration::from_secs(secs)
     }
 }
 
@@ -700,11 +715,24 @@ impl BenchmarkBackend for OpenVmBackend {
             worker.stdin.flush().map_err(|e| format!("flush worker request failed: {e}"))?;
         }
 
+        let worker_timeout = Self::worker_timeout();
+        let worker_deadline = Instant::now() + worker_timeout;
         let worker_resp = loop {
+            let now = Instant::now();
+            if now >= worker_deadline {
+                self.stop_worker();
+                let msg = format!(
+                    "backend worker timeout after {}s for request {request_id}",
+                    worker_timeout.as_secs()
+                );
+                self.eval.backend_error = Some(msg.clone());
+                return Err(msg);
+            }
+            let remaining = worker_deadline.saturating_duration_since(now);
             let recv = {
                 let worker =
                     self.worker.as_ref().ok_or_else(|| "backend worker unavailable".to_string())?;
-                worker.responses_rx.recv()
+                worker.responses_rx.recv_timeout(remaining)
             };
             match recv {
                 Ok(Ok(resp)) => {
@@ -717,7 +745,16 @@ impl BenchmarkBackend for OpenVmBackend {
                     self.eval.backend_error = Some(e.clone());
                     return Err(e);
                 }
-                Err(_) => {
+                Err(RecvTimeoutError::Timeout) => {
+                    self.stop_worker();
+                    let msg = format!(
+                        "backend worker timeout after {}s for request {request_id}",
+                        worker_timeout.as_secs()
+                    );
+                    self.eval.backend_error = Some(msg.clone());
+                    return Err(msg);
+                }
+                Err(RecvTimeoutError::Disconnected) => {
                     self.stop_worker();
                     let msg = "backend worker disconnected".to_string();
                     self.eval.backend_error = Some(msg.clone());

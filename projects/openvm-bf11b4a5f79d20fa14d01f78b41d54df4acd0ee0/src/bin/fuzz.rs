@@ -180,6 +180,7 @@ fn main() {
         initial_limit,
         mutation_iterations,
         max_instructions,
+        long_tail_max_instructions: 0,
         precheck_oracle_max_steps: 0,
         semantic_search_enabled: true,
         semantic_window_before,

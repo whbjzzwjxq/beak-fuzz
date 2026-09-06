@@ -328,6 +328,12 @@ pub mod row {
         SemanticBucketCategory::Row,
     );
 
+    pub const TRACE_POWER2_BOUNDARY: SemanticBucket = SemanticBucket::new(
+        "sem.row.trace_power2_boundary",
+        "semantic.row.trace_power2_boundary",
+        SemanticBucketCategory::Row,
+    );
+
     pub const BYTECODE_TABLE_BOUNDARY: SemanticBucket = SemanticBucket::new(
         "sem.row.bytecode_table_boundary",
         "semantic.row.bytecode_table_boundary",
@@ -396,6 +402,7 @@ pub const ALL_BUCKETS: &[SemanticBucket] = &[
     memory::WRITE_PAYLOAD_CONSISTENCY,
     row::PADDING_INTERACTION_SEND,
     row::TABLE_POWER2_BOUNDARY,
+    row::TRACE_POWER2_BOUNDARY,
     row::BYTECODE_TABLE_BOUNDARY,
     time::BOUNDARY_ORIGIN_CONSISTENCY,
     time::MONOTONIC_ACCESS_ORDERING,

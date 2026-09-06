@@ -29,6 +29,10 @@ IO_LOCK = threading.Lock()
 INSTALL_LOCK = threading.Lock()
 BUG_KIND_RE = re.compile(r'"kind"\s*:\s*"((?:\\.|[^"\\])*)"')
 BUG_SEMANTIC_CLASS_RE = re.compile(r'"semantic_class"\s*:\s*(null|"((?:\\.|[^"\\])*)")')
+ORDINARY_FORBIDDEN_CHILD_ENV = (
+    "BEAK_SEMANTIC_TARGET_BUCKET_PREFIX",
+    "BEAK_SEMANTIC_TARGET_INJECT_KIND_PREFIX",
+)
 
 
 class ProcessReaper:
@@ -139,6 +143,13 @@ TARGET_CLASS = {
     "openvm-d7eab708": "generic_rv32_trace_only",
     "sp1-3561f006": "bespoke_sp1_uint256_div",
     "sp1-fb38df2c": "bespoke_sp1_recursion",
+}
+
+# Some ordinary programs legitimately execute for much longer than the generic
+# loop-safety precheck.  These are scheduler limits, not semantic/case filters:
+# every accepted input for the snapshot receives the same bound.
+TARGET_ORACLE_PRECHECK_MIN = {
+    "risc0-6f038bd": 40_000,
 }
 
 
@@ -253,12 +264,17 @@ class Config:
         self.initial_limit = env_int("INITIAL_LIMIT", 0)
         self.mutation_iters = env_int("MUTATION_ITERS", env_int("ITERS", 0))
         self.max_instructions = env_int("MAX_INSTRUCTIONS", 256)
+        # Long-tail scheduling is the default for ordinary campaigns: programs longer
+        # than MAX_INSTRUCTIONS up to this absolute ceiling occupy a small deterministic
+        # quota lane instead of being truncated away. Set to 0 for the legacy hard cap.
+        self.long_tail_max_instructions = env_int("LONG_TAIL_MAX_INSTRUCTIONS", 8192)
         self.oracle_precheck_max_steps = env_int("ORACLE_PRECHECK_MAX_STEPS", 32)
         self.semantic_window_before = env_int("SEMANTIC_WINDOW_BEFORE", 16)
         self.semantic_window_after = env_int("SEMANTIC_WINDOW_AFTER", 64)
         self.semantic_step_stride = env_int("SEMANTIC_STEP_STRIDE", 1)
         self.semantic_max_trials = env_int("SEMANTIC_MAX_TRIALS", 64)
         self.fast_test = os.environ.get("FAST_TEST", "0")
+        self.benchmark_out_dir = env_path("BEAK_BENCHMARK_OUT_DIR", STORAGE_DIR)
         self.run_root = env_path("RUN_ROOT", BEAK_ROOT / "out" / "serial-install-injection")
         self.log_root = env_path("LOG_ROOT", self.run_root / "logs")
         self.summary_path = env_path("SUMMARY_PATH", self.run_root / "summary.tsv")
@@ -277,6 +293,10 @@ class Config:
 
     def command_env(self) -> dict[str, str]:
         env = dict(os.environ)
+        # This is the ordinary campaign entrypoint. Never inherit replay/debug target filters into
+        # install or fuzz children; candidate enumeration must remain broad and data-driven.
+        for name in ORDINARY_FORBIDDEN_CHILD_ENV:
+            env.pop(name, None)
         home_local_bin = Path.home() / ".local" / "bin"
         if home_local_bin.is_dir():
             env["PATH"] = f"{home_local_bin}:{env.get('PATH', '')}"
@@ -407,12 +427,18 @@ def build_run_cmd(target_id: str, config: Config) -> tuple[list[str], Path, dict
         str(config.mutation_iters),
         "--max-instructions",
         str(config.max_instructions),
+        "--long-tail-max-instructions",
+        str(config.long_tail_max_instructions),
     ]
     if target_id != "openvm-d7eab708":
+        oracle_precheck_max_steps = max(
+            config.oracle_precheck_max_steps,
+            TARGET_ORACLE_PRECHECK_MIN.get(target_id, 0),
+        )
         run_args.extend(
             [
                 "--oracle-precheck-max-steps",
-                str(config.oracle_precheck_max_steps),
+                str(oracle_precheck_max_steps),
             ]
         )
     if target_id != "jolt-d67f5a2a":
@@ -515,11 +541,11 @@ def run_and_log(
             REAPER.unregister(proc)
 
 
-def snapshot_target_artifacts(target_id: str) -> set[Path]:
+def snapshot_target_artifacts(target_id: str, output_dir: Path = STORAGE_DIR) -> set[Path]:
     prefix = target_artifact_prefix(target_id)
     if prefix is None:
         return set()
-    return set(STORAGE_DIR.glob(f"{prefix}-*.jsonl"))
+    return set(output_dir.glob(f"{prefix}-*.jsonl"))
 
 
 def artifact_kind(path: Path) -> str:
@@ -580,7 +606,7 @@ def run_target(target_id: str, config: Config, skip_install: bool) -> bool:
     else:
         print("   skip install : true")
 
-    before = snapshot_target_artifacts(target_id)
+    before = snapshot_target_artifacts(target_id, config.benchmark_out_dir)
     run_cmd, run_cwd, run_env = build_run_cmd(target_id, config)
     rc = run_and_log(
         run_cmd,
@@ -590,7 +616,7 @@ def run_target(target_id: str, config: Config, skip_install: bool) -> bool:
         timeout_seconds=config.soft_timeout_seconds,
         grace_seconds=config.kill_grace_seconds,
     )
-    after = snapshot_target_artifacts(target_id)
+    after = snapshot_target_artifacts(target_id, config.benchmark_out_dir)
     append_artifacts(config.artifacts_path, target_id, commit, before, after)
 
     if rc == 0:
@@ -937,6 +963,7 @@ def print_header(config: Config, targets: list[str]) -> None:
     print(f"  sem_max_trials  : {config.semantic_max_trials}")
     print(f"  fast_test       : {config.fast_test}")
     print(f"  seeds_jsonl     : {config.seeds_jsonl}")
+    print(f"  benchmark_out   : {config.benchmark_out_dir}")
     print(f"  mem_limit       : {config.memory_limit_gb}G ({config.memory_limit_bytes} bytes)")
     print(f"  run_root        : {config.run_root}")
 

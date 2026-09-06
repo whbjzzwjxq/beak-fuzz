@@ -36,6 +36,23 @@ def _insert_after(contents: str, *, anchor: str, insert: str, guard: str) -> str
     return contents[:pos] + insert + contents[pos:]
 
 
+def _replace_guarded_block(contents: str, *, guard: str, replacement: str) -> str:
+    guard_idx = contents.find(guard)
+    if guard_idx < 0:
+        return contents
+    start = contents.rfind("\n", 0, guard_idx) + 1
+    end_marker = "// BEAK-INSERT-END"
+    end_idx = contents.find(end_marker, guard_idx)
+    if end_idx < 0:
+        return contents
+    end = contents.find("\n", end_idx + len(end_marker))
+    if end < 0:
+        end = len(contents)
+    else:
+        end += 1
+    return contents[:start] + replacement.lstrip("\n") + contents[end:]
+
+
 def _ensure_use_fuzzer_utils(path: Path) -> None:
     c = path.read_text()
     if "use fuzzer_utils;" in c:
@@ -219,7 +236,7 @@ def _patch_runtime_mod(path: Path) -> None:
     path.write_text(c)
 
 
-def _patch_executor(path: Path) -> None:
+def _patch_executor(path: Path, commit_or_branch: str) -> None:
     _ensure_use_fuzzer_utils(path)
     c = path.read_text()
 
@@ -340,9 +357,10 @@ fn beak_maybe_inject_control_flow_next_pc(
     pc: u32,
     observed_next_pc: u32,
     step: u64,
-) -> Option<u32> {
+) -> Option<(String, u32)> {
     let kind = fuzzer_utils::matching_injection_kind(BEAK_CONTROL_FLOW_INJECT_KIND, step)?;
-    beak_mutated_control_flow_next_pc(kind.as_str(), opcode, pc, observed_next_pc)
+    let mutated = beak_mutated_control_flow_next_pc(kind.as_str(), opcode, pc, observed_next_pc)?;
+    Some((kind, mutated))
 }
 // BEAK-INSERT-END
 """,
@@ -355,6 +373,66 @@ fn beak_maybe_inject_control_flow_next_pc(
         insert="""
         // BEAK-INSERT: sp1.execute_instruction.control_flow_injection
         let beak_exec_step = fuzzer_utils::next_executor_step();
+        if let Some((beak_kind, beak_next_pc)) = beak_maybe_inject_control_flow_next_pc(
+            instruction.opcode,
+            self.state.pc,
+            next_pc,
+            beak_exec_step,
+        ) {
+            let beak_pc = self.state.pc;
+            let beak_observed_before = next_pc;
+            next_pc = beak_next_pc;
+            let beak_rv_instruction =
+                if instruction.opcode == Opcode::ECALL { 0x0000_0073 } else { 0 };
+            let beak_ecall_registers = if instruction.opcode == Opcode::ECALL {
+                [syscall as u32, b, c, self.register(Register::X12)]
+            } else {
+                [0, 0, 0, 0]
+            };
+            let _ = fuzzer_utils::record_executed_control_flow_receipt(
+                beak_kind.as_str(),
+                beak_exec_step,
+                beak_exec_step,
+                beak_pc,
+                beak_rv_instruction,
+                instruction.opcode as u32,
+                instruction.opcode.mnemonic(),
+                "__BEAK_SP1_COMMIT__",
+                beak_pc.wrapping_add(4),
+                beak_observed_before,
+                next_pc,
+                beak_ecall_registers,
+            );
+        }
+        // BEAK-INSERT-END
+
+""",
+    )
+
+    legacy_helper = """fn beak_maybe_inject_control_flow_next_pc(
+    opcode: Opcode,
+    pc: u32,
+    observed_next_pc: u32,
+    step: u64,
+) -> Option<u32> {
+    let kind = fuzzer_utils::matching_injection_kind(BEAK_CONTROL_FLOW_INJECT_KIND, step)?;
+    beak_mutated_control_flow_next_pc(kind.as_str(), opcode, pc, observed_next_pc)
+}"""
+    typed_helper = """fn beak_maybe_inject_control_flow_next_pc(
+    opcode: Opcode,
+    pc: u32,
+    observed_next_pc: u32,
+    step: u64,
+) -> Option<(String, u32)> {
+    let kind = fuzzer_utils::matching_injection_kind(BEAK_CONTROL_FLOW_INJECT_KIND, step)?;
+    let mutated = beak_mutated_control_flow_next_pc(kind.as_str(), opcode, pc, observed_next_pc)?;
+    Some((kind, mutated))
+}"""
+    if legacy_helper in c:
+        c = c.replace(legacy_helper, typed_helper, 1)
+
+    legacy_executor_hook = """        // BEAK-INSERT: sp1.execute_instruction.control_flow_injection
+        let beak_exec_step = fuzzer_utils::next_executor_step();
         if let Some(beak_next_pc) = beak_maybe_inject_control_flow_next_pc(
             instruction.opcode,
             self.state.pc,
@@ -364,9 +442,51 @@ fn beak_maybe_inject_control_flow_next_pc(
             next_pc = beak_next_pc;
         }
         // BEAK-INSERT-END
-
-""",
+"""
+    typed_executor_hook = """        // BEAK-INSERT: sp1.execute_instruction.control_flow_injection
+        let beak_exec_step = fuzzer_utils::next_executor_step();
+        if let Some((beak_kind, beak_next_pc)) = beak_maybe_inject_control_flow_next_pc(
+            instruction.opcode,
+            self.state.pc,
+            next_pc,
+            beak_exec_step,
+        ) {
+            let beak_pc = self.state.pc;
+            let beak_observed_before = next_pc;
+            next_pc = beak_next_pc;
+            let beak_rv_instruction =
+                if instruction.opcode == Opcode::ECALL { 0x0000_0073 } else { 0 };
+            let beak_ecall_registers = if instruction.opcode == Opcode::ECALL {
+                [syscall as u32, b, c, self.register(Register::X12)]
+            } else {
+                [0, 0, 0, 0]
+            };
+            let _ = fuzzer_utils::record_executed_control_flow_receipt(
+                beak_kind.as_str(),
+                beak_exec_step,
+                beak_exec_step,
+                beak_pc,
+                beak_rv_instruction,
+                instruction.opcode as u32,
+                instruction.opcode.mnemonic(),
+                "__BEAK_SP1_COMMIT__",
+                beak_pc.wrapping_add(4),
+                beak_observed_before,
+                next_pc,
+                beak_ecall_registers,
+            );
+        }
+        // BEAK-INSERT-END
+"""
+    if legacy_executor_hook in c:
+        c = c.replace(legacy_executor_hook, typed_executor_hook, 1)
+    c = _replace_guarded_block(
+        c,
+        guard="// BEAK-INSERT: sp1.execute_instruction.control_flow_injection",
+        replacement=typed_executor_hook,
     )
+
+    c = c.replace("__BEAK_SP1_COMMIT__", commit_or_branch)
 
     path.write_text(c)
 
@@ -376,4 +496,4 @@ def apply(*, sp1_install_path: Path, commit_or_branch: str) -> None:
     for path in _runtime_mod_candidates(sp1_install_path):
         _patch_runtime_mod(path)
     for path in _executor_candidates(sp1_install_path):
-        _patch_executor(path)
+        _patch_executor(path, commit_or_branch)

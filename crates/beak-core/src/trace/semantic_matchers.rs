@@ -485,6 +485,11 @@ pub fn match_boundary_origin_semantic_hits(
             BucketHit::semantic(
                 semantic::time::BOUNDARY_ORIGIN_CONSISTENCY,
                 details_kv(&[
+                    // A boundary-origin observation is the typed ts1 witness.  Keep
+                    // the stable cell identity on the matcher output so backend
+                    // candidate routing cannot depend on an absent field.
+                    ("obligation_id", json!("ts1")),
+                    ("cell_id", json!("ts1.standard")),
                     ("kind", json!(obs.kind)),
                     ("chip_name", json!(obs.chip_name)),
                     ("step_idx", json!(obs.step_idx)),
@@ -652,9 +657,29 @@ pub fn match_ecall_semantic_hits(observations: &[EcallInsnObservation]) -> Vec<B
 
 #[cfg(test)]
 mod tests {
+    use super::match_boundary_origin_semantic_hits;
     use super::{match_sequence_semantic_hits, sequence_trace_signals};
-    use crate::trace::observations::{SequenceInsnObservation, SequenceSemanticMatcherProfile};
+    use crate::trace::observations::{
+        BoundaryOriginObservation, SequenceInsnObservation, SequenceSemanticMatcherProfile,
+    };
     use crate::trace::{semantic, TraceSignal};
+    use serde_json::json;
+
+    #[test]
+    fn boundary_origin_matcher_carries_typed_ts1_identity() {
+        let hits = match_boundary_origin_semantic_hits(&[BoundaryOriginObservation {
+            step_idx: 3,
+            op_idx: 2,
+            kind: "connector".to_string(),
+            chip_name: "Connector".to_string(),
+            from_timestamp: Some(0),
+            to_timestamp: Some(1),
+            is_terminate: false,
+        }]);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].details.get("obligation_id"), Some(&json!("ts1")));
+        assert_eq!(hits[0].details.get("cell_id"), Some(&json!("ts1.standard")));
+    }
 
     #[test]
     fn semantic_matchers_only_emit_registered_semantic_ids() {

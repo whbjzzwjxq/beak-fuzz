@@ -12,6 +12,7 @@ use beak_sp1_39ab52fc::backend::{run_backend_once, Sp1Backend, WorkerRequest, Wo
 
 const ZKVM_COMMIT: &str = "39ab52fce38172c9d23feed7248198dc14c164a9";
 const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
+const ORDINARY_MEMORY_OFFSETS: [i32; 3] = [4, 8, 12];
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -76,6 +77,97 @@ fn write_inline_seed_jsonl(root: &Path, words: &[u32]) -> PathBuf {
     path
 }
 
+fn encode_memory_i(imm: i32, rs1: u32, funct3: u32, rd: u32) -> u32 {
+    (((imm as u32) & 0x0fff) << 20)
+        | (rs1 << 15)
+        | (funct3 << 12)
+        | (rd << 7)
+        | 0x03
+}
+
+fn encode_memory_s(imm: i32, rs1: u32, rs2: u32, funct3: u32) -> u32 {
+    let imm = (imm as u32) & 0x0fff;
+    (((imm >> 5) & 0x7f) << 25)
+        | (rs2 << 20)
+        | (rs1 << 15)
+        | (funct3 << 12)
+        | ((imm & 0x1f) << 7)
+        | 0x23
+}
+
+fn ordinary_memory_carrier(lane_idx: usize, offset: i32) -> Vec<u32> {
+    match lane_idx {
+        0 => vec![encode_memory_i(offset, 2, 2, 4)],
+        1 => vec![encode_memory_s(offset, 2, 3, 2)],
+        _ => vec![encode_memory_i(offset, 2, 0, 5)],
+    }
+}
+
+fn ordinary_memory_carrier_lines() -> Vec<String> {
+    ORDINARY_MEMORY_OFFSETS
+        .into_iter()
+        .enumerate()
+        .map(|(lane_idx, offset)| {
+            let operation = match lane_idx {
+                0 => "lw",
+                1 => "sw",
+                _ => "lb",
+            };
+            json!({
+                "instructions": ordinary_memory_carrier(lane_idx, offset),
+                "metadata": {
+                    "source": "generated_initial_corpus",
+                    "generator": "sp1_memory_access_family_v1",
+                    "carrier_family": "memory_access",
+                    "operation": operation,
+                    "base_register": 2,
+                    "offset": offset,
+                    "lane_idx": lane_idx,
+                }
+            })
+            .to_string()
+        })
+        .collect()
+}
+
+fn ordinary_memory_augmented_contents(original_contents: &str) -> (String, usize) {
+    let carrier_lines = ordinary_memory_carrier_lines();
+    let mut contents = carrier_lines.join("\n");
+    contents.push('\n');
+    if !original_contents.is_empty() {
+        contents.push_str(original_contents);
+        if !original_contents.ends_with('\n') {
+            contents.push('\n');
+        }
+    }
+    (contents, carrier_lines.len())
+}
+
+fn write_ordinary_memory_seed_jsonl(root: &Path, original: &Path) -> (PathBuf, usize) {
+    let original_contents = std::fs::read_to_string(original)
+        .unwrap_or_else(|err| panic!("read ordinary seeds JSONL {}: {err}", original.display()));
+    let (contents, carrier_count) = ordinary_memory_augmented_contents(&original_contents);
+    let ts_millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+    let dir = root.join("storage/fuzzing_seeds");
+    std::fs::create_dir_all(&dir).expect("create storage/fuzzing_seeds");
+    let path = dir.join(format!(
+        ".tmp-sp1-memory-corpus-{ts_millis}-pid{}.jsonl",
+        std::process::id()
+    ));
+    std::fs::write(&path, contents).expect("write ordinary SP1 memory carrier JSONL");
+    (path, carrier_count)
+}
+
+fn effective_initial_limit(requested: usize, carrier_count: usize, inline: bool) -> usize {
+    if inline {
+        1
+    } else if requested == 0 {
+        0
+    } else {
+        requested.saturating_add(carrier_count)
+    }
+}
+
 fn main() {
     let matches = Command::new("beak-fuzz")
         .about("Initial-corpus benchmark with semantic witness search (oracle vs SP1).")
@@ -112,6 +204,12 @@ fn main() {
                 .long("max-instructions")
                 .default_value("256")
                 .help("Maximum number of RISC-V instruction words in a seed."),
+        )
+        .arg(
+            Arg::new("long_tail_max_instructions")
+                .long("long-tail-max-instructions")
+                .default_value("0")
+                .help("Absolute length ceiling for long-tail scheduling; 0 keeps the hard cap at max-instructions."),
         )
         .arg(
             Arg::new("semantic_window_before")
@@ -158,7 +256,7 @@ fn main() {
         .arg(
             Arg::new("oracle_data_size_bytes")
                 .long("oracle-data-size-bytes")
-                .default_value("0")
+                .default_value("0x100000")
                 .help("Oracle zeroed data RAM bytes for split-code-data mode."),
         )
         .arg(
@@ -177,11 +275,11 @@ fn main() {
 
     let root = workspace_root();
     let inline_words = collect_bin_words(&matches);
-    let seeds_path = if inline_words.is_empty() {
+    let (seeds_path, ordinary_memory_carrier_count) = if inline_words.is_empty() {
         let seeds_arg = matches.get_one::<String>("seeds_jsonl").unwrap().to_string();
-        resolve_path(&root, &seeds_arg)
+        write_ordinary_memory_seed_jsonl(&root, &resolve_path(&root, &seeds_arg))
     } else {
-        write_inline_seed_jsonl(&root, &inline_words)
+        (write_inline_seed_jsonl(&root, &inline_words), 0)
     };
     let requested_initial_limit: usize =
         matches.get_one::<String>("initial_limit").unwrap().parse().expect("initial-limit");
@@ -189,6 +287,11 @@ fn main() {
         matches.get_one::<String>("mutation_iters").unwrap().parse().expect("mutation-iters");
     let requested_max_instructions: usize =
         matches.get_one::<String>("max_instructions").unwrap().parse().expect("max-instructions");
+    let requested_long_tail_max: usize = matches
+        .get_one::<String>("long_tail_max_instructions")
+        .unwrap()
+        .parse()
+        .expect("long-tail-max-instructions");
     let precheck_oracle_max_steps: u32 = matches
         .get_one::<String>("oracle_precheck_max_steps")
         .unwrap()
@@ -224,7 +327,11 @@ fn main() {
         "oracle-data-size-bytes",
     );
 
-    let initial_limit: usize = if inline_words.is_empty() { requested_initial_limit } else { 1 };
+    let initial_limit = effective_initial_limit(
+        requested_initial_limit,
+        ordinary_memory_carrier_count,
+        !inline_words.is_empty(),
+    );
     let mutation_iterations: usize =
         if inline_words.is_empty() { requested_mutation_iterations } else { 0 };
     let max_instructions: usize = if inline_words.is_empty() {
@@ -232,6 +339,12 @@ fn main() {
     } else {
         inline_words.len().max(1)
     };
+    let long_tail_max_instructions: usize = if inline_words.is_empty() {
+        requested_long_tail_max
+    } else {
+        0
+    };
+    let backend_max_instructions = long_tail_max_instructions.max(max_instructions);
 
     let cfg = BenchmarkConfig {
         zkvm_tag: "sp1".to_string(),
@@ -248,6 +361,7 @@ fn main() {
         initial_limit,
         mutation_iterations,
         max_instructions,
+        long_tail_max_instructions,
         precheck_oracle_max_steps,
         semantic_search_enabled: true,
         semantic_window_before,
@@ -257,7 +371,8 @@ fn main() {
         stack_size_bytes: 256 * 1024 * 1024,
     };
 
-    let res = run_benchmark_threaded(cfg, move || Sp1Backend::new(max_instructions));
+    println!("ordinary_memory_carriers = {ordinary_memory_carrier_count}");
+    let res = run_benchmark_threaded(cfg, move || Sp1Backend::new(backend_max_instructions));
     match res {
         Ok(out) => {
             println!("Wrote corpus JSONL: {}", out.corpus_path.display());
@@ -314,6 +429,7 @@ fn run_worker_loop() {
                         backend_error: Some(e),
                         observed_injection_sites: std::collections::BTreeMap::new(),
                         injection_applied: false,
+                        semantic_mutation_receipt: None,
                     },
                     Err(p) => WorkerResponse {
                         request_id: req.request_id,
@@ -327,6 +443,7 @@ fn run_worker_loop() {
                         )),
                         observed_injection_sites: std::collections::BTreeMap::new(),
                         injection_applied: false,
+                        semantic_mutation_receipt: None,
                     },
                 };
                 let payload = match serde_json::to_vec(&resp) {
@@ -362,4 +479,57 @@ fn panic_payload_to_string(p: &(dyn std::any::Any + Send)) -> String {
         return s.clone();
     }
     "non-string panic payload".to_string()
+}
+
+#[cfg(test)]
+mod ordinary_carrier_tests {
+    use std::collections::BTreeSet;
+
+    use super::{
+        effective_initial_limit, ordinary_memory_augmented_contents, ordinary_memory_carrier_lines,
+        ORDINARY_MEMORY_OFFSETS,
+    };
+
+    #[test]
+    fn ordinary_memory_generator_is_bounded_generic_and_not_the_historical_word() {
+        let historical = 0x0001_2183u32;
+        let lines = ordinary_memory_carrier_lines();
+        assert_eq!(lines.len(), ORDINARY_MEMORY_OFFSETS.len());
+
+        let mut operations = BTreeSet::new();
+        let mut offsets = BTreeSet::new();
+        for line in lines {
+            let row: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let words = row["instructions"].as_array().unwrap();
+            assert_eq!(words.len(), 1);
+            let word = words[0].as_u64().unwrap() as u32;
+            assert_ne!(word, historical);
+            assert!(matches!(word & 0x7f, 0x03 | 0x23));
+            operations.insert(row["metadata"]["operation"].as_str().unwrap().to_string());
+            offsets.insert(row["metadata"]["offset"].as_i64().unwrap() as i32);
+            assert_eq!(row["metadata"]["source"], "generated_initial_corpus");
+            assert_eq!(row["metadata"]["generator"], "sp1_memory_access_family_v1");
+            assert!(row["metadata"].get("case_id").is_none());
+        }
+
+        assert_eq!(operations, ["lb", "lw", "sw"].into_iter().map(str::to_string).collect());
+        assert_eq!(offsets, ORDINARY_MEMORY_OFFSETS.into_iter().collect());
+    }
+
+    #[test]
+    fn ordinary_memory_family_is_prepended_and_admitted_by_a_bounded_limit() {
+        let original = r#"{"instructions":[19],"metadata":{"source":"ordinary"}}"#;
+        let (contents, carrier_count) = ordinary_memory_augmented_contents(original);
+        let lines = contents.lines().collect::<Vec<_>>();
+
+        assert_eq!(carrier_count, ORDINARY_MEMORY_OFFSETS.len());
+        assert_eq!(lines.len(), carrier_count + 1);
+        assert_eq!(lines.last(), Some(&original));
+        assert!(lines[..carrier_count]
+            .iter()
+            .all(|line| line.contains("sp1_memory_access_family_v1")));
+        assert_eq!(effective_initial_limit(0, carrier_count, false), 0);
+        assert_eq!(effective_initial_limit(1, carrier_count, false), 4);
+        assert_eq!(effective_initial_limit(1, carrier_count, true), 1);
+    }
 }

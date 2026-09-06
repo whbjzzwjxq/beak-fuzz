@@ -689,6 +689,7 @@ impl BenchmarkBackend for Sp1Backend {
             final_regs: resp.final_regs,
             backend_error: resp.backend_error.clone(),
             semantic_injection_applied: resp.injection_applied,
+            ..BackendEval::default()
         };
         self.last_observed_injection_sites = resp.observed_injection_sites;
         if let Some(err) = resp.backend_error {

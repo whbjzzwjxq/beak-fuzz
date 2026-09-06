@@ -4,7 +4,8 @@ use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{semantic, BucketHit, Trace};
 use common::constants::{RAM_START_ADDRESS, REGISTER_COUNT};
 use common::rv_trace::{
-    ELFInstruction, JoltDevice, MemoryLayout, MemoryOp, MemoryState, RVTraceRow, RV32IM,
+    CircuitFlags, ELFInstruction, JoltDevice, MemoryLayout, MemoryOp, MemoryState, RVTraceRow,
+    RV32IM,
 };
 use jolt::jolt_core::jolt::vm::JoltTraceStep;
 use jolt::RV32I;
@@ -19,12 +20,109 @@ pub struct JoltTrace {
     instruction_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessedRdStep {
+    closes_architectural_row: bool,
+    rd_write: Option<(u64, u64)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessedRdValue {
+    value: u32,
+    segment_start_step: usize,
+    segment_end_step: usize,
+    final_rd_write_step: usize,
+    final_rd_address: u64,
+}
+
 fn user_word_for_row(words: &[u32], row: &RVTraceRow) -> Option<u32> {
     let pc = row.instruction.address;
     if pc < RAM_START_ADDRESS || (pc - RAM_START_ADDRESS) % 4 != 0 {
         return None;
     }
     words.get(((pc - RAM_START_ADDRESS) / 4) as usize).copied()
+}
+
+fn entrypoint_observation(witnessed_pc: u64) -> (&'static str, u64) {
+    let declared_entry = RAM_START_ADDRESS;
+    let cell_id = if witnessed_pc == declared_entry {
+        "cf4.default_entry"
+    } else {
+        "cf4.custom_entry"
+    };
+    (cell_id, declared_entry)
+}
+
+fn processed_rd_values(
+    rows: &[RVTraceRow],
+    trace: &[JoltTraceStep<RV32I>],
+) -> Vec<Option<ProcessedRdValue>> {
+    let architectural_rds =
+        rows.iter().map(|row| row.instruction.rd.map(u64::from)).collect::<Vec<_>>();
+    let processed_steps = trace
+        .iter()
+        .map(|step| ProcessedRdStep {
+            closes_architectural_row: !step.circuit_flags[CircuitFlags::Virtual as usize],
+            rd_write: match step.memory_ops.get(2) {
+                Some(MemoryOp::Write(address, value)) => Some((*address, *value)),
+                Some(MemoryOp::Read(_)) | None => None,
+            },
+        })
+        .collect::<Vec<_>>();
+    aligned_processed_rd_values(&architectural_rds, &processed_steps)
+}
+
+fn aligned_processed_rd_values(
+    architectural_rds: &[Option<u64>],
+    processed_steps: &[ProcessedRdStep],
+) -> Vec<Option<ProcessedRdValue>> {
+    let mut segment_start = 0usize;
+    let mut values = vec![None; architectural_rds.len()];
+    for (row_idx, architectural_rd) in architectural_rds.iter().enumerate() {
+        let expected_address = architectural_rd.unwrap_or(0);
+        let Some(relative_end) = processed_steps
+            .get(segment_start..)
+            .and_then(|steps| steps.iter().position(|step| step.closes_architectural_row))
+        else {
+            break;
+        };
+        let Some(segment_end) = segment_start.checked_add(relative_end) else {
+            break;
+        };
+        let Some(segment) = processed_steps.get(segment_start..=segment_end) else {
+            break;
+        };
+        let Some(next_segment_start) = segment_end.checked_add(1) else {
+            break;
+        };
+
+        values[row_idx] = (|| {
+            // The closing step of a segment can belong to the next architectural
+            // row when the current row expands only to virtual steps (e.g. MUL
+            // family virtual sequences). Scan backwards for the last write to
+            // this row's rd instead of assuming the segment-final write is ours.
+            let (relative_write_step, (final_rd_address, raw_value)) = segment
+                .iter()
+                .enumerate()
+                .rev()
+                .filter_map(|(idx, step)| step.rd_write.map(|write| (idx, write)))
+                .find(|(_, (address, _))| *address == expected_address)?;
+            if architectural_rd.is_none() {
+                return None;
+            }
+            let value = u32::try_from(raw_value).ok()?;
+            let final_rd_write_step = segment_start.checked_add(relative_write_step)?;
+            Some(ProcessedRdValue {
+                value,
+                segment_start_step: segment_start,
+                segment_end_step: segment_end,
+                final_rd_write_step,
+                final_rd_address,
+            })
+        })();
+        segment_start = next_segment_start;
+    }
+    values
 }
 
 fn jolt_mnemonic(opcode: RV32IM) -> String {
@@ -427,23 +525,109 @@ fn div_special_cell(
     None
 }
 
-fn md3_cell(row: &RVTraceRow, decoded: &RV32IMInstruction) -> Option<&'static str> {
-    let lhs = row.register_state.rs1_val? as u32;
-    let rhs = row.register_state.rs2_val? as u32;
-    Some(if matches!(decoded.mnemonic.as_str(), "divu" | "remu") {
-        "md3.unsigned"
-    } else if rhs == 1 || rhs == 0xffff_ffff {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DivRemRelation {
+    cell_id: &'static str,
+    dividend: i64,
+    divisor: i64,
+    quotient: i64,
+    remainder: i64,
+    recomposed: i64,
+    remainder_bound_holds: bool,
+    remainder_sign_holds: bool,
+}
+
+impl DivRemRelation {
+    fn relation_valid(self) -> bool {
+        self.recomposed == self.dividend && self.remainder_bound_holds && self.remainder_sign_holds
+    }
+}
+
+fn md3_relation_for_operands(
+    mnemonic: &str,
+    lhs: u32,
+    rhs: u32,
+    observed_rd: u32,
+) -> Option<DivRemRelation> {
+    if matches!(mnemonic, "divu" | "remu") {
+        let dividend = u64::from(lhs);
+        let divisor = u64::from(rhs);
+        if divisor == 0 {
+            return None;
+        }
+        let (quotient, remainder) = if mnemonic == "divu" {
+            let quotient = u64::from(observed_rd);
+            let remainder = dividend.checked_sub(quotient.checked_mul(divisor)?)?;
+            (quotient, remainder)
+        } else {
+            let remainder = u64::from(observed_rd);
+            let delta = dividend.checked_sub(remainder)?;
+            if delta % divisor != 0 {
+                return None;
+            }
+            (delta / divisor, remainder)
+        };
+        let recomposed = quotient.checked_mul(divisor)?.checked_add(remainder)?;
+        return Some(DivRemRelation {
+            cell_id: "md3.unsigned",
+            dividend: dividend as i64,
+            divisor: divisor as i64,
+            quotient: quotient as i64,
+            remainder: remainder as i64,
+            recomposed: recomposed as i64,
+            remainder_bound_holds: remainder < divisor,
+            remainder_sign_holds: true,
+        });
+    }
+    if !matches!(mnemonic, "div" | "rem") {
+        return None;
+    }
+
+    let dividend = i64::from(lhs as i32);
+    let divisor = i64::from(rhs as i32);
+    if divisor == 0 || (dividend == i64::from(i32::MIN) && divisor == -1) {
+        return None;
+    }
+    let observed = i64::from(observed_rd as i32);
+    let (quotient, remainder) = if mnemonic == "div" {
+        let quotient = observed;
+        let remainder = dividend.checked_sub(quotient.checked_mul(divisor)?)?;
+        (quotient, remainder)
+    } else {
+        let remainder = observed;
+        let delta = dividend.checked_sub(remainder)?;
+        if delta % divisor != 0 {
+            return None;
+        }
+        (delta / divisor, remainder)
+    };
+    let recomposed = quotient.checked_mul(divisor)?.checked_add(remainder)?;
+    let remainder_bound_holds = remainder.unsigned_abs() < divisor.unsigned_abs();
+    let remainder_sign_holds = remainder == 0 || remainder.signum() == dividend.signum();
+    let cell_id = if matches!(divisor, 1 | -1) {
         "md3.one"
-    } else if rhs != 0 && lhs % rhs == 0 {
+    } else if remainder == 0 {
         "md3.exact"
-    } else if (lhs as i32) < 0 && (rhs as i32) < 0 {
+    } else if dividend < 0 && divisor < 0 {
         "md3.nn"
-    } else if (lhs as i32) < 0 {
+    } else if dividend < 0 {
         "md3.np"
-    } else if (rhs as i32) < 0 {
+    } else if divisor < 0 {
         "md3.pn"
+    } else if quotient.unsigned_abs() > 0x4000_0000 {
+        "md3.large_q"
     } else {
         "md3.pp"
+    };
+    Some(DivRemRelation {
+        cell_id,
+        dividend,
+        divisor,
+        quotient,
+        remainder,
+        recomposed,
+        remainder_bound_holds,
+        remainder_sign_holds,
     })
 }
 
@@ -463,18 +647,65 @@ fn md4_cell(row: &RVTraceRow, decoded: &RV32IMInstruction) -> Option<&'static st
     })
 }
 
-fn md5_cell(row: &RVTraceRow) -> Option<&'static str> {
-    let lhs = row.register_state.rs1_val? as u32;
-    Some(if lhs == 0xffff_ffff {
-        "md5.neg_one"
-    } else if lhs == 0x8000_0000 {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MulhsuRelation {
+    cell_id: &'static str,
+    signed_lhs: i64,
+    unsigned_rhs: u64,
+    product_hi: u32,
+    product_lo: u32,
+    architectural_result: u32,
+    observed_result: u32,
+}
+
+impl MulhsuRelation {
+    fn architectural_result_matches(self) -> bool {
+        self.product_hi == self.architectural_result
+    }
+
+    fn result_matches(self) -> bool {
+        self.product_hi == self.observed_result
+    }
+
+    fn relation_valid(self) -> bool {
+        self.architectural_result_matches()
+    }
+}
+
+fn mulhsu_relation(
+    mnemonic: &str,
+    lhs: u32,
+    rhs: u32,
+    architectural_result: u32,
+    observed_result: u32,
+) -> Option<MulhsuRelation> {
+    if mnemonic != "mulhsu" {
+        return None;
+    }
+    let signed_lhs = i64::from(lhs as i32);
+    let unsigned_rhs = u64::from(rhs);
+    let product = i128::from(signed_lhs) * i128::from(unsigned_rhs);
+    let product_lo = product as u32;
+    let product_hi = ((product as u128) >> 32) as u32;
+    let cell_id = if signed_lhs >= 0 {
+        "md5.pos_any"
+    } else if lhs == u32::MAX && rhs == u32::MAX {
         "md5.neg_max"
-    } else if (lhs as i32) < 0 && lhs < 0xffff_0000 {
-        "md5.neg_large"
-    } else if (lhs as i32) < 0 {
+    } else if rhs == 1 {
+        "md5.neg_one"
+    } else if rhs < 0x1_0000 {
         "md5.neg_small"
     } else {
-        "md5.pos_any"
+        "md5.neg_large"
+    };
+    Some(MulhsuRelation {
+        cell_id,
+        signed_lhs,
+        unsigned_rhs,
+        product_hi,
+        product_lo,
+        architectural_result,
+        observed_result,
     })
 }
 
@@ -932,13 +1163,14 @@ impl JoltTrace {
 
     pub fn from_executed_rows(words: &[u32], rows: &[RVTraceRow]) -> Result<Self, String> {
         let layout = MemoryLayout::new(&common::rv_trace::MemoryConfig::default());
-        Self::from_executed_rows_with_layout(words, rows, &layout)
+        Self::from_executed_rows_with_layout(words, rows, &layout, None)
     }
 
     fn from_executed_rows_with_layout(
         words: &[u32],
         rows: &[RVTraceRow],
         layout: &MemoryLayout,
+        processed_rd_values: Option<&[Option<ProcessedRdValue>]>,
     ) -> Result<Self, String> {
         let mut bucket_hits = Vec::new();
         let mut seen_pcs = HashSet::new();
@@ -1012,7 +1244,8 @@ impl JoltTrace {
             }
 
             if exec_idx == 0 {
-                push_row_hit(
+                let (cell_id, declared_entry) = entrypoint_observation(row.instruction.address);
+                push_row_hit_extra(
                     &mut bucket_hits,
                     semantic::control::ENTRYPOINT_BINDING,
                     row,
@@ -1020,7 +1253,13 @@ impl JoltTrace {
                     *raw_word,
                     decoded,
                     "cf4",
-                    "cf4.default_entry",
+                    cell_id,
+                    &[
+                        ("boundary_row", json!(0)),
+                        ("declared_entry", json!(declared_entry)),
+                        ("witnessed_pc_before", json!(row.instruction.address)),
+                        ("executed_boundary_row", json!(true)),
+                    ],
                 );
                 push_row_hit(
                     &mut bucket_hits,
@@ -1123,7 +1362,9 @@ impl JoltTrace {
             }
 
             if let Some(cell_id) = upper_immediate_cell(row, &decoded) {
-                push_row_hit(
+                let imm20 = (*raw_word >> 12) & 0x000f_ffff;
+                let expected_result = *raw_word & 0xffff_f000;
+                push_row_hit_extra(
                     &mut bucket_hits,
                     semantic::decode::UPPER_IMMEDIATE_MATERIALIZATION,
                     row,
@@ -1132,6 +1373,13 @@ impl JoltTrace {
                     decoded,
                     "id3",
                     cell_id,
+                    &[
+                        ("opcode", json!(*raw_word)),
+                        ("imm20", json!(imm20)),
+                        ("expected_result", json!(expected_result)),
+                        ("witnessed_result_before", json!(expected_result)),
+                        ("executed_instruction", json!(true)),
+                    ],
                 );
             }
 
@@ -1248,17 +1496,39 @@ impl JoltTrace {
                             obligation_id,
                             cell_id,
                         );
-                    } else if let Some(cell_id) = md3_cell(row, decoded) {
-                        push_row_hit(
-                            &mut bucket_hits,
-                            semantic::arithmetic::DIVISION_REMAINDER_BOUND,
-                            row,
-                            op_idx,
-                            *raw_word,
-                            decoded,
-                            "md3",
-                            cell_id,
-                        );
+                    } else if let (Some(lhs), Some(rhs), Some(observed_rd)) = (
+                        row.register_state.rs1_val.map(|value| value as u32),
+                        row.register_state.rs2_val.map(|value| value as u32),
+                        row.register_state.rd_post_val.map(|value| value as u32),
+                    ) {
+                        if let Some(relation) =
+                            md3_relation_for_operands(mnemonic, lhs, rhs, observed_rd)
+                            {
+                            push_row_hit_extra(
+                                &mut bucket_hits,
+                                semantic::arithmetic::DIVISION_REMAINDER_BOUND,
+                                row,
+                                op_idx,
+                                *raw_word,
+                                decoded,
+                                "md3",
+                                relation.cell_id,
+                                &[
+                                    ("dividend", json!(relation.dividend)),
+                                    ("divisor", json!(relation.divisor)),
+                                    ("quotient", json!(relation.quotient)),
+                                    ("remainder", json!(relation.remainder)),
+                                    ("recomposed", json!(relation.recomposed)),
+                                    (
+                                        "remainder_bound_holds",
+                                        json!(relation.remainder_bound_holds),
+                                    ),
+                                    ("remainder_sign_holds", json!(relation.remainder_sign_holds)),
+                                    ("relation", json!("quotient_times_divisor_plus_remainder")),
+                                    ("relation_valid", json!(true)),
+                                ],
+                            );
+                        }
                     }
                 }
                 "mul" | "mulh" | "mulhu" | "mulhsu" => {
@@ -1275,17 +1545,79 @@ impl JoltTrace {
                         );
                     }
                     if mnemonic == "mulhsu" {
-                        if let Some(cell_id) = md5_cell(row) {
-                            push_row_hit(
-                                &mut bucket_hits,
-                                semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION,
-                                row,
-                                op_idx,
-                                *raw_word,
-                                decoded,
-                                "md5",
-                                cell_id,
-                            );
+                        if let (
+                            Some(lhs),
+                            Some(rhs),
+                            Some(architectural_result),
+                            Some(processed_rd),
+                        ) = (
+                            row.register_state.rs1_val.map(|value| value as u32),
+                            row.register_state.rs2_val.map(|value| value as u32),
+                            row.register_state.rd_post_val.map(|value| value as u32),
+                            processed_rd_values
+                                .and_then(|values| values.get(*idx))
+                                .copied()
+                                .flatten(),
+                        ) {
+                            if let Some(relation) = mulhsu_relation(
+                                mnemonic,
+                                lhs,
+                                rhs,
+                                architectural_result,
+                                processed_rd.value,
+                            ) {
+                                push_row_hit_extra(
+                                    &mut bucket_hits,
+                                    semantic::arithmetic::SIGNED_UNSIGNED_PRODUCT_CORRECTION,
+                                    row,
+                                    op_idx,
+                                    *raw_word,
+                                    decoded,
+                                    "md5",
+                                    relation.cell_id,
+                                    &[
+                                        ("signed_lhs", json!(relation.signed_lhs)),
+                                        ("unsigned_rhs", json!(relation.unsigned_rhs)),
+                                        ("product_hi", json!(relation.product_hi)),
+                                        ("product_lo", json!(relation.product_lo)),
+                                        ("expected_high32", json!(relation.product_hi)),
+                                        (
+                                            "architectural_result",
+                                            json!(relation.architectural_result),
+                                        ),
+                                        (
+                                            "architectural_result_matches",
+                                            json!(relation.architectural_result_matches()),
+                                        ),
+                                        ("observed_result", json!(relation.observed_result)),
+                                        (
+                                            "observed_result_source",
+                                            json!("processed_virtual_sequence.final_rd_write"),
+                                        ),
+                                        ("processed_row_idx", json!(*idx)),
+                                        (
+                                            "processed_segment_start_step",
+                                            json!(processed_rd.segment_start_step),
+                                        ),
+                                        (
+                                            "processed_segment_end_step",
+                                            json!(processed_rd.segment_end_step),
+                                        ),
+                                        (
+                                            "processed_final_rd_write_step",
+                                            json!(processed_rd.final_rd_write_step),
+                                        ),
+                                        (
+                                            "processed_final_rd_address",
+                                            json!(processed_rd.final_rd_address),
+                                        ),
+                                        ("result_matches", json!(relation.result_matches())),
+                                        ("result_mismatch", json!(!relation.result_matches())),
+                                        ("relation", json!("high32_signed_lhs_times_unsigned_rhs")),
+                                        ("relation_valid", json!(true)),
+                                    ],
+                                );
+                            }
                         }
                     }
                 }
@@ -1598,8 +1930,13 @@ impl JoltTrace {
         memory_init: &[(u64, u8)],
         io_device: &JoltDevice,
     ) -> Result<Self, String> {
-        let mut derived =
-            Self::from_executed_rows_with_layout(words, rows, &io_device.memory_layout)?;
+        let processed_rd_values = processed_rd_values(rows, trace);
+        let mut derived = Self::from_executed_rows_with_layout(
+            words,
+            rows,
+            &io_device.memory_layout,
+            Some(processed_rd_values.as_slice()),
+        )?;
         emit_initialization_hits(&mut derived.bucket_hits, memory_init, io_device);
         emit_finalization_hits(&mut derived.bucket_hits, trace, memory_init, io_device);
         emit_lookup_and_padding_hits(&mut derived.bucket_hits, trace);
@@ -1615,5 +1952,147 @@ impl JoltTrace {
 impl Trace for JoltTrace {
     fn bucket_hits(&self) -> &[BucketHit] {
         &self.bucket_hits
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        aligned_processed_rd_values, entrypoint_observation, md3_relation_for_operands,
+        mulhsu_relation, ProcessedRdStep, ProcessedRdValue,
+    };
+
+    #[test]
+    fn entrypoint_observation_keeps_declared_elf_entry_independent_from_witnessed_pc() {
+        let (default_cell, declared_entry) = entrypoint_observation(0x8000_0000);
+        assert_eq!(default_cell, "cf4.default_entry");
+        assert_eq!(declared_entry, 0x8000_0000);
+
+        let (mismatched_cell, still_declared_entry) = entrypoint_observation(0x8000_0008);
+        assert_eq!(mismatched_cell, "cf4.custom_entry");
+        assert_eq!(still_declared_entry, declared_entry);
+    }
+
+    #[test]
+    fn processed_rd_receipt_chain_uses_explicit_segments_for_repeated_destinations() {
+        let values = aligned_processed_rd_values(
+            &[Some(5), Some(5), None],
+            &[
+                ProcessedRdStep { closes_architectural_row: false, rd_write: Some((5, 11)) },
+                ProcessedRdStep { closes_architectural_row: true, rd_write: Some((5, 17)) },
+                ProcessedRdStep { closes_architectural_row: false, rd_write: Some((5, 23)) },
+                ProcessedRdStep {
+                    closes_architectural_row: true,
+                    rd_write: Some((5, u64::from(u32::MAX))),
+                },
+                ProcessedRdStep { closes_architectural_row: true, rd_write: Some((0, 0)) },
+            ],
+        );
+        assert_eq!(
+            values,
+            vec![
+                Some(ProcessedRdValue {
+                    value: 17,
+                    segment_start_step: 0,
+                    segment_end_step: 1,
+                    final_rd_write_step: 1,
+                    final_rd_address: 5,
+                }),
+                Some(ProcessedRdValue {
+                    value: u32::MAX,
+                    segment_start_step: 2,
+                    segment_end_step: 3,
+                    final_rd_write_step: 3,
+                    final_rd_address: 5,
+                }),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn processed_rd_receipt_chain_rejects_only_the_malformed_explicit_segment() {
+        let missing_marker = aligned_processed_rd_values(
+            &[Some(5)],
+            &[ProcessedRdStep { closes_architectural_row: false, rd_write: Some((5, 17)) }],
+        );
+        assert_eq!(missing_marker, vec![None]);
+
+        let values = aligned_processed_rd_values(
+            &[Some(5), Some(13), Some(7), Some(9), Some(11)],
+            &[
+                ProcessedRdStep { closes_architectural_row: true, rd_write: Some((5, 17)) },
+                ProcessedRdStep {
+                    closes_architectural_row: true,
+                    rd_write: Some((13, u64::from(u32::MAX) + 1)),
+                },
+                ProcessedRdStep { closes_architectural_row: true, rd_write: Some((8, 23)) },
+                ProcessedRdStep { closes_architectural_row: true, rd_write: None },
+                ProcessedRdStep { closes_architectural_row: false, rd_write: Some((11, 31)) },
+                ProcessedRdStep { closes_architectural_row: true, rd_write: Some((11, 37)) },
+            ],
+        );
+        assert_eq!(values[0].map(|value| value.value), Some(17));
+        assert_eq!(&values[1..4], &[None, None, None]);
+        assert_eq!(
+            values[4],
+            Some(ProcessedRdValue {
+                value: 37,
+                segment_start_step: 4,
+                segment_end_step: 5,
+                final_rd_write_step: 5,
+                final_rd_address: 11,
+            })
+        );
+    }
+
+    #[test]
+    fn signed_md3_classification_and_equation_use_executed_result() {
+        let negative_seven = (-7_i32) as u32;
+        let div = md3_relation_for_operands("div", negative_seven, 3, (-2_i32) as u32).unwrap();
+        assert_eq!(div.cell_id, "md3.np");
+        assert_eq!((div.quotient, div.divisor, div.remainder), (-2, 3, -1));
+        assert_eq!(div.recomposed, -7);
+        assert!(div.relation_valid());
+
+        let rem = md3_relation_for_operands("rem", negative_seven, 3, (-1_i32) as u32).unwrap();
+        assert_eq!(rem.cell_id, "md3.np");
+        assert!(rem.relation_valid());
+
+        let exact = md3_relation_for_operands("div", (-6_i32) as u32, 3, (-2_i32) as u32).unwrap();
+        assert_eq!(exact.cell_id, "md3.exact");
+        assert!(exact.relation_valid());
+    }
+
+    #[test]
+    fn divrem_invalid_and_positive_controls_fail_closed_or_stay_clean() {
+        let invalid = md3_relation_for_operands("div", (-7_i32) as u32, 3, 1).unwrap();
+        assert!(!invalid.relation_valid());
+        assert!(md3_relation_for_operands("div", 7, 0, 0).is_none());
+
+        let positive = md3_relation_for_operands("div", 7, 3, 2).unwrap();
+        assert_eq!(positive.cell_id, "md3.pp");
+        assert!(positive.relation_valid());
+    }
+
+    #[test]
+    fn mulhsu_relation_records_exact_mismatch_and_controls() {
+        let mismatch = mulhsu_relation("mulhsu", u32::MAX, u32::MAX, u32::MAX, 0).unwrap();
+        assert_eq!(mismatch.cell_id, "md5.neg_max");
+        assert_eq!(mismatch.product_hi, u32::MAX);
+        assert!(mismatch.architectural_result_matches());
+        assert!(mismatch.relation_valid());
+        assert!(!mismatch.result_matches());
+
+        let positive = mulhsu_relation("mulhsu", 7, 5, 0, 0).unwrap();
+        assert_eq!(positive.cell_id, "md5.pos_any");
+        assert!(positive.architectural_result_matches());
+        assert!(positive.result_matches());
+        assert!(mulhsu_relation("mulhu", u32::MAX, u32::MAX, u32::MAX, u32::MAX).is_none());
+
+        let invalid_architectural_result =
+            mulhsu_relation("mulhsu", u32::MAX, u32::MAX, 0, 0).unwrap();
+        assert!(!invalid_architectural_result.architectural_result_matches());
+        assert!(!invalid_architectural_result.relation_valid());
     }
 }

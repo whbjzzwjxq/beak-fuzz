@@ -27,6 +27,72 @@ use openvm_rv32im_transpiler::{
     ShiftOpcode,
 };
 
+
+pub const SNAPSHOT_COMMIT: &str = "__BEAK_SNAPSHOT_COMMIT__";
+
+fn bucket_id_from_kind(kind: &str) -> String {
+    let base = kind.split("::").next().unwrap_or(kind);
+    match base.strip_prefix("openvm.semantic.") {
+        Some(rest) => format!("sem.{rest}"),
+        None => base.to_string(),
+    }
+}
+
+fn trace_source_for_bucket(bucket_id: &str) -> &'static str {
+    match bucket_id {
+        "sem.alu.immediate_limb_consistency" | "sem.control.auipc_pc_limb_consistency" => {
+            "decoded_instruction"
+        }
+        "sem.lookup.boolean_multiplicity" | "sem.lookup.xor_multiplicity_consistency" => {
+            "lookup_multiplicity"
+        }
+        "sem.row.padding_interaction_send" => "air_padding",
+        "sem.arithmetic.special_case_consistency"
+        | "sem.arithmetic.division_remainder_bound"
+        | "sem.arithmetic.product_decomposition"
+        | "sem.arithmetic.signed_unsigned_product_correction" => "chip_row",
+        _ => "instruction",
+    }
+}
+
+/// Attach the common executed-source identity every strict receipt validator
+/// binds against (bucket id, backend, commit, trace source, obligation id).
+/// Hook-supplied context keys always win; these only fill gaps.
+pub fn enrich_semantic_effect(kind: &str, mut effect: Value) -> Value {
+    if let Some(context) = effect.get_mut("context").and_then(Value::as_object_mut) {
+        context
+            .entry("bucket_id".to_string())
+            .or_insert_with(|| json!(bucket_id_from_kind(kind)));
+        context
+            .entry("backend".to_string())
+            .or_insert_with(|| json!("openvm"));
+        context
+            .entry("commit".to_string())
+            .or_insert_with(|| json!(SNAPSHOT_COMMIT));
+        let trace_source = context
+            .get("bucket_id")
+            .and_then(Value::as_str)
+            .map(trace_source_for_bucket)
+            .unwrap_or("instruction")
+            .to_string();
+        context
+            .entry("trace_source".to_string())
+            .or_insert_with(|| json!(trace_source));
+        if !context.contains_key("obligation_id") {
+            if let Some(cell_id) = context
+                .get("cell_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            {
+                if let Some(prefix) = cell_id.split('.').next() {
+                    context.insert("obligation_id".to_string(), json!(prefix));
+                }
+            }
+        }
+    }
+    effect
+}
+
 use openvm_instructions::{
     LocalOpcode, PublishOpcode, SystemOpcode, VmOpcode, instruction::Instruction,
 };
@@ -48,37 +114,61 @@ fn injection_variant(kind: &str) -> Option<&str> {
     kind.split_once("::").map(|(_, variant)| variant)
 }
 
-fn parse_time_origin_shift_delta(kind: &str) -> Option<u32> {
-    let mut mode = "shift_origin";
-    let mut delta = 1u32;
+pub const BEAK_TIMESTAMP_MODULUS: u32 = 2_013_265_921;
 
-    if let Some(variant) = injection_variant(kind) {
-        for part in variant.split(',') {
-            if let Some((key, value)) = part.split_once('=') {
-                match key.trim() {
-                    "mode" => mode = value.trim(),
-                    "delta" => {
-                        if let Ok(parsed) = value.trim().parse::<u32>() {
-                            delta = parsed;
-                        }
-                    }
-                    _ => {}
+#[derive(Debug, Clone, Copy)]
+pub struct TimestampOriginWrap {
+    pub modulus: u32,
+    pub origin: u32,
+    pub increment: u32,
+}
+
+fn parse_timestamp_origin_wrap(kind: &str) -> Option<TimestampOriginWrap> {
+    let mut mode = None;
+    let mut modulus = None;
+    let mut origin = None;
+    let mut increment = None;
+    for part in injection_variant(kind)?.split(',') {
+        let (key, value) = part.split_once('=')?;
+        let slot = match key.trim() {
+            "mode" => {
+                if mode.replace(value.trim()).is_some() {
+                    return None;
                 }
+                continue;
             }
+            "modulus" => &mut modulus,
+            "origin" => &mut origin,
+            "increment" => &mut increment,
+            _ => return None,
+        };
+        if slot.replace(value.trim().parse::<u32>().ok()?).is_some() {
+            return None;
         }
     }
-
-    (mode == "shift_origin").then_some(delta)
+    let wrap = TimestampOriginWrap {
+        modulus: modulus?,
+        origin: origin?,
+        increment: increment?,
+    };
+    (mode == Some("wrap_origin")
+        && wrap.modulus == BEAK_TIMESTAMP_MODULUS
+        && wrap.increment > 0
+        && wrap.origin == wrap.modulus.checked_sub(wrap.increment)?)
+    .then_some(wrap)
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct VolatileBoundaryRemap {
     pub row_idx: u64,
+    pub cell_id: &'static str,
     pub address_space: u32,
     pub base_pointer: u32,
     pub width: u32,
     pub forged_address_space: u32,
     pub forged_base_pointer: u32,
+    pub volatile_start: u32,
+    pub volatile_end: u32,
 }
 
 impl VolatileBoundaryRemap {
@@ -91,61 +181,147 @@ impl VolatileBoundaryRemap {
             return None;
         }
         let offset = pointer - self.base_pointer;
-        Some((self.forged_address_space, self.forged_base_pointer + offset))
+        Some((
+            self.forged_address_space,
+            self.forged_base_pointer.checked_add(offset)?,
+        ))
     }
 }
 
 fn parse_volatile_boundary_remap(kind: &str) -> Option<VolatileBoundaryRemap> {
-    let mut mode = "";
+    let mut mode = None;
+    let mut domain = None;
+    let mut guard = None;
     let mut row_idx = None;
+    let mut cell_id = None;
     let mut address_space = None;
     let mut pointer = None;
-    let mut width = 4u32;
+    let mut width = None;
     let mut forged_address_space = None;
-    let mut forged_base_pointer = 1u32 << 29;
+    let mut forged_base_pointer = None;
+    let mut volatile_start = None;
+    let mut volatile_end = None;
 
     let variant = injection_variant(kind)?;
     for part in variant.split(',') {
-        if let Some((key, value)) = part.split_once('=') {
-            match key.trim() {
-                "mode" => mode = value.trim(),
-                "row_idx" | "step" => row_idx = value.trim().parse::<u64>().ok(),
-                "address_space" | "addr_space" => {
-                    address_space = value.trim().parse::<u32>().ok()
+        let (key, value) = part.split_once('=')?;
+        match key.trim() {
+            "mode" => {
+                if mode.replace(value.trim()).is_some() {
+                    return None;
                 }
-                "pointer" => pointer = value.trim().parse::<u32>().ok(),
-                "width" => {
-                    if let Ok(parsed) = value.trim().parse::<u32>() {
-                        width = parsed.max(1);
-                    }
-                }
-                "forged_address_space" | "new_address_space" => {
-                    forged_address_space = value.trim().parse::<u32>().ok()
-                }
-                "forged_pointer" | "new_pointer" => {
-                    if let Ok(parsed) = value.trim().parse::<u32>() {
-                        forged_base_pointer = parsed;
-                    }
-                }
-                _ => {}
             }
+            "domain" => {
+                if domain.replace(value.trim()).is_some() {
+                    return None;
+                }
+            }
+            "guard" => {
+                if guard.replace(value.trim()).is_some() {
+                    return None;
+                }
+            }
+            "row_idx" => {
+                if row_idx.replace(value.trim().parse::<u64>().ok()?).is_some() {
+                    return None;
+                }
+            }
+            "cell_id" => {
+                let parsed = match value.trim() {
+                    "rc3.volatile_addr_space" => "rc3.volatile_addr_space",
+                    "rc3.volatile_pointer" => "rc3.volatile_pointer",
+                    _ => return None,
+                };
+                if cell_id.replace(parsed).is_some() {
+                    return None;
+                }
+            }
+            "address_space" | "addr_space" => {
+                if address_space.replace(value.trim().parse::<u32>().ok()?).is_some() {
+                    return None;
+                }
+            }
+            "pointer" => {
+                if pointer.replace(value.trim().parse::<u32>().ok()?).is_some() {
+                    return None;
+                }
+            }
+            "width" => {
+                if width.replace(value.trim().parse::<u32>().ok()?).is_some() {
+                    return None;
+                }
+            }
+            "forged_address_space" | "new_address_space" => {
+                if forged_address_space
+                    .replace(value.trim().parse::<u32>().ok()?)
+                    .is_some()
+                {
+                    return None;
+                }
+            }
+            "forged_pointer" | "new_pointer" => {
+                if forged_base_pointer
+                    .replace(value.trim().parse::<u32>().ok()?)
+                    .is_some()
+                {
+                    return None;
+                }
+            }
+            "volatile_start" => {
+                if volatile_start
+                    .replace(value.trim().parse::<u32>().ok()?)
+                    .is_some()
+                {
+                    return None;
+                }
+            }
+            "volatile_end" => {
+                if volatile_end
+                    .replace(value.trim().parse::<u32>().ok()?)
+                    .is_some()
+                {
+                    return None;
+                }
+            }
+            _ => return None,
         }
     }
 
-    if mode != "remap_boundary_cell" {
+    if mode != Some("remap_boundary_cell")
+        || domain != Some("volatile")
+        || guard != Some("outside_range")
+    {
         return None;
     }
     let row_idx = row_idx?;
+    let cell_id = cell_id?;
     let address_space = address_space?;
     let pointer = pointer?;
+    let width = width.filter(|width| *width > 0)?;
     let base_pointer = pointer - (pointer % width);
+    let forged_address_space = forged_address_space?;
+    let forged_base_pointer = forged_base_pointer?;
+    let volatile_start = volatile_start?;
+    let volatile_end = volatile_end?;
+    let baseline_end = base_pointer.checked_add(width)?;
+    let forged_end = forged_base_pointer.checked_add(width)?;
+    if volatile_start >= volatile_end
+        || base_pointer < volatile_start
+        || baseline_end > volatile_end
+        || (forged_base_pointer >= volatile_start && forged_end <= volatile_end)
+    {
+        return None;
+    }
     Some(VolatileBoundaryRemap {
         row_idx,
+        cell_id,
         address_space,
         base_pointer,
         width,
-        forged_address_space: forged_address_space.unwrap_or(address_space),
+        forged_address_space,
         forged_base_pointer,
+        volatile_start,
+        volatile_end,
     })
 }
 
@@ -172,6 +348,7 @@ pub struct GlobalState {
     /// Whether we've emitted at least one instruction. Used to advance `step_idx` at the start
     /// of each subsequent `emit_instruction` while keeping the first instruction at step 0.
     pub did_emit_instruction: bool,
+    pub did_emit_timestamp_boundary_origin: bool,
 
     /// Interaction index within the current step (0..N-1).
     pub op_idx_in_step: u64,
@@ -190,13 +367,15 @@ pub struct GlobalState {
     pub emitted_micro_ops: Vec<serde_json::Value>,
 
     //////////////////////////////////////////////////////////////////////////////
-    /// TODO: Implement the state for the fault injection (loop2).
+    /// Active witness-injection state for the current run.
     pub injection_enabled: bool,
     pub injection_kind: String,
     pub injection_step: u64,
     pub witness_step_idx: u64,
     pub observed_witness_sites: BTreeMap<String, Vec<u64>>,
     pub applied_witness_sites: BTreeMap<String, Vec<u64>>,
+    pub semantic_mutation_receipt: Option<Value>,
+    pub executed_exception_attempts: Vec<Value>,
     pub assertions_enabled: bool,
 
     pub rng: StdRng,
@@ -218,6 +397,7 @@ impl GlobalState {
             seq: 0,
             step_idx: 0,
             did_emit_instruction: false,
+            did_emit_timestamp_boundary_origin: false,
             op_idx_in_step: 0,
             chip_row_op_idx_in_step: 0,
             row_count: 0,
@@ -229,6 +409,8 @@ impl GlobalState {
             witness_step_idx: 0,
             observed_witness_sites: BTreeMap::new(),
             applied_witness_sites: BTreeMap::new(),
+            semantic_mutation_receipt: None,
+            executed_exception_attempts: Vec::new(),
             assertions_enabled: false,
             rng: StdRng::seed_from_u64(0),
             seed: 0,
@@ -246,6 +428,7 @@ impl GlobalState {
         self.seq = 0;
         self.step_idx = 0;
         self.did_emit_instruction = false;
+        self.did_emit_timestamp_boundary_origin = false;
         self.op_idx_in_step = 0;
         self.chip_row_op_idx_in_step = 0;
         self.row_count = 0;
@@ -253,6 +436,7 @@ impl GlobalState {
         self.witness_step_idx = 0;
         self.observed_witness_sites.clear();
         self.applied_witness_sites.clear();
+        self.semantic_mutation_receipt = None;
         // Canonicalize Value trees before handing them out.
         //
         // We observed a serde edge case where a small subset of in-memory `Value`s may fail
@@ -268,6 +452,18 @@ impl GlobalState {
             .collect()
     }
 
+
+    pub fn set_witness_step(&mut self, step: u64) {
+        self.witness_step_idx = step;
+    }
+
+    pub fn current_witness_step(&self) -> u64 {
+        self.witness_step_idx
+    }
+
+    pub fn armed_inject_step(&self) -> u64 {
+        self.injection_step
+    }
     pub fn next_witness_step(&mut self) -> u64 {
         let cur = self.witness_step_idx;
         self.witness_step_idx = self.witness_step_idx.saturating_add(1);
@@ -314,9 +510,9 @@ impl GlobalState {
             .map(str::to_string)
     }
 
-    pub fn active_time_origin_shift_delta_at(&self, kind: &str, step: u64) -> Option<u32> {
+    pub fn active_time_origin_wrap_at(&self, kind: &str, step: u64) -> Option<TimestampOriginWrap> {
         self.should_inject_witness(kind, step)
-            .then(|| parse_time_origin_shift_delta(self.injection_kind.as_str()))
+            .then(|| parse_timestamp_origin_wrap(self.injection_kind.as_str()))
             .flatten()
     }
 
@@ -337,6 +533,43 @@ impl GlobalState {
 
     pub fn take_applied_witness_sites(&mut self) -> BTreeMap<String, Vec<u64>> {
         std::mem::take(&mut self.applied_witness_sites)
+    }
+
+    pub fn record_semantic_mutation(
+        &mut self,
+        kind: &str,
+        site: &str,
+        field: &str,
+        step: u64,
+        before: Value,
+        after: Value,
+        effect: Value,
+    ) {
+        if before == after || !self.should_inject_witness(kind, step) {
+            return;
+        }
+        let effect = enrich_semantic_effect(kind, effect);
+        self.semantic_mutation_receipt = Some(json!({
+            "inject_kind": self.injection_kind,
+            "site": site,
+            "field": field,
+            "step": step,
+            "before": before,
+            "after": after,
+            "effect": effect,
+        }));
+    }
+
+    pub fn take_semantic_mutation_receipt(&mut self) -> Option<Value> {
+        self.semantic_mutation_receipt.take()
+    }
+
+    pub fn record_executed_exception_attempt(&mut self, attempt: Value) {
+        self.executed_exception_attempts.push(attempt);
+    }
+
+    pub fn take_executed_exception_attempts(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.executed_exception_attempts)
     }
 
     pub fn configure_witness_injection(&mut self, kind: Option<&str>, step: u64) {
@@ -394,6 +627,10 @@ impl GlobalState {
 
     pub fn begin_instruction_step(&mut self) {
         self.inc_step();
+    }
+
+    pub fn current_instruction_step(&self) -> Option<u64> {
+        self.did_emit_instruction.then_some(self.step_idx)
     }
 
     pub fn emit_instruction_current_step(
@@ -924,6 +1161,21 @@ impl GlobalState {
         self.emit_chip_row_envelope("connector", "VmConnectorAir", None, "connector", payload_data);
     }
 
+    pub fn emit_timestamp_boundary_origin(&mut self, timestamp: u32) {
+        if self.did_emit_timestamp_boundary_origin {
+            return;
+        }
+        self.did_emit_timestamp_boundary_origin = true;
+        self.emit_micro_op(json!({
+            "type": "timestamp_boundary_origin",
+            "data": {
+                "seq": self.seq,
+                "step_idx": self.step_idx,
+                "timestamp": timestamp,
+            }
+        }));
+    }
+
     pub fn emit_padding_chip_row(&mut self, data: &str) {
         let payload_data = json!({
             "data": data.to_string(),
@@ -1251,6 +1503,18 @@ pub fn emit_instruction(
     state.emit_instruction(pc, timestamp, next_pc, next_timestamp, opcode, operands);
 }
 
+pub fn set_witness_step(step: u64) {
+    GLOBAL_STATE.lock().unwrap().set_witness_step(step);
+}
+
+pub fn current_witness_step() -> u64 {
+    GLOBAL_STATE.lock().unwrap().current_witness_step()
+}
+
+pub fn armed_inject_step() -> u64 {
+    GLOBAL_STATE.lock().unwrap().armed_inject_step()
+}
+
 pub fn next_witness_step() -> u64 {
     let mut state = GLOBAL_STATE.lock().unwrap();
     state.next_witness_step()
@@ -1264,6 +1528,32 @@ pub fn should_inject_witness(kind: &str, step: u64) -> bool {
         state.note_applied_witness_site(kind, step);
     }
     should_inject
+}
+
+pub fn record_semantic_mutation(
+    kind: &str,
+    site: &str,
+    field: &str,
+    step: u64,
+    before: Value,
+    after: Value,
+    effect: Value,
+) {
+    GLOBAL_STATE.lock().unwrap().record_semantic_mutation(
+        kind, site, field, step, before, after, effect,
+    );
+}
+
+pub fn take_semantic_mutation_receipt() -> Option<Value> {
+    GLOBAL_STATE.lock().unwrap().take_semantic_mutation_receipt()
+}
+
+pub fn record_executed_exception_attempt(attempt: Value) {
+    GLOBAL_STATE.lock().unwrap().record_executed_exception_attempt(attempt);
+}
+
+pub fn take_executed_exception_attempts() -> Vec<Value> {
+    GLOBAL_STATE.lock().unwrap().take_executed_exception_attempts()
 }
 
 pub fn witness_injection_enabled_for(kind: &str) -> bool {
@@ -1287,17 +1577,17 @@ pub fn active_witness_variant(kind: &str) -> Option<String> {
     state.active_witness_variant(kind)
 }
 
-pub fn active_time_origin_shift_delta_at(kind: &str, step: u64) -> Option<u32> {
+pub fn active_time_origin_wrap_at(kind: &str, step: u64) -> Option<TimestampOriginWrap> {
     let state = GLOBAL_STATE.lock().unwrap();
-    state.active_time_origin_shift_delta_at(kind, step)
+    state.active_time_origin_wrap_at(kind, step)
 }
 
-pub fn should_shift_time_origin_at(kind: &str, step: u64) -> Option<u32> {
+pub fn should_apply_time_origin_wrap_at(kind: &str, step: u64) -> Option<TimestampOriginWrap> {
     let mut state = GLOBAL_STATE.lock().unwrap();
     state.note_witness_site(kind, step);
-    let delta = state.active_time_origin_shift_delta_at(kind, step)?;
+    let wrap = state.active_time_origin_wrap_at(kind, step)?;
     state.note_applied_witness_site(kind, step);
-    Some(delta)
+    Some(wrap)
 }
 
 pub fn active_volatile_boundary_remap(kind: &str) -> Option<VolatileBoundaryRemap> {
@@ -1309,8 +1599,16 @@ pub fn should_apply_volatile_boundary_remap(kind: &str) -> Option<VolatileBounda
     let mut state = GLOBAL_STATE.lock().unwrap();
     let remap = state.active_volatile_boundary_remap(kind)?;
     state.note_witness_site(kind, remap.row_idx);
-    state.note_applied_witness_site(kind, remap.row_idx);
     Some(remap)
+}
+
+pub fn mark_witness_mutation_applied(kind: &str, step: u64) -> bool {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    if !state.should_inject_witness(kind, step) {
+        return false;
+    }
+    state.note_applied_witness_site(kind, step);
+    true
 }
 
 pub fn configure_witness_injection(kind: Option<&str>, step: u64) {
@@ -1336,6 +1634,10 @@ pub fn take_applied_witness_sites() -> BTreeMap<String, Vec<u64>> {
 pub fn begin_instruction_step() {
     let mut state = GLOBAL_STATE.lock().unwrap();
     state.begin_instruction_step();
+}
+
+pub fn current_instruction_step() -> Option<u64> {
+    GLOBAL_STATE.lock().unwrap().current_instruction_step()
 }
 
 pub fn emit_instruction_current_step(
@@ -1620,6 +1922,11 @@ pub fn emit_connector_chip_row(
         is_terminate,
         exit_code,
     );
+}
+
+pub fn emit_timestamp_boundary_origin(timestamp: u32) {
+    let mut state = GLOBAL_STATE.lock().unwrap();
+    state.emit_timestamp_boundary_origin(timestamp);
 }
 
 pub fn emit_padding_chip_row(data: &str) {
@@ -2043,7 +2350,7 @@ pub fn random_mod_of_u32_array<const LEN: usize>(elements: &[u32; LEN]) -> [u32;
 }
 
 pub fn random_mutate_field_element<F: Field + PrimeField32>(element: F, rng: &mut StdRng) -> F {
-    F::from_u32(internal_random_mod_of_u32(element.as_canonical_u32(), rng))
+    F::from_canonical_u32(internal_random_mod_of_u32(element.as_canonical_u32(), rng))
 }
 
 pub fn random_mutate_instruction<F: Field + PrimeField32>(
@@ -2098,4 +2405,38 @@ pub fn random_mutate_instruction<F: Field + PrimeField32>(
     }
 
     new_instruction
+}
+
+#[cfg(test)]
+mod semantic_variant_tests {
+    use super::{parse_timestamp_origin_wrap, parse_volatile_boundary_remap};
+
+    #[test]
+    fn timestamp_wrap_parser_consumes_every_required_parameter() {
+        let valid = "openvm.semantic.time.boundary_origin_consistency::mode=wrap_origin,modulus=2013265921,origin=2013265920,increment=1";
+        let parsed = parse_timestamp_origin_wrap(valid).expect("valid wrap");
+        assert_eq!(parsed.origin, 2_013_265_920);
+        assert!(parse_timestamp_origin_wrap(
+            "openvm.semantic.time.boundary_origin_consistency::mode=wrap_origin,modulus=2013265921,origin=2013265920"
+        )
+        .is_none());
+        assert!(parse_timestamp_origin_wrap(&format!("{valid},unused=1")).is_none());
+        assert!(parse_timestamp_origin_wrap(
+            "openvm.semantic.time.boundary_origin_consistency::mode=wrap_origin,modulus=2013265921,origin=1,increment=1"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn volatile_parser_rejects_incomplete_unchanged_and_unsupported_variants() {
+        let valid = "openvm.semantic.memory.volatile_boundary_range::mode=remap_boundary_cell,domain=volatile,guard=outside_range,cell_id=rc3.volatile_pointer,row_idx=7,address_space=1,pointer=16,width=1,forged_address_space=1,forged_pointer=536870912,volatile_start=0,volatile_end=536870912";
+        let parsed = parse_volatile_boundary_remap(valid).expect("valid remap");
+        assert_eq!(parsed.map(1, 16), Some((1, 536_870_912)));
+        assert_eq!(parsed.map(1, 17), None);
+
+        assert!(parse_volatile_boundary_remap(valid.replace(",volatile_end=536870912", "").as_str()).is_none());
+        assert!(parse_volatile_boundary_remap(valid.replace("forged_pointer=536870912", "forged_pointer=16").as_str()).is_none());
+        assert!(parse_volatile_boundary_remap(valid.replace("cell_id=rc3.volatile_pointer", "cell_id=rc3.near_max").as_str()).is_none());
+        assert!(parse_volatile_boundary_remap(format!("{valid},unused=1").as_str()).is_none());
+    }
 }

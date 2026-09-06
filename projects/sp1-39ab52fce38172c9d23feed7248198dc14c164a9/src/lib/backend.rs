@@ -7,16 +7,18 @@ use std::thread::JoinHandle;
 
 use beak_core::fuzz::benchmark::{
     BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
+    SemanticMutationReceipt, SemanticMutationRelation,
 };
-use beak_core::trace::{BucketHit, Trace, TraceSignal, semantic};
+use beak_core::trace::{semantic, BucketHit, Trace, TraceSignal};
 use serde::{Deserialize, Serialize};
 use sp1_core_executor::{ByteOpcode, ExecutionRecord, Executor, ExecutorMode, Opcode};
 use sp1_core_machine::{io::SP1Stdin, utils::run_test};
 use sp1_stark::{CpuProver, SP1CoreOpts};
 
-use crate::trace::{Sp1Trace, build_sp1_program, decode_word_to_sp1_instruction};
+use crate::trace::{build_sp1_program, decode_word_to_sp1_instruction, Sp1Trace};
 
 const MEMORY_EFFECT_INJECT_KIND: &str = "sp1.semantic.exec.memory_effect_binding";
+const SP1_COMMIT: &str = "39ab52fce38172c9d23feed7248198dc14c164a9";
 const MEMORY_ADDRESS_INJECT_KIND: &str = "sp1.semantic.memory.address_pointer_consistency";
 const MEMORY_VALUE_INJECT_KIND: &str = "sp1.semantic.memory.value_payload_consistency";
 const MEMORY_STORE_LOAD_INJECT_KIND: &str = "sp1.semantic.memory.store_load_payload_flow";
@@ -70,6 +72,8 @@ pub struct WorkerResponse {
     pub backend_error: Option<String>,
     pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pub injection_applied: bool,
+    #[serde(default)]
+    pub semantic_mutation_receipt: Option<SemanticMutationReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,14 +87,180 @@ struct RealRunnerResponse {
     error: Option<String>,
     observed_injection_sites: BTreeMap<String, Vec<u64>>,
     injection_applied: bool,
+    semantic_mutation_receipt: Option<SemanticMutationReceipt>,
 }
 
 fn base_inject_kind(kind: &str) -> &str {
     kind.split_once("::").map(|(base, _)| base).unwrap_or(kind)
 }
 
+fn receipt_context_u64(receipt: &SemanticMutationReceipt, key: &str) -> Option<u64> {
+    receipt.effect.context.get(key).and_then(|value| value.as_u64())
+}
+
+fn receipt_context_str<'a>(receipt: &'a SemanticMutationReceipt, key: &str) -> Option<&'a str> {
+    receipt.effect.context.get(key).and_then(|value| value.as_str())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExecutedMemorySelectorAnchor {
+    step: u64,
+    op_idx: u64,
+    pc: u32,
+    rv_instruction: u32,
+    sp1_opcode: u32,
+    mnemonic: String,
+}
+
+fn encode_memory_rv_instruction(instruction: &sp1_core_executor::Instruction) -> Option<u32> {
+    let funct3 = match instruction.opcode {
+        Opcode::LB | Opcode::SB => 0,
+        Opcode::LH | Opcode::SH => 1,
+        Opcode::LW | Opcode::SW => 2,
+        Opcode::LBU => 4,
+        Opcode::LHU => 5,
+        _ => return None,
+    };
+    let imm = instruction.op_c & 0x0fff;
+    Some(if instruction.is_memory_load_instruction() {
+        (imm << 20)
+            | ((instruction.op_b & 31) << 15)
+            | (funct3 << 12)
+            | ((instruction.op_a as u32 & 31) << 7)
+            | 0x03
+    } else {
+        (((imm >> 5) & 0x7f) << 25)
+            | ((instruction.op_a as u32 & 31) << 20)
+            | ((instruction.op_b & 31) << 15)
+            | (funct3 << 12)
+            | ((imm & 0x1f) << 7)
+            | 0x23
+    })
+}
+
+fn memory_selector_anchors(
+    records: &[ExecutionRecord],
+) -> BTreeMap<u64, ExecutedMemorySelectorAnchor> {
+    let mut anchors = BTreeMap::new();
+    let mut flat_cpu_idx = 0u64;
+    for record in records {
+        for event in &record.cpu_events {
+            let instruction = record.program.fetch(event.pc);
+            if instruction.is_memory_load_instruction() || instruction.is_memory_store_instruction()
+            {
+                let step = flat_cpu_idx;
+                let Some(rv_instruction) = encode_memory_rv_instruction(instruction) else {
+                    flat_cpu_idx = flat_cpu_idx.saturating_add(1);
+                    continue;
+                };
+                anchors.insert(
+                    step,
+                    ExecutedMemorySelectorAnchor {
+                        step,
+                        op_idx: flat_cpu_idx,
+                        pc: event.pc,
+                        rv_instruction,
+                        sp1_opcode: instruction.opcode as u32,
+                        mnemonic: instruction.opcode.mnemonic().to_string(),
+                    },
+                );
+            }
+            flat_cpu_idx = flat_cpu_idx.saturating_add(1);
+        }
+    }
+    anchors
+}
+
+fn valid_memory_selector_receipt(
+    receipt: &SemanticMutationReceipt,
+    requested_kind: &str,
+    resolved_step: u64,
+    executed_anchor: &ExecutedMemorySelectorAnchor,
+) -> bool {
+    if base_inject_kind(requested_kind) != MEMORY_EFFECT_INJECT_KIND
+        || receipt.inject_kind != requested_kind
+        || receipt.site != "cpu_chip.generate_trace"
+        || receipt.field != "is_memory"
+        || receipt.step != resolved_step
+        || receipt.effect.relation != SemanticMutationRelation::MemorySelectorEquation
+        || receipt_context_str(receipt, "bucket_id")
+            != Some(semantic::exec::MEMORY_EFFECT_BINDING.id)
+        || receipt_context_str(receipt, "obligation_id") != Some("me10")
+        || receipt_context_str(receipt, "backend") != Some("sp1")
+        || receipt_context_str(receipt, "commit") != Some(SP1_COMMIT)
+        || receipt_context_str(receipt, "trace_source") != Some("instruction")
+        || receipt.effect.context.get("executed_cpu_row") != Some(&serde_json::json!(true))
+        || receipt_context_u64(receipt, "anchor") != Some(resolved_step)
+        || executed_anchor.step != resolved_step
+    {
+        return false;
+    }
+    let Some(opcode) = receipt_context_u64(receipt, "opcode") else {
+        return false;
+    };
+    let Some(mnemonic) = receipt_context_str(receipt, "mnemonic") else {
+        return false;
+    };
+    let Some(sp1_opcode) = receipt_context_u64(receipt, "sp1_opcode") else {
+        return false;
+    };
+    let expected_cell = match (opcode & 0x7f, sp1_opcode, mnemonic) {
+        (0x03, value, "lb") if value == Opcode::LB as u64 => "me10.load",
+        (0x03, value, "lh") if value == Opcode::LH as u64 => "me10.load",
+        (0x03, value, "lw") if value == Opcode::LW as u64 => "me10.load",
+        (0x03, value, "lbu") if value == Opcode::LBU as u64 => "me10.load",
+        (0x03, value, "lhu") if value == Opcode::LHU as u64 => "me10.load",
+        (0x23, value, "sb") if value == Opcode::SB as u64 => "me10.store",
+        (0x23, value, "sh") if value == Opcode::SH as u64 => "me10.store",
+        (0x23, value, "sw") if value == Opcode::SW as u64 => "me10.store",
+        _ => return false,
+    };
+    let before = receipt.before.as_u64();
+    let after = receipt.after.as_u64();
+    receipt_context_str(receipt, "cell_id") == Some(expected_cell)
+        && receipt_context_u64(receipt, "expected_is_memory") == Some(1)
+        && receipt_context_u64(receipt, "step") == Some(resolved_step)
+        && receipt_context_u64(receipt, "op_idx") == Some(executed_anchor.op_idx)
+        && receipt_context_u64(receipt, "pc") == Some(executed_anchor.pc as u64)
+        && opcode == executed_anchor.rv_instruction as u64
+        && sp1_opcode == executed_anchor.sp1_opcode as u64
+        && mnemonic == executed_anchor.mnemonic
+        && receipt_context_u64(receipt, "source_selector") == Some(sp1_opcode)
+        && receipt_context_u64(receipt, "selector_before") == before
+        && receipt_context_u64(receipt, "selector_after") == after
+        && before == Some(1)
+        && after == Some(0)
+}
+
+fn take_valid_semantic_mutation_receipt(
+    raw: Option<serde_json::Value>,
+    requested_kind: Option<&str>,
+    resolved_step: Option<u64>,
+    executed_anchors: &BTreeMap<u64, ExecutedMemorySelectorAnchor>,
+) -> Result<Option<SemanticMutationReceipt>, String> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let receipt: SemanticMutationReceipt = serde_json::from_value(raw)
+        .map_err(|error| format!("decode SP1 semantic mutation receipt failed: {error}"))?;
+    let valid = requested_kind
+        .zip(resolved_step)
+        .and_then(|(kind, step)| executed_anchors.get(&step).map(|anchor| (kind, step, anchor)))
+        .is_some_and(|(kind, step, anchor)| {
+            valid_memory_selector_receipt(&receipt, kind, step, anchor)
+        });
+    if !valid {
+        return Err("SP1 semantic mutation receipt failed local relation validation".to_string());
+    }
+    Ok(Some(receipt))
+}
+
 fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
-    if variant.is_empty() { kind.to_string() } else { format!("{kind}::{variant}") }
+    if variant.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind}::{variant}")
+    }
 }
 
 fn control_flow_family_for_opcode(opcode: Opcode) -> Option<&'static str> {
@@ -238,8 +408,8 @@ fn collect_observed_injection_sites(records: &[ExecutionRecord]) -> BTreeMap<Str
             let chip_step = (event.pc / 4) as u64;
             record_alu_muldiv_chip_sites(&mut sites, instruction.opcode, chip_step);
 
-            let memory_effect_witness_step = flat_cpu_idx.saturating_mul(2);
-            let cpu_semantic_witness_step = memory_effect_witness_step.saturating_add(1);
+            let memory_effect_witness_step = flat_cpu_idx;
+            let cpu_semantic_witness_step = flat_cpu_idx.saturating_mul(2).saturating_add(1);
             if instruction.is_memory_load_instruction() || instruction.is_memory_store_instruction()
             {
                 record_site(&mut sites, MEMORY_EFFECT_INJECT_KIND, memory_effect_witness_step);
@@ -356,7 +526,8 @@ fn run_sp1_prove_verify(
     inject_kind: Option<&str>,
     inject_step: u64,
     observed_injection_sites: &BTreeMap<String, Vec<u64>>,
-) -> (bool, bool, Option<String>, bool) {
+    executed_anchors: &BTreeMap<u64, ExecutedMemorySelectorAnchor>,
+) -> (bool, bool, Option<String>, bool, Option<SemanticMutationReceipt>) {
     if !supports_official_injection(inject_kind) {
         return (
             false,
@@ -366,11 +537,13 @@ fn run_sp1_prove_verify(
                 inject_kind.unwrap_or_default()
             )),
             false,
+            None,
         );
     }
     let resolved_step = resolve_injection_step(inject_kind, inject_step, observed_injection_sites);
     let injection_scheduled = inject_kind.is_some() && resolved_step.is_some();
     let mut proof_injection_applied = false;
+    let mut raw_semantic_mutation_receipt = None;
 
     let prove_result = with_scoped_injection_env(
         inject_kind.filter(|kind| supports_official_injection_kind(kind)),
@@ -382,6 +555,7 @@ fn run_sp1_prove_verify(
                 run_test::<CpuProver<_, _>>(program, SP1Stdin::new())
             }));
             proof_injection_applied = fuzzer_utils::injection_was_applied();
+            raw_semantic_mutation_receipt = fuzzer_utils::take_semantic_mutation_receipt();
             std::panic::set_hook(previous_hook);
             match result {
                 Ok(Ok(_)) => Ok(()),
@@ -393,9 +567,39 @@ fn run_sp1_prove_verify(
         },
     );
 
+    let semantic_mutation_receipt = match take_valid_semantic_mutation_receipt(
+        raw_semantic_mutation_receipt,
+        inject_kind,
+        resolved_step,
+        executed_anchors,
+    ) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            return (
+                true,
+                false,
+                Some(error),
+                injection_scheduled && proof_injection_applied,
+                None,
+            );
+        }
+    };
+
     match prove_result {
-        Ok(()) => (true, true, None, injection_scheduled && proof_injection_applied),
-        Err(err) => (true, false, Some(err), injection_scheduled && proof_injection_applied),
+        Ok(()) => (
+            true,
+            true,
+            None,
+            injection_scheduled && proof_injection_applied,
+            semantic_mutation_receipt,
+        ),
+        Err(err) => (
+            true,
+            false,
+            Some(err),
+            injection_scheduled && proof_injection_applied,
+            semantic_mutation_receipt,
+        ),
     }
 }
 
@@ -411,8 +615,15 @@ fn run_sp1_real_backend(
 
     let trace = Sp1Trace::from_execution_records(words, &executor.records)?;
     let observed_injection_sites = collect_observed_injection_sites(&executor.records);
-    let (prove_ok, verify_ok, prove_verify_error, injection_applied) =
-        run_sp1_prove_verify(program, inject_kind, inject_step, &observed_injection_sites);
+    let executed_anchors = memory_selector_anchors(&executor.records);
+    let (prove_ok, verify_ok, prove_verify_error, injection_applied, semantic_mutation_receipt) =
+        run_sp1_prove_verify(
+            program,
+            inject_kind,
+            inject_step,
+            &observed_injection_sites,
+            &executed_anchors,
+        );
 
     Ok(RealRunnerResponse {
         final_regs: Some(executor.registers()),
@@ -424,6 +635,7 @@ fn run_sp1_real_backend(
         error: prove_verify_error,
         observed_injection_sites,
         injection_applied,
+        semantic_mutation_receipt,
     })
 }
 
@@ -441,6 +653,7 @@ pub fn run_backend_once(
     let mut trace_signals = Vec::new();
     let mut observed_injection_sites = BTreeMap::new();
     let mut injection_applied = false;
+    let mut semantic_mutation_receipt = None;
 
     let runner_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_sp1_real_backend(words, inject_kind, inject_step)
@@ -453,6 +666,7 @@ pub fn run_backend_once(
             trace_signals = resp.trace_signals;
             observed_injection_sites = resp.observed_injection_sites;
             injection_applied = resp.injection_applied;
+            semantic_mutation_receipt = resp.semantic_mutation_receipt;
             if let Some(err) = resp.error {
                 backend_error = Some(err);
             } else if !resp.prove_ok || !resp.verify_ok {
@@ -480,6 +694,7 @@ pub fn run_backend_once(
         backend_error,
         observed_injection_sites,
         injection_applied,
+        semantic_mutation_receipt,
     })
 }
 
@@ -1050,6 +1265,8 @@ impl BenchmarkBackend for Sp1Backend {
         self.eval.micro_op_count = 0;
         self.eval.final_regs = None;
         self.eval.semantic_injection_applied = false;
+        self.eval.semantic_mutation_receipt = None;
+        self.eval.executed_exception_receipt = None;
         self.last_observed_injection_sites.clear();
         self.start_worker()?;
 
@@ -1108,6 +1325,9 @@ impl BenchmarkBackend for Sp1Backend {
             final_regs: resp.final_regs,
             backend_error: resp.backend_error.clone(),
             semantic_injection_applied: resp.injection_applied,
+            semantic_mutation_receipt: resp.semantic_mutation_receipt,
+            executed_exception_receipt: None,
+            production_resource: None,
         };
         self.last_observed_injection_sites = resp.observed_injection_sites;
 
@@ -1130,6 +1350,15 @@ impl BenchmarkBackend for Sp1Backend {
         Ok(())
     }
 
+    fn semantic_mutation_relation(
+        &self,
+        candidate: &SemanticInjectionCandidate,
+    ) -> Option<SemanticMutationRelation> {
+        (candidate.bucket_id == semantic::exec::MEMORY_EFFECT_BINDING.id
+            && base_inject_kind(candidate.inject_kind.as_str()) == MEMORY_EFFECT_INJECT_KIND)
+            .then_some(SemanticMutationRelation::MemorySelectorEquation)
+    }
+
     fn semantic_injection_candidates(&self, hits: &[BucketHit]) -> Vec<SemanticInjectionCandidate> {
         let mut candidates: Vec<_> =
             hits.iter().flat_map(|hit| self.semantic_candidate_from_hit(hit)).collect();
@@ -1141,5 +1370,158 @@ impl BenchmarkBackend for Sp1Backend {
 impl Drop for Sp1Backend {
     fn drop(&mut self) {
         self.stop_worker();
+    }
+}
+
+#[cfg(test)]
+mod relation_tests {
+    use super::{
+        valid_memory_selector_receipt, ExecutedMemorySelectorAnchor, SemanticMutationReceipt,
+        SemanticMutationRelation, Sp1Backend, MEMORY_EFFECT_INJECT_KIND,
+    };
+    use beak_core::fuzz::benchmark::BenchmarkBackend;
+    use beak_core::trace::{semantic, BucketHit};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn anchor() -> ExecutedMemorySelectorAnchor {
+        ExecutedMemorySelectorAnchor {
+            step: 3,
+            op_idx: 3,
+            pc: 0x0020_0400,
+            rv_instruction: 0x0041_2203,
+            sp1_opcode: 12,
+            mnemonic: "lw".to_string(),
+        }
+    }
+
+    fn receipt() -> SemanticMutationReceipt {
+        serde_json::from_value(json!({
+            "inject_kind": MEMORY_EFFECT_INJECT_KIND,
+            "site": "cpu_chip.generate_trace",
+            "field": "is_memory",
+            "step": 3,
+            "before": 1,
+            "after": 0,
+            "effect": {
+                "relation": "memory_selector_equation",
+                "context": {
+                    "bucket_id": "sem.exec.memory_effect_binding",
+                    "obligation_id": "me10",
+                    "cell_id": "me10.load",
+                    "backend": "sp1",
+                    "commit": "39ab52fce38172c9d23feed7248198dc14c164a9",
+                    "trace_source": "instruction",
+                    "anchor": 3,
+                    "step": 3,
+                    "op_idx": 3,
+                    "pc": 0x0020_0400u64,
+                    "opcode": 0x0041_2203u64,
+                    "sp1_opcode": 12,
+                    "source_selector": 12,
+                    "mnemonic": "lw",
+                    "expected_is_memory": 1,
+                    "selector_before": 1,
+                    "selector_after": 0,
+                    "executed_cpu_row": true
+                }
+            }
+        }))
+        .expect("typed memory selector receipt")
+    }
+
+    #[test]
+    fn memory_selector_receipt_binds_executed_row_and_equation() {
+        assert!(
+            valid_memory_selector_receipt(&receipt(), MEMORY_EFFECT_INJECT_KIND, 3, &anchor(),)
+        );
+    }
+
+    #[test]
+    fn memory_selector_receipt_rejects_wrong_relation_kind_anchor_opcode_pc_and_context() {
+        let check = |receipt: &SemanticMutationReceipt, kind: &str, step: u64| {
+            valid_memory_selector_receipt(receipt, kind, step, &anchor())
+        };
+
+        let mut wrong_relation = receipt();
+        wrong_relation.effect.relation = SemanticMutationRelation::ExecutedControlFlowEquation;
+        assert!(!check(&wrong_relation, MEMORY_EFFECT_INJECT_KIND, 3));
+
+        let mut wrong_kind = receipt();
+        wrong_kind.inject_kind = "sp1.semantic.exec.dest_binding".to_string();
+        assert!(!check(&wrong_kind, MEMORY_EFFECT_INJECT_KIND, 3));
+
+        let mut wrong_anchor = receipt();
+        wrong_anchor.effect.context.insert("anchor".to_string(), json!(4));
+        assert!(!check(&wrong_anchor, MEMORY_EFFECT_INJECT_KIND, 3));
+        assert!(!check(&receipt(), MEMORY_EFFECT_INJECT_KIND, 4));
+
+        let mut wrong_opcode = receipt();
+        wrong_opcode.effect.context.insert("opcode".to_string(), json!(0x13));
+        assert!(!check(&wrong_opcode, MEMORY_EFFECT_INJECT_KIND, 3));
+
+        let mut wrong_source_selector = receipt();
+        wrong_source_selector.effect.context.insert("sp1_opcode".to_string(), json!(17));
+        assert!(!check(&wrong_source_selector, MEMORY_EFFECT_INJECT_KIND, 3));
+
+        let mut wrong_pc = receipt();
+        wrong_pc.effect.context.insert("pc".to_string(), json!(0x0020_0404u64));
+        assert!(!check(&wrong_pc, MEMORY_EFFECT_INJECT_KIND, 3));
+
+        let mut wrong_op_idx = receipt();
+        wrong_op_idx.effect.context.insert("op_idx".to_string(), json!(4));
+        assert!(!check(&wrong_op_idx, MEMORY_EFFECT_INJECT_KIND, 3));
+
+        let mut stale_commit = receipt();
+        stale_commit.effect.context.insert("commit".to_string(), json!("stale"));
+        assert!(!check(&stale_commit, MEMORY_EFFECT_INJECT_KIND, 3));
+
+        let mut wrong_site = receipt();
+        wrong_site.site = "caller.supplied".to_string();
+        assert!(!check(&wrong_site, MEMORY_EFFECT_INJECT_KIND, 3));
+
+        let mut forged = receipt();
+        forged.effect.context.insert("expected_is_memory".to_string(), json!(0));
+        assert!(!check(&forged, MEMORY_EFFECT_INJECT_KIND, 3));
+
+        let mut wrong_bucket = receipt();
+        wrong_bucket.effect.context.insert("bucket_id".to_string(), json!("sem.exec.dest_binding"));
+        assert!(!check(&wrong_bucket, MEMORY_EFFECT_INJECT_KIND, 3));
+
+        let mut wrong_cell = receipt();
+        wrong_cell.effect.context.insert("cell_id".to_string(), json!("me10.store"));
+        assert!(!check(&wrong_cell, MEMORY_EFFECT_INJECT_KIND, 3));
+
+        let mut unchanged = receipt();
+        unchanged.after = json!(1);
+        unchanged.effect.context.insert("selector_after".to_string(), json!(1));
+        assert!(!check(&unchanged, MEMORY_EFFECT_INJECT_KIND, 3));
+
+        let mut non_boolean = receipt();
+        non_boolean.after = json!(2);
+        non_boolean.effect.context.insert("selector_after".to_string(), json!(2));
+        assert!(!check(&non_boolean, MEMORY_EFFECT_INJECT_KIND, 3));
+    }
+
+    #[test]
+    fn s27_route_maps_only_memory_effect_candidates_to_memory_selector_equation() {
+        let backend = Sp1Backend::new(16);
+        let mut details = HashMap::new();
+        details.insert("step_idx".to_string(), json!(3));
+        let hit = BucketHit::semantic(semantic::exec::MEMORY_EFFECT_BINDING, details);
+        let candidates = backend.semantic_candidate_from_hit(&hit);
+        assert!(!candidates.is_empty());
+        assert!(candidates.iter().all(|candidate| {
+            backend.semantic_mutation_relation(candidate)
+                == Some(SemanticMutationRelation::MemorySelectorEquation)
+        }));
+
+        let mut wrong_bucket = candidates[0].clone();
+        wrong_bucket.bucket_id = semantic::exec::DEST_BINDING.id.to_string();
+        assert_eq!(backend.semantic_mutation_relation(&wrong_bucket), None);
+
+        let mut wrong_kind = candidates[0].clone();
+        wrong_kind.inject_kind = "sp1.semantic.exec.dest_binding".to_string();
+        assert_eq!(backend.semantic_mutation_relation(&wrong_kind), None);
     }
 }

@@ -113,6 +113,12 @@ fn main() {
                 .help("Maximum number of RISC-V instruction words in a seed."),
         )
         .arg(
+            Arg::new("long_tail_max_instructions")
+                .long("long-tail-max-instructions")
+                .default_value("0")
+                .help("Absolute length ceiling for long-tail scheduling; 0 keeps the hard cap at max-instructions."),
+        )
+        .arg(
             Arg::new("semantic_window_before")
                 .long("semantic-window-before")
                 .default_value("16")
@@ -137,6 +143,16 @@ fn main() {
                 .help("Maximum injected replay attempts for each semantic bucket on a seed."),
         )
         .arg(
+            Arg::new("semantic_target_bucket_prefix")
+                .long("semantic-target-bucket-prefix")
+                .help("Only replay semantic candidates whose bucket id starts with this prefix."),
+        )
+        .arg(
+            Arg::new("semantic_target_inject_kind_prefix")
+                .long("semantic-target-inject-kind-prefix")
+                .help("Only replay semantic candidates whose inject kind starts with this prefix."),
+        )
+        .arg(
             Arg::new("oracle_precheck_max_steps")
                 .long("oracle-precheck-max-steps")
                 .default_value("32")
@@ -157,7 +173,7 @@ fn main() {
         .arg(
             Arg::new("oracle_data_size_bytes")
                 .long("oracle-data-size-bytes")
-                .default_value("0")
+                .default_value("0x100000")
                 .help("Oracle zeroed data RAM bytes for split-code-data mode."),
         )
         .arg(
@@ -174,6 +190,13 @@ fn main() {
         return;
     }
 
+    if let Some(prefix) = matches.get_one::<String>("semantic_target_bucket_prefix") {
+        std::env::set_var("BEAK_SEMANTIC_TARGET_BUCKET_PREFIX", prefix);
+    }
+    if let Some(prefix) = matches.get_one::<String>("semantic_target_inject_kind_prefix") {
+        std::env::set_var("BEAK_SEMANTIC_TARGET_INJECT_KIND_PREFIX", prefix);
+    }
+
     let root = workspace_root();
     let inline_words = collect_bin_words(&matches);
     let seeds_path = if inline_words.is_empty() {
@@ -188,6 +211,11 @@ fn main() {
         matches.get_one::<String>("mutation_iters").unwrap().parse().expect("mutation-iters");
     let requested_max_instructions: usize =
         matches.get_one::<String>("max_instructions").unwrap().parse().expect("max-instructions");
+    let requested_long_tail_max: usize = matches
+        .get_one::<String>("long_tail_max_instructions")
+        .unwrap()
+        .parse()
+        .expect("long-tail-max-instructions");
     let precheck_oracle_max_steps: u32 = matches
         .get_one::<String>("oracle_precheck_max_steps")
         .unwrap()
@@ -231,6 +259,12 @@ fn main() {
     } else {
         inline_words.len().max(1)
     };
+    let long_tail_max_instructions: usize = if inline_words.is_empty() {
+        requested_long_tail_max
+    } else {
+        0
+    };
+    let backend_max_instructions = long_tail_max_instructions.max(max_instructions);
 
     let cfg = BenchmarkConfig {
         zkvm_tag: "jolt".to_string(),
@@ -247,6 +281,7 @@ fn main() {
         initial_limit,
         mutation_iterations,
         max_instructions,
+        long_tail_max_instructions,
         precheck_oracle_max_steps,
         semantic_search_enabled: true,
         semantic_window_before,
@@ -257,7 +292,7 @@ fn main() {
     };
 
     println!("oracle_code_base = 0x{JOLT_ORACLE_CODE_BASE:08x}");
-    let res = run_benchmark_threaded(cfg, move || JoltBackend::new(max_instructions));
+    let res = run_benchmark_threaded(cfg, move || JoltBackend::new(backend_max_instructions));
     match res {
         Ok(out) => {
             println!("Wrote corpus JSONL: {}", out.corpus_path.display());

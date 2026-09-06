@@ -96,14 +96,29 @@ def _read_fuzzer_utils_template(filename: str) -> str:
     return (_FUZZER_UTILS_TEMPLATE_DIR / filename).read_text()
 
 
-def _create_fuzzer_utils_crate(*, openvm_install_path: Path) -> None:
+def _render_fuzzer_utils_lib(commit_or_branch: str) -> str:
+    contents = _read_fuzzer_utils_template("lib.rs")
+    contents = contents.replace(
+        "__BEAK_SNAPSHOT_COMMIT__", resolve_openvm_commit(commit_or_branch)
+    )
+    if resolve_openvm_commit(commit_or_branch) == OPENVM_BENCHMARK_BF11_COMMIT:
+        # OpenVM bf11 uses the p3-field 0.3 constructor name. The older frozen
+        # snapshots use PrimeField32::from_canonical_u32 instead.
+        contents = contents.replace(
+            "F::from_canonical_u32(internal_random_mod_of_u32(",
+            "F::from_u32(internal_random_mod_of_u32(",
+        )
+    return contents
+
+
+def _create_fuzzer_utils_crate(*, openvm_install_path: Path, commit_or_branch: str) -> None:
     create_file(
         openvm_install_path / "crates" / "fuzzer_utils" / "Cargo.toml",
         _read_fuzzer_utils_template("Cargo.toml"),
     )
     create_file(
         openvm_install_path / "crates" / "fuzzer_utils" / "src" / "lib.rs",
-        _read_fuzzer_utils_template("lib.rs"),
+        _render_fuzzer_utils_lib(commit_or_branch),
     )
 
 
@@ -189,6 +204,12 @@ def _circuit_primitives_add_deps(*, openvm_install_path: Path) -> None:
             primitives_cargo,
             [(r"\[dependencies\]", "[dependencies]\nfuzzer_utils.workspace = true")],
         )
+    primitives_contents = primitives_cargo.read_text()
+    if "serde_json.workspace = true" not in primitives_contents:
+        replace_in_file(
+            primitives_cargo,
+            [(r"\[dependencies\]", "[dependencies]\nserde_json.workspace = true")],
+        )
 
 
 def _patch_instructions_opcode_serde(*, openvm_install_path: Path) -> None:
@@ -219,7 +240,9 @@ def apply(*, openvm_install_path: Path, commit_or_branch: str) -> None:
         openvm_install_path=openvm_install_path,
         commit_or_branch=commit_or_branch,
     )
-    _create_fuzzer_utils_crate(openvm_install_path=openvm_install_path)
+    _create_fuzzer_utils_crate(
+        openvm_install_path=openvm_install_path, commit_or_branch=commit_or_branch
+    )
     _add_fuzzer_utils_to_workspace(openvm_install_path=openvm_install_path)
     _vm_add_serde_json_dep(openvm_install_path=openvm_install_path)
     _rv32im_circuit_add_deps(openvm_install_path=openvm_install_path)

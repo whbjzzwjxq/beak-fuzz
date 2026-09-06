@@ -1,10 +1,13 @@
+use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::{cell::RefCell, rc::Rc};
 
 use beak_core::fuzz::benchmark::{
-    BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
+    BackendEval, BenchmarkBackend, ExecutedExceptionReceipt, InjectionSchedule,
+    SemanticInjectionCandidate,
 };
+use beak_core::fuzz::bug_filter::has_exact_executed_exception_relation;
 use beak_core::rv32im::{
     instruction::RV32IMInstruction,
     oracle::{OracleConfig, OracleMemoryModel, RISCVOracle},
@@ -14,8 +17,8 @@ use risc0_binfmt::{MemoryImage, Program};
 use risc0_circuit_rv32im::{
     execute::{
         platform::{
-            HOST_ECALL_TERMINATE, MACHINE_REGS_ADDR, REG_A0, REG_A1, REG_A7, USER_REGS_ADDR,
-            USER_START_ADDR, WORD_SIZE,
+            HOST_ECALL_TERMINATE, LOOKUP_TABLE_CYCLES, MACHINE_REGS_ADDR, REG_A0, REG_A1, REG_A7,
+            USER_REGS_ADDR, USER_START_ADDR, WORD_SIZE,
         },
         testutil::DEFAULT_SESSION_LIMIT,
         Executor, DEFAULT_SEGMENT_LIMIT_PO2,
@@ -39,6 +42,11 @@ const OPERAND_ROUTE_INJECT_KIND: &str = "risc0.semantic.decode.operand_index_rou
 const RD_BITS_INJECT_KIND: &str = "risc0.semantic.decode.rd_bit_decomposition";
 const DIV_REM_BOUND_INJECT_KIND: &str = "risc0.semantic.arithmetic.division_remainder_bound";
 const ECALL_ARG_DECOMP_INJECT_KIND: &str = "risc0.semantic.control.ecall_argument_decomposition";
+const CONTROL_DONE_CYCLES_REQUIRED: u64 = 2;
+const CONTROL_DONE_RECEIPT_ARMED_ENV: &str = "BEAK_RISC0_CONTROL_DONE_RECEIPT_ARMED";
+const EXECUTED_EXCEPTION_RECEIPT_ENV: &str = "BEAK_RISC0_EXECUTED_EXCEPTION_RECEIPT";
+const CONTROL_DONE_RECEIPT_BACKEND: &str = "risc0";
+const CONTROL_DONE_RECEIPT_TRACE_SOURCE: &str = "segment_finalization";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunResponse {
@@ -49,6 +57,7 @@ pub struct RunResponse {
     pub backend_error: Option<String>,
     pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pub injection_applied: bool,
+    pub executed_exception_receipt: Option<ExecutedExceptionReceipt>,
 }
 
 fn base_inject_kind(kind: &str) -> &str {
@@ -57,6 +66,79 @@ fn base_inject_kind(kind: &str) -> &str {
 
 fn semantic_replay_supported(kind: &str) -> bool {
     !matches!(base_inject_kind(kind), ZERO_REGISTER_INJECT_KIND | RD_BITS_INJECT_KIND)
+}
+
+fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    format!("non-string panic payload ({:?})", payload.type_id())
+}
+
+fn prove_panic_error(payload: &(dyn Any + Send), injection_armed: bool) -> String {
+    let phase = if injection_armed { "semantic-injection attempt" } else { "non-injected proving" };
+    format!("risc0 prove panicked during {phase}: {}", panic_payload_message(payload))
+}
+
+fn restore_env_var(name: &str, previous: Option<std::ffi::OsString>) {
+    if let Some(value) = previous {
+        std::env::set_var(name, value);
+    } else {
+        std::env::remove_var(name);
+    }
+}
+
+fn parse_control_done_receipt(raw: Option<&str>) -> Option<ExecutedExceptionReceipt> {
+    raw.and_then(|raw| serde_json::from_str(raw).ok())
+}
+
+fn validated_control_done_receipt(
+    raw: Option<&str>,
+    hits: &[BucketHit],
+    inject_kind: Option<&str>,
+    non_injected_panic_observed: bool,
+) -> Option<ExecutedExceptionReceipt> {
+    if inject_kind.is_some() || !non_injected_panic_observed {
+        return None;
+    }
+    let receipt = parse_control_done_receipt(raw)?;
+    if receipt.context.get("backend").and_then(Value::as_str) != Some(CONTROL_DONE_RECEIPT_BACKEND)
+        || receipt.context.get("commit").and_then(Value::as_str) != Some(crate::RISC0_COMMIT)
+        || receipt.context.get("trace_source").and_then(Value::as_str)
+            != Some(CONTROL_DONE_RECEIPT_TRACE_SOURCE)
+    {
+        return None;
+    }
+    if !has_exact_executed_exception_relation(hits, Some(&receipt)) {
+        return None;
+    }
+    hits.iter().find(|hit| {
+        let hit_u64 = |key: &str| hit.details.get(key).and_then(Value::as_u64);
+        let context_u64 = |key: &str| receipt.context.get(key).and_then(Value::as_u64);
+        let (Some(actual), Some(accounted), Some(required), Some(capacity), Some(manifested)) = (
+            hit_u64("actual_trace_cycles"),
+            hit_u64("accounted_cycles"),
+            hit_u64("required_cycles"),
+            hit_u64("capacity_cycles"),
+            hit_u64("manifested_control_done_cycles"),
+        ) else {
+            return false;
+        };
+        context_u64("actual_trace_cycles") == Some(actual)
+            && context_u64("manifested_control_done_cycles") == Some(manifested)
+            && manifested == 1
+            && accounted.checked_add(manifested) == Some(actual)
+            && actual > capacity
+            && actual.checked_add(1) == Some(required)
+            && hit.details.get("obligation_id").and_then(Value::as_str)
+                == Some(receipt.obligation_id.as_str())
+            && hit.details.get("cell_id").and_then(Value::as_str) == Some(receipt.cell_id.as_str())
+            && hit_u64("step_idx") == Some(receipt.step)
+    })?;
+    Some(receipt)
 }
 
 fn encode_i(imm: i32, rs1: u32, funct3: u32, rd: u32, opcode: u32) -> u32 {
@@ -120,12 +202,29 @@ fn collect_preflight_records_for_segments(
     let mut txns = Vec::new();
     let mut summaries = Vec::new();
 
-    for (segment_idx, segment) in segments.iter().enumerate() {
+    for segment in segments {
         let records = collect_preflight_trace_records(segment)
             .map_err(|e| format!("risc0 preflight record collection failed: {e}"))?;
-        let segment_idx = segment_idx as u64;
+        let segment_idx = segment.index;
+        let segment_po2 = segment.po2 as u64;
+        let capacity_cycles = 1u64.checked_shl(segment.po2).unwrap_or(u64::MAX);
+        let user_cycles = segment.suspend_cycle as u64;
+        let pager_cycles = segment.paging_cycles as u64;
+        let lookup_table_cycles = LOOKUP_TABLE_CYCLES as u64;
+        let accounted_cycles =
+            user_cycles.saturating_add(pager_cycles).saturating_add(lookup_table_cycles);
+        let required_cycles = accounted_cycles.saturating_add(CONTROL_DONE_CYCLES_REQUIRED);
         summaries.push(Risc0PreflightSegmentSummary {
             segment_idx,
+            segment_po2,
+            capacity_cycles,
+            user_cycles,
+            pager_cycles,
+            lookup_table_cycles,
+            accounted_cycles,
+            control_done_cycles_required: CONTROL_DONE_CYCLES_REQUIRED,
+            required_cycles,
+            overflow_cycles: required_cycles.saturating_sub(capacity_cycles),
             table_split_cycle: records.table_split_cycle,
             padding_start_row: records.padding_start_row,
             total_rows: records.total_rows,
@@ -431,14 +530,32 @@ pub fn run_backend_once(
         inject_kind.map(|kind| BeakInjectionPlan { kind: kind.to_string(), step: inject_step });
     let mut witness_mutation_observed = false;
     let mut backend_error = None;
+    let mut raw_executed_exception_receipt = None;
+    let mut non_injected_panic_observed = false;
 
     for segment in &segments {
+        let previous_armed = std::env::var_os(CONTROL_DONE_RECEIPT_ARMED_ENV);
+        let previous_receipt = std::env::var_os(EXECUTED_EXCEPTION_RECEIPT_ENV);
+        std::env::remove_var(EXECUTED_EXCEPTION_RECEIPT_ENV);
+        if plan.is_none() {
+            std::env::set_var(CONTROL_DONE_RECEIPT_ARMED_ENV, segment.index.to_string());
+        } else {
+            std::env::remove_var(CONTROL_DONE_RECEIPT_ARMED_ENV);
+        }
         let proved =
             catch_unwind(AssertUnwindSafe(|| prove_segment_with_injection(segment, plan.as_ref())));
+        let emitted_receipt = std::env::var(EXECUTED_EXCEPTION_RECEIPT_ENV).ok();
+        restore_env_var(CONTROL_DONE_RECEIPT_ARMED_ENV, previous_armed);
+        restore_env_var(EXECUTED_EXCEPTION_RECEIPT_ENV, previous_receipt);
         let (seal, applied) = match proved {
             Ok(Ok(result)) => result,
             Ok(Err(err)) => return Err(format!("risc0 prove failed: {err}")),
-            Err(_) => return Err("risc0 prove panicked during semantic injection".to_string()),
+            Err(payload) => {
+                non_injected_panic_observed = plan.is_none();
+                raw_executed_exception_receipt = emitted_receipt;
+                backend_error = Some(prove_panic_error(payload.as_ref(), plan.is_some()));
+                break;
+            }
         };
         witness_mutation_observed |= applied;
         if let Err(err) = risc0_circuit_rv32im::verify(&seal) {
@@ -459,6 +576,13 @@ pub fn run_backend_once(
         }
     }
 
+    let executed_exception_receipt = validated_control_done_receipt(
+        raw_executed_exception_receipt.as_deref(),
+        &bucket_hits,
+        inject_kind,
+        non_injected_panic_observed,
+    );
+
     let final_regs = final_regs_for_oracle(words).unwrap_or_else(|_| oracle_fallback_regs(words));
 
     Ok(RunResponse {
@@ -469,6 +593,7 @@ pub fn run_backend_once(
         backend_error,
         observed_injection_sites,
         injection_applied,
+        executed_exception_receipt,
     })
 }
 
@@ -576,6 +701,7 @@ impl BenchmarkBackend for Risc0Backend {
         self.eval.trace_signals = resp.trace_signals;
         self.eval.backend_error = resp.backend_error;
         self.eval.semantic_injection_applied = resp.injection_applied;
+        self.eval.executed_exception_receipt = resp.executed_exception_receipt;
         resp.final_regs.ok_or_else(|| "risc0 backend returned no final_regs".to_string())
     }
 
@@ -599,10 +725,15 @@ impl BenchmarkBackend for Risc0Backend {
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
+    use std::collections::HashMap;
+
     use super::{
-        build_program, nonzero_reg_count, observe_sites_for_words, read_reg_bank,
-        ECALL_ARG_DECOMP_INJECT_KIND,
+        build_program, nonzero_reg_count, observe_sites_for_words, prove_panic_error,
+        read_reg_bank, validated_control_done_receipt, ECALL_ARG_DECOMP_INJECT_KIND,
     };
+    use beak_core::fuzz::benchmark::{ExecutedExceptionEffect, ExecutedExceptionReceipt};
+    use beak_core::trace::{semantic, BucketHit};
     use risc0_binfmt::MemoryImage;
     use risc0_circuit_rv32im::{
         execute::{
@@ -612,6 +743,7 @@ mod tests {
         },
         MAX_INSN_CYCLES,
     };
+    use serde_json::json;
 
     use super::Risc0HostSyscall;
 
@@ -623,35 +755,267 @@ mod tests {
     }
 
     #[test]
-    fn inspect_reg_banks_for_known_cases() {
-        let cases = [
-            ("divrem", vec![0x0070_0113, 0x0050_0193, 0x0231_50b3]),
-            ("ecall_len", vec![0x0010_0893, 0x0000_0513, 0x0050_05b7, 0x0040_0613, 0x0000_0073]),
-        ];
+    fn prove_panic_error_preserves_string_payload_and_phase() {
+        let baseline_payload: Box<dyn Any + Send> = Box::new("cycles <= 1 << segment.po2");
+        let injected_payload: Box<dyn Any + Send> =
+            Box::new(String::from("constraint polynomial mismatch"));
 
-        for (name, words) in cases {
-            let image = MemoryImage::new_kernel(build_program(&words));
-            let session = execute(
-                image,
-                DEFAULT_SEGMENT_LIMIT_PO2,
-                MAX_INSN_CYCLES,
-                DEFAULT_SESSION_LIMIT,
-                &Risc0HostSyscall,
-                None,
-            )
-            .unwrap_or_else(|e| panic!("{name}: execute failed: {e}"));
-            let mut post = session.result.post_image.clone();
-            let machine = read_reg_bank(&mut post, MACHINE_REGS_ADDR.waddr(), "machine").unwrap();
-            let user = read_reg_bank(&mut post, USER_REGS_ADDR.waddr(), "user").unwrap();
-            eprintln!(
-                "{name}: machine_nonzero={} user_nonzero={} machine_x11={} user_x11={} machine_x17={} user_x17={}",
-                nonzero_reg_count(&machine),
-                nonzero_reg_count(&user),
-                machine[11],
-                user[11],
-                machine[17],
-                user[17],
-            );
+        let baseline = prove_panic_error(baseline_payload.as_ref(), false);
+        let injected = prove_panic_error(injected_payload.as_ref(), true);
+        let distinct_baseline = prove_panic_error(injected_payload.as_ref(), false);
+
+        assert_eq!(
+            baseline,
+            "risc0 prove panicked during non-injected proving: cycles <= 1 << segment.po2"
+        );
+        assert_eq!(
+            injected,
+            "risc0 prove panicked during semantic-injection attempt: constraint polynomial mismatch"
+        );
+        assert_ne!(baseline, distinct_baseline);
+    }
+
+    #[test]
+    fn prove_panic_error_labels_non_string_payloads_in_each_phase() {
+        let baseline_payload: Box<dyn Any + Send> = Box::new(7_u32);
+        let injected_payload: Box<dyn Any + Send> = Box::new(false);
+
+        let baseline = prove_panic_error(baseline_payload.as_ref(), false);
+        let injected = prove_panic_error(injected_payload.as_ref(), true);
+        let distinct_baseline = prove_panic_error(injected_payload.as_ref(), false);
+
+        assert!(baseline.starts_with(
+            "risc0 prove panicked during non-injected proving: non-string panic payload"
+        ));
+        assert!(injected.starts_with(
+            "risc0 prove panicked during semantic-injection attempt: non-string panic payload"
+        ));
+        assert_ne!(baseline, distinct_baseline);
+    }
+
+    fn control_done_hit() -> BucketHit {
+        BucketHit::semantic(
+            semantic::row::TRACE_POWER2_BOUNDARY,
+            HashMap::from([
+                ("obligation_id".to_string(), json!("pd2")),
+                ("cell_id".to_string(), json!("pd2.just_over")),
+                ("backend".to_string(), json!("risc0")),
+                ("commit".to_string(), json!("6f038bd11ed725d7025687d163977d93ac1f82f9")),
+                ("trace_source".to_string(), json!("segment_finalization")),
+                ("segment_idx".to_string(), json!(3)),
+                ("step_idx".to_string(), json!(3)),
+                ("segment_po2".to_string(), json!(4)),
+                ("capacity_cycles".to_string(), json!(16)),
+                ("user_cycles".to_string(), json!(9)),
+                ("pager_cycles".to_string(), json!(2)),
+                ("lookup_table_cycles".to_string(), json!(5)),
+                ("accounted_cycles".to_string(), json!(16)),
+                ("control_done_cycles_required".to_string(), json!(2)),
+                ("required_cycles".to_string(), json!(18)),
+                ("overflow_cycles".to_string(), json!(2)),
+                ("actual_trace_cycles".to_string(), json!(17)),
+                ("manifested_control_done_cycles".to_string(), json!(1)),
+                ("relation".to_string(), json!("control_done_cycles_cross_segment_capacity")),
+                ("relation_valid".to_string(), json!(true)),
+                ("accounted_fits".to_string(), json!(true)),
+                ("required_exceeds".to_string(), json!(true)),
+            ]),
+        )
+    }
+
+    fn control_done_receipt() -> ExecutedExceptionReceipt {
+        ExecutedExceptionReceipt {
+            effect: ExecutedExceptionEffect::ControlDoneCapacity,
+            obligation_id: "pd2".to_string(),
+            cell_id: "pd2.just_over".to_string(),
+            stage: "risc0.segment.control_done_capacity".to_string(),
+            step: 3,
+            context: serde_json::Map::from_iter([
+                ("backend".to_string(), json!("risc0")),
+                ("commit".to_string(), json!("6f038bd11ed725d7025687d163977d93ac1f82f9")),
+                ("trace_source".to_string(), json!("segment_finalization")),
+                ("segment_idx".to_string(), json!(3)),
+                ("segment_po2".to_string(), json!(4)),
+                ("capacity_cycles".to_string(), json!(16)),
+                ("user_cycles".to_string(), json!(9)),
+                ("pager_cycles".to_string(), json!(2)),
+                ("lookup_table_cycles".to_string(), json!(5)),
+                ("accounted_cycles".to_string(), json!(16)),
+                ("control_done_cycles_required".to_string(), json!(2)),
+                ("required_cycles".to_string(), json!(18)),
+                ("overflow_cycles".to_string(), json!(2)),
+                ("actual_trace_cycles".to_string(), json!(17)),
+                ("manifested_control_done_cycles".to_string(), json!(1)),
+                ("accounted_fits".to_string(), json!(true)),
+                ("required_exceeds".to_string(), json!(true)),
+            ]),
         }
     }
+
+    #[test]
+    fn control_done_receipt_requires_non_injected_panic_and_exact_executed_relation() {
+        let hit = control_done_hit();
+        let receipt = control_done_receipt();
+        let raw = serde_json::to_string(&receipt).unwrap();
+
+        assert_eq!(
+            validated_control_done_receipt(Some(&raw), std::slice::from_ref(&hit), None, true),
+            Some(receipt.clone())
+        );
+        assert!(
+            validated_control_done_receipt(None, std::slice::from_ref(&hit), None, true).is_none()
+        );
+        assert!(validated_control_done_receipt(
+            Some(&raw),
+            std::slice::from_ref(&hit),
+            Some("risc0.semantic.decode.operand_index_routing"),
+            true,
+        )
+        .is_none());
+        assert!(validated_control_done_receipt(
+            Some(&raw),
+            std::slice::from_ref(&hit),
+            None,
+            false,
+        )
+        .is_none());
+
+        assert!(validated_control_done_receipt(Some(&raw), &[], None, true).is_none());
+        assert!(validated_control_done_receipt(
+            Some(&raw),
+            &[hit.clone(), hit.clone()],
+            None,
+            true,
+        )
+        .is_none());
+
+        let mut wrong_effect = receipt.clone();
+        wrong_effect.effect = ExecutedExceptionEffect::DoryShortTraceCapacity;
+        let wrong_effect = serde_json::to_string(&wrong_effect).unwrap();
+        assert!(validated_control_done_receipt(
+            Some(&wrong_effect),
+            std::slice::from_ref(&hit),
+            None,
+            true,
+        )
+        .is_none());
+
+        let mut wrong_obligation = receipt.clone();
+        wrong_obligation.obligation_id = "pd5".to_string();
+        let wrong_obligation = serde_json::to_string(&wrong_obligation).unwrap();
+        assert!(validated_control_done_receipt(
+            Some(&wrong_obligation),
+            std::slice::from_ref(&hit),
+            None,
+            true,
+        )
+        .is_none());
+
+        let mut wrong_cell = receipt.clone();
+        wrong_cell.cell_id = "pd2.exact".to_string();
+        let wrong_cell = serde_json::to_string(&wrong_cell).unwrap();
+        assert!(validated_control_done_receipt(
+            Some(&wrong_cell),
+            std::slice::from_ref(&hit),
+            None,
+            true,
+        )
+        .is_none());
+
+        let mut wrong_stage = receipt.clone();
+        wrong_stage.stage = "risc0.segment.unrelated".to_string();
+        let wrong_stage = serde_json::to_string(&wrong_stage).unwrap();
+        assert!(validated_control_done_receipt(
+            Some(&wrong_stage),
+            std::slice::from_ref(&hit),
+            None,
+            true,
+        )
+        .is_none());
+
+        let mut wrong_step = receipt.clone();
+        wrong_step.step = 2;
+        let wrong_step = serde_json::to_string(&wrong_step).unwrap();
+        assert!(validated_control_done_receipt(
+            Some(&wrong_step),
+            std::slice::from_ref(&hit),
+            None,
+            true,
+        )
+        .is_none());
+
+        let mut wrong_context = receipt.clone();
+        wrong_context.context.insert("required_cycles".to_string(), json!(17));
+        let wrong_context = serde_json::to_string(&wrong_context).unwrap();
+        assert!(validated_control_done_receipt(
+            Some(&wrong_context),
+            std::slice::from_ref(&hit),
+            None,
+            true,
+        )
+        .is_none());
+
+        for (identity_key, identity_value) in [
+            ("backend", json!("sp1")),
+            ("commit", json!("0000000000000000000000000000000000000000")),
+            ("trace_source", json!("panic_text")),
+        ] {
+            let mut wrong_identity = receipt.clone();
+            wrong_identity.context.insert(identity_key.to_string(), identity_value.clone());
+            let wrong_identity_raw = serde_json::to_string(&wrong_identity).unwrap();
+            assert!(validated_control_done_receipt(
+                Some(&wrong_identity_raw),
+                std::slice::from_ref(&hit),
+                None,
+                true,
+            )
+            .is_none());
+
+            let mut forged_hit = hit.clone();
+            forged_hit.details.insert(identity_key.to_string(), identity_value);
+            assert!(validated_control_done_receipt(
+                Some(&wrong_identity_raw),
+                std::slice::from_ref(&forged_hit),
+                None,
+                true,
+            )
+            .is_none());
+        }
+
+        let mut missing_identity = receipt.clone();
+        missing_identity.context.remove("trace_source");
+        let missing_identity = serde_json::to_string(&missing_identity).unwrap();
+        assert!(validated_control_done_receipt(
+            Some(&missing_identity),
+            std::slice::from_ref(&hit),
+            None,
+            true,
+        )
+        .is_none());
+
+        let mut wrong_manifestation = control_done_receipt();
+        wrong_manifestation.context.insert("actual_trace_cycles".to_string(), json!(18));
+        let wrong_manifestation = serde_json::to_string(&wrong_manifestation).unwrap();
+        assert!(validated_control_done_receipt(
+            Some(&wrong_manifestation),
+            std::slice::from_ref(&hit),
+            None,
+            true,
+        )
+        .is_none());
+
+        let mut core_only = control_done_hit();
+        core_only.details.insert("actual_trace_cycles".to_string(), json!(18));
+        let mut manifestation_only = control_done_hit();
+        manifestation_only.details.insert("cell_id".to_string(), json!("pd2.exact"));
+        let raw = serde_json::to_string(&control_done_receipt()).unwrap();
+        assert!(validated_control_done_receipt(
+            Some(&raw),
+            &[core_only, manifestation_only],
+            None,
+            true,
+        )
+        .is_none());
+    }
+
 }

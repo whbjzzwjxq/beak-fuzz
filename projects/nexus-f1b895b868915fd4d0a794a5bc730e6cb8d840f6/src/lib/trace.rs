@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::observations::SequenceInsnObservation;
@@ -11,7 +11,6 @@ use serde_json::{json, Value};
 
 const BACKEND: &str = "nexus";
 const COMMIT: &str = crate::NEXUS_COMMIT;
-const NEXUS_RAM_INIT_FINAL_MIN_LOG_SIZE: u32 = 4;
 
 pub struct NexusTrace {
     bucket_hits: Vec<BucketHit>,
@@ -676,6 +675,53 @@ fn emit_alu_buckets(bucket_hits: &mut Vec<BucketHit>, insn: &ExecutedInstruction
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProductRelation {
+    cell_id: &'static str,
+    product_hi: u32,
+    product_lo: u32,
+    expected_rd_val: u32,
+    observed_rd_val: u32,
+}
+
+impl ProductRelation {
+    fn result_matches(self) -> bool {
+        self.observed_rd_val == self.expected_rd_val
+    }
+}
+
+fn product_relation(
+    mnemonic: &str,
+    lhs: u32,
+    rhs: u32,
+    observed_rd_val: u32,
+) -> Option<ProductRelation> {
+    let unsigned_product = u64::from(lhs) * u64::from(rhs);
+    let signed_product = i128::from(lhs as i32) * i128::from(rhs as i32);
+    let mixed_product = i128::from(lhs as i32) * i128::from(rhs);
+    let product = match mnemonic {
+        "mulh" => signed_product,
+        "mulhsu" => mixed_product,
+        "mul" | "mulhu" => i128::from(unsigned_product),
+        _ => return None,
+    };
+    let product_lo = product as u32;
+    let product_hi = ((product as u128) >> 32) as u32;
+    let cell_id = match mnemonic {
+        "mul" if lhs == 0 || rhs == 0 => "md4.zero_op",
+        "mul" if unsigned_product < (1u64 << 32) => "md4.mul_small",
+        "mul" => "md4.mul_overflow",
+        "mulh" if (lhs as i32) >= 0 && (rhs as i32) >= 0 => "md4.mulh_pp",
+        "mulh" if (lhs as i32) < 0 && (rhs as i32) < 0 => "md4.mulh_nn",
+        "mulh" => "md4.mulh_pn",
+        "mulhu" => "md4.mulhu",
+        "mulhsu" => "md4.mulh_pn",
+        _ => return None,
+    };
+    let expected_rd_val = if mnemonic == "mul" { product_lo } else { product_hi };
+    Some(ProductRelation { cell_id, product_hi, product_lo, expected_rd_val, observed_rd_val })
+}
+
 fn emit_muldiv_buckets(bucket_hits: &mut Vec<BucketHit>, insn: &ExecutedInstruction) {
     let lhs = insn.rs1_val.unwrap_or(0);
     let rhs = insn.rs2_val.unwrap_or(0);
@@ -747,31 +793,27 @@ fn emit_muldiv_buckets(bucket_hits: &mut Vec<BucketHit>, insn: &ExecutedInstruct
             );
         }
         "mul" | "mulh" | "mulhsu" | "mulhu" => {
-            let unsigned_product = u64::from(lhs) * u64::from(rhs);
-            let signed_product =
-                i64::from(signed_u32(lhs)) as i128 * i64::from(signed_u32(rhs)) as i128;
-            let mixed_product = i64::from(signed_u32(lhs)) as i128 * u64::from(rhs) as i128;
-            let product = match insn.mnemonic.as_str() {
-                "mulh" => signed_product,
-                "mulhsu" => mixed_product,
-                _ => unsigned_product as i128,
+            let (Some(lhs), Some(rhs), Some(observed_rd_val)) =
+                (insn.rs1_val, insn.rs2_val, insn.rd_val)
+            else {
+                return;
             };
-            let product_lo = product as u64 as u32;
-            let product_hi = ((product as u128) >> 32) as u32;
-            let cell_id = match insn.mnemonic.as_str() {
-                "mul" if lhs == 0 || rhs == 0 => "md4.zero_op",
-                "mul" if unsigned_product < (1u64 << 32) => "md4.mul_small",
-                "mul" => "md4.mul_overflow",
-                "mulh" if signed_u32(lhs) >= 0 && signed_u32(rhs) >= 0 => "md4.mulh_pp",
-                "mulh" if signed_u32(lhs) < 0 && signed_u32(rhs) < 0 => "md4.mulh_nn",
-                "mulh" => "md4.mulh_pn",
-                "mulhu" => "md4.mulhu",
-                "mulhsu" => "md4.mulh_pn",
-                _ => "md4.mul_small",
+            let Some(relation) =
+                product_relation(insn.mnemonic.as_str(), lhs, rhs, observed_rd_val)
+            else {
+                return;
             };
-            let mut details = instr_details("md4", cell_id, insn);
-            details.insert("product_lo".to_string(), json!(product_lo));
-            details.insert("product_hi".to_string(), json!(product_hi));
+            if !relation.result_matches() {
+                return;
+            }
+            let mut details = instr_details("md4", relation.cell_id, insn);
+            details.insert("product_lo".to_string(), json!(relation.product_lo));
+            details.insert("product_hi".to_string(), json!(relation.product_hi));
+            details.insert("expected_rd_val".to_string(), json!(relation.expected_rd_val));
+            details.insert("observed_rd_val".to_string(), json!(relation.observed_rd_val));
+            details.insert("result_matches".to_string(), json!(relation.result_matches()));
+            details.insert("relation".to_string(), json!("product_hi_lo_matches_operands"));
+            details.insert("relation_valid".to_string(), json!(relation.result_matches()));
             bucket_hits
                 .push(BucketHit::semantic(semantic::arithmetic::PRODUCT_DECOMPOSITION, details));
             if lhs == u32::MAX || rhs == u32::MAX || lhs == 0x7fff_ffff || rhs == 0x7fff_ffff {
@@ -1078,54 +1120,6 @@ fn emit_memory_extension_buckets(
     }
 }
 
-fn table_log_size(real_rows: usize, min_log_size: u32) -> u32 {
-    real_rows.max(1).next_power_of_two().trailing_zeros().max(min_log_size)
-}
-
-fn observed_memory_table_rows(
-    loads: &[ExecutedMemoryAccess],
-    stores: &[(ExecutedMemoryAccess, u32)],
-) -> usize {
-    let mut byte_addresses = BTreeSet::new();
-    for access in loads.iter().chain(stores.iter().map(|(store, _)| store)) {
-        for byte_offset in 0..u32::from(access.size_bytes) {
-            byte_addresses.insert(access.address.wrapping_add(byte_offset));
-        }
-    }
-    byte_addresses.len().max(1)
-}
-
-fn emit_table_power2_boundary_hit(
-    bucket_hits: &mut Vec<BucketHit>,
-    loads: &[ExecutedMemoryAccess],
-    stores: &[(ExecutedMemoryAccess, u32)],
-) {
-    let real_rows = observed_memory_table_rows(loads, stores);
-    let log_size = table_log_size(real_rows, NEXUS_RAM_INIT_FINAL_MIN_LOG_SIZE);
-    let padded_rows = 1usize << log_size;
-    let mut details = HashMap::new();
-    details.insert("obligation_id".to_string(), json!("pd3"));
-    details.insert("cell_id".to_string(), json!("pd3.mem_table"));
-    details.insert("backend".to_string(), json!(BACKEND));
-    details.insert("commit".to_string(), json!(COMMIT));
-    details.insert(
-        "trace_source".to_string(),
-        json!("uniform_trace.memory_records.unique_byte_addresses"),
-    );
-    details.insert("op_idx".to_string(), json!(real_rows as u64));
-    details.insert("step_idx".to_string(), json!(real_rows as u64));
-    details.insert("table_name".to_string(), json!("ram_init_final"));
-    details.insert("real_rows".to_string(), json!(real_rows));
-    details.insert("log_size".to_string(), json!(log_size));
-    details.insert("padded_rows".to_string(), json!(padded_rows));
-    details.insert("padding_rows".to_string(), json!(padded_rows.saturating_sub(real_rows)));
-    details.insert("boundary_k".to_string(), json!(log_size));
-    details.insert("observed_load_rows".to_string(), json!(loads.len()));
-    details.insert("observed_store_rows".to_string(), json!(stores.len()));
-    details.insert("approximation".to_string(), json!("trace_observable_ram_init_final_rows"));
-    bucket_hits.push(BucketHit::semantic(semantic::row::TABLE_POWER2_BOUNDARY, details));
-}
-
 fn push_memory_hit(
     hits: &mut Vec<BucketHit>,
     bucket: semantic::SemanticBucket,
@@ -1291,7 +1285,6 @@ impl NexusTrace {
             }
         }
         emit_memory_extension_buckets(&mut bucket_hits, &loads, &stores);
-        emit_table_power2_boundary_hit(&mut bucket_hits, &loads, &stores);
 
         Self {
             bucket_hits,
@@ -1316,5 +1309,39 @@ impl Trace for NexusTrace {
 
     fn trace_signals(&self) -> &[TraceSignal] {
         &self.trace_signals
+    }
+}
+
+#[cfg(test)]
+mod product_relation_tests {
+    use super::product_relation;
+
+    #[test]
+    fn mul_overflow_records_exact_hi_lo_and_executed_result() {
+        let relation = product_relation("mul", 0x1_0000, 0x1_0000, 0).unwrap();
+        assert_eq!(relation.cell_id, "md4.mul_overflow");
+        assert_eq!(relation.product_hi, 1);
+        assert_eq!(relation.product_lo, 0);
+        assert_eq!(relation.expected_rd_val, 0);
+        assert!(relation.result_matches());
+    }
+
+    #[test]
+    fn carry_bound_and_mulhu_controls_are_distinct() {
+        let below = product_relation("mul", 0xffff, 0x1_0000, 0xffff_0000).unwrap();
+        assert_eq!(below.cell_id, "md4.mul_small");
+        assert_eq!(below.product_hi, 0);
+        assert!(below.result_matches());
+
+        let mulhu = product_relation("mulhu", 0x1_0000, 0x1_0000, 1).unwrap();
+        assert_eq!(mulhu.cell_id, "md4.mulhu");
+        assert_eq!(mulhu.expected_rd_val, 1);
+        assert!(mulhu.result_matches());
+
+        let wrong_executed_result = product_relation("mul", 0x1_0000, 0x1_0000, 1).unwrap();
+        assert_eq!(wrong_executed_result.cell_id, "md4.mul_overflow");
+        assert!(!wrong_executed_result.result_matches());
+
+        assert!(product_relation("add", 1, 2, 3).is_none());
     }
 }

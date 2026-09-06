@@ -57,6 +57,15 @@ pub struct Risc0PreflightMemoryTxn {
 #[derive(Debug, Clone)]
 pub struct Risc0PreflightSegmentSummary {
     pub segment_idx: u64,
+    pub segment_po2: u64,
+    pub capacity_cycles: u64,
+    pub user_cycles: u64,
+    pub pager_cycles: u64,
+    pub lookup_table_cycles: u64,
+    pub accounted_cycles: u64,
+    pub control_done_cycles_required: u64,
+    pub required_cycles: u64,
+    pub overflow_cycles: u64,
     pub table_split_cycle: u64,
     pub padding_start_row: u64,
     pub total_rows: u64,
@@ -1119,6 +1128,49 @@ fn emit_preflight_memory_obligation_hits(
     }
 
     for summary in summaries {
+        if summary.accounted_cycles <= summary.capacity_cycles
+            && summary.control_done_cycles_required > 0
+            && summary.required_cycles > summary.capacity_cycles
+            && summary.required_cycles
+                == summary.accounted_cycles.saturating_add(summary.control_done_cycles_required)
+            && summary.overflow_cycles
+                == summary.required_cycles.saturating_sub(summary.capacity_cycles)
+        {
+            let mut details = HashMap::new();
+            details.insert("obligation_id".to_string(), json!("pd2"));
+            details.insert("cell_id".to_string(), json!("pd2.just_over"));
+            details.insert("backend".to_string(), json!(BACKEND));
+            details.insert("commit".to_string(), json!(COMMIT));
+            details.insert("trace_source".to_string(), json!("segment_finalization"));
+            details.insert("segment_idx".to_string(), json!(summary.segment_idx));
+            details.insert("step_idx".to_string(), json!(summary.segment_idx));
+            details.insert("segment_po2".to_string(), json!(summary.segment_po2));
+            details.insert("capacity_cycles".to_string(), json!(summary.capacity_cycles));
+            details.insert("user_cycles".to_string(), json!(summary.user_cycles));
+            details.insert("pager_cycles".to_string(), json!(summary.pager_cycles));
+            details.insert("lookup_table_cycles".to_string(), json!(summary.lookup_table_cycles));
+            details.insert("accounted_cycles".to_string(), json!(summary.accounted_cycles));
+            details.insert(
+                "control_done_cycles_required".to_string(),
+                json!(summary.control_done_cycles_required),
+            );
+            details.insert("required_cycles".to_string(), json!(summary.required_cycles));
+            details.insert("overflow_cycles".to_string(), json!(summary.overflow_cycles));
+            details.insert("actual_trace_cycles".to_string(), json!(summary.total_rows));
+            details.insert(
+                "manifested_control_done_cycles".to_string(),
+                json!(summary.total_rows.saturating_sub(summary.accounted_cycles)),
+            );
+            details.insert(
+                "relation".to_string(),
+                json!("control_done_cycles_cross_segment_capacity"),
+            );
+            details.insert("relation_valid".to_string(), json!(true));
+            details.insert("accounted_fits".to_string(), json!(true));
+            details.insert("required_exceeds".to_string(), json!(true));
+            hits.push(BucketHit::semantic(semantic::row::TRACE_POWER2_BOUNDARY, details));
+        }
+
         if summary.padding_start_row >= summary.total_rows {
             continue;
         }
@@ -1587,7 +1639,29 @@ mod tests {
     use beak_core::trace::semantic;
     use beak_core::trace::Trace;
 
-    use super::Risc0Trace;
+    use super::{Risc0PreflightSegmentSummary, Risc0Trace};
+
+    fn segment_summary(
+        accounted_cycles: u64,
+        required_cycles: u64,
+    ) -> Risc0PreflightSegmentSummary {
+        Risc0PreflightSegmentSummary {
+            segment_idx: 3,
+            segment_po2: 4,
+            capacity_cycles: 16,
+            user_cycles: accounted_cycles.saturating_sub(7),
+            pager_cycles: 2,
+            lookup_table_cycles: 5,
+            accounted_cycles,
+            control_done_cycles_required: 2,
+            required_cycles,
+            overflow_cycles: required_cycles.saturating_sub(16),
+            table_split_cycle: 0,
+            padding_start_row: accounted_cycles.saturating_add(1),
+            total_rows: accounted_cycles.saturating_add(1),
+            lookup_table_rows: 5,
+        }
+    }
 
     #[test]
     fn risc0_trace_emits_registered_semantics_with_contract_details() {
@@ -1603,6 +1677,41 @@ mod tests {
         assert!(trace.bucket_hits().iter().all(|hit| hit.details.contains_key("obligation_id")));
         assert!(trace.bucket_hits().iter().all(|hit| hit.details.contains_key("cell_id")));
         assert!(trace.bucket_hits().iter().all(|hit| hit.details.contains_key("backend")));
+    }
+
+    #[test]
+    fn control_done_boundary_hit_binds_the_complete_executed_segment_relation() {
+        let trace =
+            Risc0Trace::from_words_with_preflight(&[0x0000_0013], &[], &[segment_summary(16, 18)])
+                .expect("trace");
+        let hits = trace
+            .bucket_hits()
+            .iter()
+            .filter(|hit| hit.bucket_id == semantic::row::TRACE_POWER2_BOUNDARY.id)
+            .collect::<Vec<_>>();
+        assert_eq!(hits.len(), 1);
+        let details = &hits[0].details;
+        assert_eq!(details["obligation_id"], "pd2");
+        assert_eq!(details["cell_id"], "pd2.just_over");
+        assert_eq!(details["backend"], "risc0");
+        assert_eq!(details["commit"], "6f038bd11ed725d7025687d163977d93ac1f82f9");
+        assert_eq!(details["trace_source"], "segment_finalization");
+        assert_eq!(details["step_idx"], 3);
+        assert_eq!(details["accounted_cycles"], 16);
+        assert_eq!(details["required_cycles"], 18);
+        assert_eq!(details["actual_trace_cycles"], 17);
+        assert_eq!(details["manifested_control_done_cycles"], 1);
+    }
+
+    #[test]
+    fn control_done_boundary_hit_is_not_emitted_when_required_cycles_fit() {
+        let trace =
+            Risc0Trace::from_words_with_preflight(&[0x0000_0013], &[], &[segment_summary(14, 16)])
+                .expect("trace");
+        assert!(trace
+            .bucket_hits()
+            .iter()
+            .all(|hit| hit.bucket_id != semantic::row::TRACE_POWER2_BOUNDARY.id));
     }
 
     #[test]

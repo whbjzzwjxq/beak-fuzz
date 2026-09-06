@@ -126,6 +126,12 @@ fn main() {
     if let Some(err) = &backend_resp.backend_error {
         println!("  backend_error = {err}");
     }
+    if let Some(receipt) = &backend_resp.semantic_mutation_receipt {
+        println!(
+            "  semantic_mutation_receipt = {}",
+            serde_json::to_string(receipt).expect("serialize semantic mutation receipt")
+        );
+    }
 
     if print_buckets {
         println!("\n=== Derived bucket hits ===");

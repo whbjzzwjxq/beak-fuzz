@@ -27,6 +27,31 @@ use rrs_lib::{
 };
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SemanticMutationRelation {
+    OpcodeSelectorEquation,
+}
+
+#[derive(Debug, Serialize)]
+struct SemanticMutationEffect {
+    relation: SemanticMutationRelation,
+    preserved_before: Option<serde_json::Value>,
+    preserved_after: Option<serde_json::Value>,
+    context: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct SemanticMutationReceipt {
+    inject_kind: String,
+    site: String,
+    field: String,
+    step: u64,
+    before: serde_json::Value,
+    after: serde_json::Value,
+    effect: SemanticMutationEffect,
+}
+
 #[derive(Debug, Deserialize)]
 struct RunnerRequest {
     words: Vec<u32>,
@@ -44,6 +69,7 @@ struct RunnerResponse {
     error: Option<String>,
     observed_injection_sites: BTreeMap<String, Vec<u64>>,
     injection_applied: bool,
+    semantic_mutation_receipt: Option<SemanticMutationReceipt>,
     executed_insns: Vec<ExecutedInsn>,
 }
 
@@ -320,6 +346,10 @@ fn mutate_records_for_injection(
     inject_step: u64,
 ) -> Result<(), String> {
     std::env::remove_var("BEAK_PICO_WITNESS_INJECTION_APPLIED");
+    std::env::remove_var("BEAK_PICO_OPCODE_SELECTOR_MUTATION_STEP");
+    std::env::remove_var("BEAK_PICO_OPCODE_SELECTOR_MEMORY_EVENT_INDEX");
+    std::env::remove_var("BEAK_PICO_OPCODE_SELECTOR_BEFORE");
+    std::env::remove_var("BEAK_PICO_OPCODE_SELECTOR_AFTER");
     let kind = inject_kind.unwrap_or("");
     std::env::set_var(
         "BEAK_PICO_WITNESS_INJECT_KIND",
@@ -379,6 +409,13 @@ fn is_store_opcode(opcode: Opcode) -> bool {
     matches!(opcode, Opcode::SB | Opcode::SH | Opcode::SW)
 }
 
+fn opcode_selector_injection_step(opcode: Opcode, rd: u32, clk: u32) -> Option<u64> {
+    matches!(opcode, Opcode::LB | Opcode::LBU | Opcode::LH | Opcode::LHU | Opcode::LW)
+        .then_some(rd)
+        .filter(|rd| *rd != 0)
+        .map(|_| clk as u64 / 4)
+}
+
 fn collect_observed_injection_sites(records: &[EmulationRecord]) -> BTreeMap<String, Vec<u64>> {
     let mut sites = BTreeMap::<String, Vec<u64>>::new();
     let mut memory_step = 0u64;
@@ -391,7 +428,17 @@ fn collect_observed_injection_sites(records: &[EmulationRecord]) -> BTreeMap<Str
             let cpu_anchor = event.clk as u64;
             if event.instruction.is_memory_instruction() {
                 record_site(&mut sites, TIMESTAMP_INJECT_KIND, memory_step);
-                record_site(&mut sites, READ_WRITE_OP_SELECTOR_INJECT_KIND, memory_step);
+                if let Some(step) = opcode_selector_injection_step(
+                    event.instruction.opcode,
+                    event.instruction.op_a,
+                    event.clk,
+                ) {
+                    // The durable read/write hook and the typed receipt both use the global
+                    // executed-instruction step (Pico clocks advance by four per CPU row), not
+                    // the ordinal among memory rows.  Advertising only applicable non-x0 loads
+                    // makes the ordinary scheduler's first explicit trial constructive.
+                    record_site(&mut sites, READ_WRITE_OP_SELECTOR_INJECT_KIND, step);
+                }
                 record_site(&mut sites, MEM_STORE_LOAD_INJECT_KIND, memory_step);
                 record_site(&mut sites, MEM_ADDR_ALIGN_INJECT_KIND, memory_step);
                 record_site(&mut sites, MEM_LOAD_VALUE_INJECT_KIND, memory_step);
@@ -519,8 +566,7 @@ fn collect_executed_insns(
                 c: event.c,
                 memory: event.memory,
                 ecall_syscall_id,
-                ecall_operand_to_check: if ecall_syscall_id
-                    == Some(SyscallCode::HALT.syscall_id())
+                ecall_operand_to_check: if ecall_syscall_id == Some(SyscallCode::HALT.syscall_id())
                 {
                     Some(event.b)
                 } else {
@@ -534,6 +580,59 @@ fn collect_executed_insns(
 
 fn injection_applied_from_site_metadata() -> bool {
     std::env::var("BEAK_PICO_WITNESS_INJECTION_APPLIED").ok().as_deref() == Some("1")
+}
+
+fn semantic_opcode_selector_receipt(
+    inject_kind: Option<&str>,
+    executed: &[ExecutedInsn],
+) -> Option<SemanticMutationReceipt> {
+    if inject_kind != Some(READ_WRITE_OP_SELECTOR_INJECT_KIND) {
+        return None;
+    }
+    let mutation_step =
+        std::env::var("BEAK_PICO_OPCODE_SELECTOR_MUTATION_STEP").ok()?.parse::<usize>().ok()?;
+    let before = std::env::var("BEAK_PICO_OPCODE_SELECTOR_BEFORE").ok()?.parse::<u64>().ok()?;
+    let after = std::env::var("BEAK_PICO_OPCODE_SELECTOR_AFTER").ok()?.parse::<u64>().ok()?;
+    let memory_event_idx = std::env::var("BEAK_PICO_OPCODE_SELECTOR_MEMORY_EVENT_INDEX")
+        .ok()?
+        .parse::<u64>()
+        .ok()?;
+    let event = executed.iter().find(|event| {
+        event.step_idx == mutation_step as u64 && matches!(event.word & 0x7f, 0x03 | 0x23)
+    })?;
+    let rd = u64::from((event.word >> 7) & 0x1f);
+    let cell_id = if event.word & 0x7f == 0x03 { "id4.load" } else { "id4.store" };
+    let mut context = serde_json::Map::new();
+    context.insert("bucket_id".into(), "sem.exec.op_selector_binding".into());
+    context.insert("obligation_id".into(), "id4".into());
+    context.insert("cell_id".into(), cell_id.into());
+    context.insert("backend".into(), "pico".into());
+    context.insert("commit".into(), "45e74ccd62758c6d67239913956e749adaba261c".into());
+    context.insert("trace_source".into(), "instruction".into());
+    context.insert("executed_read_write_row".into(), true.into());
+    context.insert("mutation_step".into(), (mutation_step as u64).into());
+    context.insert("memory_event_idx".into(), memory_event_idx.into());
+    context.insert("step".into(), event.step_idx.into());
+    context.insert("pc".into(), u64::from(event.pc).into());
+    context.insert("opcode".into(), u64::from(event.word).into());
+    context.insert("mnemonic".into(), event.opcode.clone().into());
+    context.insert("rd".into(), rd.into());
+    context.insert("selector_before".into(), before.into());
+    context.insert("selector_after".into(), after.into());
+    Some(SemanticMutationReceipt {
+        inject_kind: READ_WRITE_OP_SELECTOR_INJECT_KIND.to_string(),
+        site: "memory_read_write.op_a_0".to_string(),
+        field: "instruction.op_a_0".to_string(),
+        step: event.step_idx,
+        before: before.into(),
+        after: after.into(),
+        effect: SemanticMutationEffect {
+            relation: SemanticMutationRelation::OpcodeSelectorEquation,
+            preserved_before: None,
+            preserved_after: None,
+            context,
+        },
+    })
 }
 
 fn run_one(
@@ -579,6 +678,7 @@ fn run_one(
             error: None,
             observed_injection_sites,
             injection_applied: false,
+            semantic_mutation_receipt: None,
             executed_insns,
         });
     }
@@ -604,6 +704,10 @@ fn run_one(
                 error: Some(e),
                 observed_injection_sites,
                 injection_applied: injection_applied_from_site_metadata(),
+                semantic_mutation_receipt: semantic_opcode_selector_receipt(
+                    inject_kind,
+                    &executed_insns,
+                ),
                 executed_insns,
             });
         }
@@ -616,6 +720,10 @@ fn run_one(
                 error: Some(format!("prove/verify panic: {}", panic_payload_to_string(p.as_ref()))),
                 observed_injection_sites,
                 injection_applied: injection_applied_from_site_metadata(),
+                semantic_mutation_receipt: semantic_opcode_selector_receipt(
+                    inject_kind,
+                    &executed_insns,
+                ),
                 executed_insns,
             });
         }
@@ -629,6 +737,7 @@ fn run_one(
         error: if verify_ok { None } else { Some("verify failed".to_string()) },
         observed_injection_sites,
         injection_applied: injection_applied_from_site_metadata(),
+        semantic_mutation_receipt: semantic_opcode_selector_receipt(inject_kind, &executed_insns),
         executed_insns,
     })
 }
@@ -647,6 +756,7 @@ fn main() {
                 error: Some("failed to read stdin".to_string()),
                 observed_injection_sites: BTreeMap::new(),
                 injection_applied: false,
+                semantic_mutation_receipt: None,
                 executed_insns: Vec::new(),
             })
             .unwrap_or_else(|_| "{\"error\":\"failed to serialize error\"}".to_string())
@@ -668,6 +778,7 @@ fn main() {
                     error: Some(format!("invalid request json: {e}")),
                     observed_injection_sites: BTreeMap::new(),
                     injection_applied: false,
+                    semantic_mutation_receipt: None,
                     executed_insns: Vec::new(),
                 })
                 .unwrap_or_else(|_| "{\"error\":\"failed to serialize error\"}".to_string())
@@ -688,6 +799,7 @@ fn main() {
             error: Some(e),
             observed_injection_sites: BTreeMap::new(),
             injection_applied: false,
+            semantic_mutation_receipt: None,
             executed_insns: Vec::new(),
         },
         Err(p) => RunnerResponse {
@@ -698,6 +810,7 @@ fn main() {
             error: Some(format!("runner panic: {}", panic_payload_to_string(p.as_ref()))),
             observed_injection_sites: BTreeMap::new(),
             injection_applied: false,
+            semantic_mutation_receipt: None,
             executed_insns: Vec::new(),
         },
     };
@@ -718,4 +831,65 @@ fn panic_payload_to_string(p: &(dyn std::any::Any + Send)) -> String {
         return s.clone();
     }
     "non-string panic payload".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn executed(step_idx: u64, word: u32, opcode: &str) -> ExecutedInsn {
+        ExecutedInsn {
+            step_idx,
+            chunk: 1,
+            clk: step_idx as u32 * 4,
+            pc: 0x1000 + step_idx as u32 * 4,
+            next_pc: 0x1004 + step_idx as u32 * 4,
+            word,
+            opcode: opcode.to_string(),
+            a: 0,
+            b: 0,
+            c: 0,
+            memory: Some(0),
+            ecall_syscall_id: None,
+            ecall_operand_to_check: None,
+        }
+    }
+
+    #[test]
+    fn opcode_receipt_uses_the_executed_global_step_not_memory_ordinal() {
+        assert_eq!(opcode_selector_injection_step(Opcode::LW, 3, 12), Some(3));
+        assert_eq!(opcode_selector_injection_step(Opcode::LW, 0, 12), None);
+        assert_eq!(opcode_selector_injection_step(Opcode::SW, 3, 12), None);
+
+        std::env::set_var("BEAK_PICO_OPCODE_SELECTOR_MUTATION_STEP", "3");
+        std::env::set_var("BEAK_PICO_OPCODE_SELECTOR_MEMORY_EVENT_INDEX", "1");
+        std::env::set_var("BEAK_PICO_OPCODE_SELECTOR_BEFORE", "0");
+        std::env::set_var("BEAK_PICO_OPCODE_SELECTOR_AFTER", "1");
+        let events = [executed(2, 0x00a2_a023, "sw"), executed(3, 0x0002_a603, "lw")];
+        let receipt =
+            semantic_opcode_selector_receipt(Some(READ_WRITE_OP_SELECTOR_INJECT_KIND), &events)
+                .expect("typed receipt");
+        assert_eq!(receipt.step, 3);
+        assert_eq!(receipt.effect.context.get("mutation_step"), Some(&serde_json::json!(3)));
+        assert_eq!(receipt.effect.context.get("memory_event_idx"), Some(&serde_json::json!(1)));
+        assert_eq!(receipt.effect.context.get("step"), Some(&serde_json::json!(3)));
+        assert_eq!(receipt.effect.context.get("opcode"), Some(&serde_json::json!(0x0002_a603u64)));
+
+        assert!(semantic_opcode_selector_receipt(Some(OP_SELECTOR_INJECT_KIND), &events).is_none());
+        std::env::set_var("BEAK_PICO_OPCODE_SELECTOR_MUTATION_STEP", "1");
+        assert!(semantic_opcode_selector_receipt(
+            Some(READ_WRITE_OP_SELECTOR_INJECT_KIND),
+            &events
+        )
+        .is_none());
+        std::env::remove_var("BEAK_PICO_OPCODE_SELECTOR_AFTER");
+        assert!(semantic_opcode_selector_receipt(
+            Some(READ_WRITE_OP_SELECTOR_INJECT_KIND),
+            &events
+        )
+        .is_none());
+        std::env::remove_var("BEAK_PICO_OPCODE_SELECTOR_MUTATION_STEP");
+        std::env::remove_var("BEAK_PICO_OPCODE_SELECTOR_MEMORY_EVENT_INDEX");
+        std::env::remove_var("BEAK_PICO_OPCODE_SELECTOR_BEFORE");
+    }
 }

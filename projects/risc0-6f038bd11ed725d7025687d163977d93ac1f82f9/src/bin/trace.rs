@@ -90,6 +90,12 @@ fn main() {
             if let Some(err) = &resp.backend_error {
                 println!("  backend_error = {err}");
             }
+            if let Some(receipt) = &resp.executed_exception_receipt {
+                println!(
+                    "  executed_exception_receipt = {}",
+                    serde_json::to_string(receipt).unwrap()
+                );
+            }
             if matches.get_flag("print_buckets") {
                 for hit in &resp.bucket_hits {
                     println!(

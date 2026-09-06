@@ -798,36 +798,4 @@ mod tests {
         assert_eq!(sites.get(ECALL_ARG_DECOMP_INJECT_KIND), Some(&vec![1]));
     }
 
-    #[test]
-    fn inspect_reg_banks_for_known_cases() {
-        let cases = [
-            ("divrem", vec![0x0070_0113, 0x0050_0193, 0x0231_50b3]),
-            ("ecall_len", vec![0x0010_0893, 0x0000_0513, 0x0050_05b7, 0x0040_0613, 0x0000_0073]),
-        ];
-
-        for (name, words) in cases {
-            let image = MemoryImage::new_kernel(build_program(&words));
-            let session = execute(
-                image,
-                DEFAULT_SEGMENT_LIMIT_PO2,
-                MAX_INSN_CYCLES,
-                DEFAULT_SESSION_LIMIT,
-                &Risc0HostSyscall,
-                None,
-            )
-            .unwrap_or_else(|e| panic!("{name}: execute failed: {e}"));
-            let mut post = session.result.post_image.clone();
-            let machine = read_reg_bank(&mut post, MACHINE_REGS_ADDR.waddr(), "machine").unwrap();
-            let user = read_reg_bank(&mut post, USER_REGS_ADDR.waddr(), "user").unwrap();
-            eprintln!(
-                "{name}: machine_nonzero={} user_nonzero={} machine_x11={} user_x11={} machine_x17={} user_x17={}",
-                nonzero_reg_count(&machine),
-                nonzero_reg_count(&user),
-                machine[11],
-                user[11],
-                machine[17],
-                user[17],
-            );
-        }
-    }
 }

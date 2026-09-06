@@ -30,5 +30,6 @@ openvm-sdk = { path = "../../beak-py/out/openvm-336f1a475e5aa3513c4c5a266399f412
 openvm-circuit = { path = "../../beak-py/out/openvm-336f1a475e5aa3513c4c5a266399f4128c119bba/openvm-src/crates/vm" }
 openvm-transpiler = { path = "../../beak-py/out/openvm-336f1a475e5aa3513c4c5a266399f4128c119bba/openvm-src/crates/toolchain/transpiler" }
 openvm-rv32im-transpiler = { path = "../../beak-py/out/openvm-336f1a475e5aa3513c4c5a266399f4128c119bba/openvm-src/extensions/rv32im/transpiler" }
+openvm-bigint-transpiler = { path = "../../beak-py/out/openvm-336f1a475e5aa3513c4c5a266399f4128c119bba/openvm-src/extensions/bigint/transpiler" }
 openvm-instructions = { path = "../../beak-py/out/openvm-336f1a475e5aa3513c4c5a266399f4128c119bba/openvm-src/crates/toolchain/instructions" }
 openvm-stark-backend = { git = "https://github.com/openvm-org/stark-backend.git", tag = "v1.0.0-rc.0" }

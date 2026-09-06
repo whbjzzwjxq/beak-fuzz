@@ -1,22 +1,23 @@
 use beak_core::fuzz::benchmark::{
-    BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
+    BackendEval, BenchmarkBackend, ExecutedExceptionEffect, ExecutedExceptionReceipt,
+    InjectionSchedule, SemanticInjectionCandidate, SemanticMutationReceipt,
+    SemanticMutationRelation,
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
-use beak_core::trace::{semantic, Trace, TraceSignal};
+use beak_core::trace::{Trace, TraceSignal, semantic};
 
 use crate::trace::OpenVMTrace;
 use openvm_circuit::arch::VmExecutor;
+use openvm_instructions::{LocalOpcode, SystemOpcode};
 use openvm_instructions::exe::VmExe;
 use openvm_instructions::instruction::Instruction;
 use openvm_instructions::program::Program;
-use openvm_instructions::riscv::{RV32_MEMORY_AS, RV32_REGISTER_AS, RV32_REGISTER_NUM_LIMBS};
-use openvm_instructions::LocalOpcode;
-use openvm_instructions::SystemOpcode;
-use openvm_instructions::VmOpcode;
+use openvm_instructions::riscv::{RV32_REGISTER_AS};
+use openvm_bigint_transpiler::Int256TranspilerExtension;
 use openvm_rv32im_transpiler::{Rv32ITranspilerExtension, Rv32MTranspilerExtension};
 use openvm_sdk::config::{AppConfig, SdkVmConfig};
 use openvm_sdk::prover::AppProver;
-use openvm_sdk::{Sdk, StdIn, F};
+use openvm_sdk::{F, Sdk, StdIn};
 use openvm_stark_backend::p3_field::{FieldAlgebra, PrimeField32};
 use openvm_transpiler::transpiler::Transpiler;
 use serde::{Deserialize, Serialize};
@@ -27,29 +28,50 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-// Valid RV32 ADDI x0,x0 marker words that keep the shared beak-fuzz seed loader ordinary
-// while selecting a project-local OpenVM direct BigInt BLT256 frontend in this backend.
-pub const BIGINT_BLT256_FRONTEND_WORDS: [u32; 4] =
-    [0x3360_0013, 0x0f10_0013, 0x4250_0013, 0x0010_0013];
+const INT256_CUSTOM_OPCODE: u32 = 0x0b;
+const INT256_ALU_FUNCT3: u32 = 0b101;
+const INT256_BEQ_FUNCT3: u32 = 0b110;
+const INT256_BRANCH256_FUNCT3: u32 = 0b111;
+const BIGINT_BRANCH_GLOBAL_OPCODE: u64 = 0x425;
+const BIGINT_BRANCH_CHIP_OFFSET: u64 = 0x408;
+const BIGINT_BRANCH_LOCAL_OPCODE: u64 =
+    BIGINT_BRANCH_GLOBAL_OPCODE - BIGINT_BRANCH_CHIP_OFFSET;
+const BIGINT_BRANCH_STAGE: &str = "openvm.bigint.branch_less_than_opcode_conversion";
+const BIGINT_BRANCH_TRACE_SOURCE: &str =
+    "extensions/rv32im/circuit/src/branch_lt/core.rs::execute_instruction";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenVmFrontend {
     Rv32,
-    BigIntBranchLessThan256,
+    Int256,
 }
 
 impl OpenVmFrontend {
     fn detect(words: &[u32]) -> Self {
-        if words == BIGINT_BLT256_FRONTEND_WORDS {
-            Self::BigIntBranchLessThan256
+        if words.iter().copied().any(is_int256_frontend_word) {
+            Self::Int256
         } else {
             Self::Rv32
         }
     }
 
     fn needs_bigint(self) -> bool {
-        matches!(self, Self::BigIntBranchLessThan256)
+        matches!(self, Self::Int256)
     }
+}
+
+fn is_branch256_family_word(word: u32) -> bool {
+    word & 0x7f == INT256_CUSTOM_OPCODE
+        && (word >> 12) & 0x7 == INT256_BRANCH256_FUNCT3
+}
+
+fn is_native_int256_word(word: u32) -> bool {
+    word & 0x7f == INT256_CUSTOM_OPCODE
+        && matches!((word >> 12) & 0x7, INT256_ALU_FUNCT3 | INT256_BEQ_FUNCT3)
+}
+
+fn is_int256_frontend_word(word: u32) -> bool {
+    is_branch256_family_word(word) || is_native_int256_word(word)
 }
 
 fn build_vm_config(frontend: OpenVmFrontend) -> SdkVmConfig {
@@ -112,76 +134,21 @@ fn parse_init_memory_env() -> Result<BTreeMap<(u32, u32), F>, String> {
     Ok(init_memory)
 }
 
-fn write_init_u32(
-    init_memory: &mut BTreeMap<(u32, u32), F>,
-    address_space: u32,
-    ptr: u32,
-    value: u32,
-) {
-    for (idx, byte) in value.to_le_bytes().into_iter().enumerate() {
-        init_memory.insert((address_space, ptr + idx as u32), F::from_canonical_u8(byte));
-    }
-}
-
-fn write_init_bytes(
-    init_memory: &mut BTreeMap<(u32, u32), F>,
-    address_space: u32,
-    ptr: u32,
-    bytes: &[u8],
-) {
-    for (idx, byte) in bytes.iter().copied().enumerate() {
-        init_memory.insert((address_space, ptr + idx as u32), F::from_canonical_u8(byte));
-    }
-}
-
-fn build_bigint_branch_less_than_256_exe() -> Result<std::sync::Arc<VmExe<F>>, String> {
-    const RV32_BRANCH_LESS_THAN_256_CLASS_OFFSET: usize = 0x425;
-    const BLT_LOCAL_OPCODE: usize = 0;
-
-    let mut instructions = vec![Instruction::new(
-        VmOpcode::from_usize(RV32_BRANCH_LESS_THAN_256_CLASS_OFFSET + BLT_LOCAL_OPCODE),
-        F::from_canonical_usize(RV32_REGISTER_NUM_LIMBS),
-        F::from_canonical_usize(2 * RV32_REGISTER_NUM_LIMBS),
-        F::from_canonical_u32(4),
-        F::from_canonical_u32(RV32_REGISTER_AS),
-        F::from_canonical_u32(RV32_MEMORY_AS),
-        F::ZERO,
-        F::ZERO,
-    )];
-    instructions.push(Instruction::from_usize(SystemOpcode::TERMINATE.global_opcode(), [0, 0, 0]));
-
-    let lhs_ptr = 128u32;
-    let rhs_ptr = 160u32;
-    let mut lhs = [0u8; 32];
-    lhs[0] = 1;
-    let mut rhs = [0u8; 32];
-    rhs[0] = 2;
-
-    let mut init_memory = BTreeMap::new();
-    write_init_u32(&mut init_memory, RV32_REGISTER_AS, RV32_REGISTER_NUM_LIMBS as u32, lhs_ptr);
-    write_init_u32(
-        &mut init_memory,
-        RV32_REGISTER_AS,
-        (2 * RV32_REGISTER_NUM_LIMBS) as u32,
-        rhs_ptr,
-    );
-    write_init_bytes(&mut init_memory, RV32_MEMORY_AS, lhs_ptr, &lhs);
-    write_init_bytes(&mut init_memory, RV32_MEMORY_AS, rhs_ptr, &rhs);
-
-    let program = Program::from_instructions(&instructions);
-    let exe = VmExe::new(program).with_init_memory(init_memory);
-    Ok(std::sync::Arc::new(exe))
-}
-
-fn build_rv32_exe(words: &[u32]) -> Result<std::sync::Arc<VmExe<F>>, String> {
-    let transpiler = Transpiler::<F>::default()
+fn build_exe(words: &[u32], frontend: OpenVmFrontend) -> Result<std::sync::Arc<VmExe<F>>, String> {
+    let rv32_transpiler = Transpiler::<F>::default()
         .with_extension(Rv32ITranspilerExtension)
         .with_extension(Rv32MTranspilerExtension);
-    let transpiled = transpiler.transpile(words).map_err(|e| format!("transpile failed: {e:?}"))?;
+    let int256_transpiler = Transpiler::<F>::default().with_extension(Int256TranspilerExtension);
 
     let mut instructions: Vec<Instruction<F>> = Vec::new();
-    for opt in transpiled.into_iter().flatten() {
-        instructions.push(opt);
+    for word in words.iter().copied() {
+        let transpiled = if frontend.needs_bigint() && is_int256_frontend_word(word) {
+            int256_transpiler.transpile(&[word])
+        } else {
+            rv32_transpiler.transpile(&[word])
+        }
+        .map_err(|e| format!("transpile failed for {word:08x}: {e:?}"))?;
+        instructions.extend(transpiled.into_iter().flatten());
     }
     instructions.push(Instruction::from_usize(SystemOpcode::TERMINATE.global_opcode(), [0, 0, 0]));
 
@@ -192,13 +159,6 @@ fn build_rv32_exe(words: &[u32]) -> Result<std::sync::Arc<VmExe<F>>, String> {
         exe = exe.with_init_memory(init_memory);
     }
     Ok(std::sync::Arc::new(exe))
-}
-
-fn build_exe(words: &[u32], frontend: OpenVmFrontend) -> Result<std::sync::Arc<VmExe<F>>, String> {
-    match frontend {
-        OpenVmFrontend::Rv32 => build_rv32_exe(words),
-        OpenVmFrontend::BigIntBranchLessThan256 => build_bigint_branch_less_than_256_exe(),
-    }
 }
 
 fn is_openvm_supported_rv32_word(_word: u32) -> bool {
@@ -224,6 +184,112 @@ pub struct WorkerResponse {
     pub backend_error: Option<String>,
     pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pub injection_applied: bool,
+    pub semantic_mutation_receipt: Option<SemanticMutationReceipt>,
+    pub executed_exception_receipt: Option<ExecutedExceptionReceipt>,
+}
+
+fn bigint_opcode_conversion_failure_response(
+    request_id: u64,
+    backend_error: String,
+    attempts: Vec<serde_json::Value>,
+) -> Option<WorkerResponse> {
+    // Evidence is accepted only from the concrete installed conversion hook. Input words and
+    // panic strings are deliberately not consulted, and duplicate/stale attempts fail closed.
+    let [attempt] = attempts.as_slice() else {
+        return None;
+    };
+    let attempt = attempt.as_object()?;
+    let exact_str = |key: &str, expected: &str| {
+        attempt.get(key).and_then(|value| value.as_str()) == Some(expected)
+    };
+    let global_opcode = attempt.get("global_opcode")?.as_u64()?;
+    let chip_class_offset = attempt.get("chip_class_offset")?.as_u64()?;
+    let local_opcode = attempt.get("local_opcode")?.as_u64()?;
+    let step = attempt.get("step")?.as_u64()?;
+    let from_pc = attempt.get("from_pc")?.as_u64()?;
+    let supported = attempt.get("supported_local_opcodes")?;
+    let exact_identity = exact_str("effect", "bigint_opcode_conversion")
+        && exact_str("obligation_id", "id4")
+        && exact_str("cell_id", "id4.branch")
+        && exact_str("stage", BIGINT_BRANCH_STAGE)
+        && exact_str("trace_source", BIGINT_BRANCH_TRACE_SOURCE)
+        && exact_str("conversion_target", "BranchLessThanOpcode")
+        && exact_str("relation", "local_opcode_not_in_branch_less_than_domain")
+        && exact_str("backend", "openvm")
+        && exact_str("commit", "336f1a475e5aa3513c4c5a266399f4128c119bba")
+        && attempt.get("hook_fired").and_then(|value| value.as_bool()) == Some(true)
+        && attempt.get("relation_valid").and_then(|value| value.as_bool()) == Some(true);
+    let exact_domain = global_opcode == BIGINT_BRANCH_GLOBAL_OPCODE
+        && chip_class_offset == BIGINT_BRANCH_CHIP_OFFSET
+        && local_opcode == BIGINT_BRANCH_LOCAL_OPCODE
+        && global_opcode.checked_sub(chip_class_offset) == Some(local_opcode)
+        && supported == &serde_json::json!([0, 1, 2, 3])
+        && !(0..=3).contains(&local_opcode)
+        && from_pc <= u32::MAX as u64;
+    if !exact_identity || !exact_domain {
+        return None;
+    }
+
+    let mut details = std::collections::HashMap::new();
+    for key in [
+        "obligation_id",
+        "cell_id",
+        "local_opcode",
+        "global_opcode",
+        "chip_class_offset",
+        "supported_local_opcodes",
+        "conversion_target",
+        "relation",
+        "relation_valid",
+        "backend",
+        "commit",
+        "trace_source",
+        "from_pc",
+    ] {
+        details.insert(key.to_string(), attempt.get(key)?.clone());
+    }
+    details.insert("step_idx".to_string(), serde_json::json!(step));
+    details.insert("op_idx".to_string(), serde_json::json!(step));
+
+    let mut context = serde_json::Map::new();
+    for key in [
+        "local_opcode",
+        "global_opcode",
+        "chip_class_offset",
+        "supported_local_opcodes",
+        "conversion_target",
+        "relation",
+        "relation_valid",
+        "hook_fired",
+        "backend",
+        "commit",
+        "trace_source",
+        "from_pc",
+    ] {
+        context.insert(key.to_string(), attempt.get(key)?.clone());
+    }
+    Some(WorkerResponse {
+        request_id,
+        final_regs: None,
+        micro_op_count: 0,
+        bucket_hits: vec![beak_core::trace::BucketHit::semantic(
+            semantic::decode::FIELD_RANGE,
+            details,
+        )],
+        trace_signals: Vec::new(),
+        backend_error: Some(backend_error),
+        observed_injection_sites: BTreeMap::new(),
+        injection_applied: false,
+        semantic_mutation_receipt: None,
+        executed_exception_receipt: Some(ExecutedExceptionReceipt {
+            effect: ExecutedExceptionEffect::BigIntOpcodeConversion,
+            obligation_id: attempt.get("obligation_id")?.as_str()?.to_string(),
+            cell_id: attempt.get("cell_id")?.as_str()?.to_string(),
+            stage: attempt.get("stage")?.as_str()?.to_string(),
+            step,
+            context,
+        }),
+    })
 }
 
 const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
@@ -234,11 +300,7 @@ fn base_inject_kind(kind: &str) -> &str {
 }
 
 fn inject_kind_with_variant(kind: &str, variant: &str) -> String {
-    if variant.is_empty() {
-        kind.to_string()
-    } else {
-        format!("{kind}::{variant}")
-    }
+    if variant.is_empty() { kind.to_string() } else { format!("{kind}::{variant}") }
 }
 
 pub fn run_backend_once(
@@ -271,6 +333,7 @@ pub fn run_backend_once(
     }
     fuzzer_utils::configure_witness_injection(inject_kind, inject_step);
     let _ = fuzzer_utils::take_json_logs();
+    let _ = fuzzer_utils::take_executed_exception_attempts();
 
     let frontend = OpenVmFrontend::detect(words);
     let t0 = Instant::now();
@@ -306,13 +369,27 @@ pub fn run_backend_once(
 
     let t2 = Instant::now();
     let input = StdIn::default();
-    let vm_result = app_vm
-        .execute_and_generate_with_cached_program(app_committed_exe.clone(), input)
-        .map_err(|e| {
+    let vm_result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        app_vm.execute_and_generate_with_cached_program(app_committed_exe.clone(), input)
+    })) {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => {
             let msg = format!("execute_and_generate_with_cached_program failed: {e:?}");
             eval.backend_error = Some(msg.clone());
-            msg
-        })?;
+            return Err(msg);
+        }
+        Err(payload) => {
+            let attempts = fuzzer_utils::take_executed_exception_attempts();
+            if let Some(response) = bigint_opcode_conversion_failure_response(
+                request_id,
+                "execute_and_generate_with_cached_program panicked".to_string(),
+                attempts,
+            ) {
+                return Ok(response);
+            }
+            std::panic::resume_unwind(payload)
+        }
+    };
     let _ms_trace_only = t2.elapsed().as_millis();
 
     let t3 = Instant::now();
@@ -354,6 +431,13 @@ pub fn run_backend_once(
     let t4 = Instant::now();
     let observed_injection_sites = fuzzer_utils::take_observed_witness_sites();
     let mut applied_injection_sites = fuzzer_utils::take_applied_witness_sites();
+    // Successful execution cannot carry conversion-exception evidence into a later run.
+    let _ = fuzzer_utils::take_executed_exception_attempts();
+    let mut semantic_mutation_receipt: Option<SemanticMutationReceipt> =
+        fuzzer_utils::take_semantic_mutation_receipt()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| format!("invalid semantic mutation receipt: {e}"))?;
     let logs = fuzzer_utils::take_json_logs();
     let _ms_take_logs = t4.elapsed().as_millis();
     let _logs_len = logs.len();
@@ -369,6 +453,94 @@ pub fn run_backend_once(
         Err(e) => {
             let _ms_parse = t5.elapsed().as_millis();
             eval.backend_error = Some(e.clone());
+        }
+    }
+    if let Some(receipt) = semantic_mutation_receipt.as_mut() {
+        let bucket_id = receipt
+            .effect
+            .context
+            .get("bucket_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let hit = match receipt.effect.relation {
+            SemanticMutationRelation::FullLimbValueRepresentation => {
+                let value = receipt.effect.context.get("value").and_then(|value| value.as_u64());
+                eval.bucket_hits
+                    .iter()
+                    .filter(|hit| {
+                        hit.bucket_id == bucket_id
+                            && hit.details.get("imm").and_then(|value| value.as_u64()) == value
+                    })
+                    .last()
+            }
+            SemanticMutationRelation::DivisionRemainderSpecialCaseEquation => {
+                let dividend =
+                    receipt.effect.context.get("dividend_word").and_then(|value| value.as_u64());
+                let divisor =
+                    receipt.effect.context.get("divisor_word").and_then(|value| value.as_u64());
+                eval.bucket_hits
+                    .iter()
+                    .filter(|hit| {
+                        hit.bucket_id == bucket_id
+                            && hit.details.get("rs1_val").and_then(|value| value.as_u64())
+                                == dividend
+                            && hit.details.get("rs2_val").and_then(|value| value.as_u64())
+                                == divisor
+                    })
+                    .last()
+            }
+            _ => eval.bucket_hits.iter().find(|hit| {
+                hit.bucket_id == bucket_id
+                    && hit.details.get("op_idx").and_then(|value| value.as_u64())
+                        == Some(receipt.step)
+            }),
+        };
+        if let Some(hit) = hit {
+            if matches!(
+                receipt.effect.relation,
+                SemanticMutationRelation::FullLimbValueRepresentation
+                    | SemanticMutationRelation::DivisionRemainderSpecialCaseEquation
+            ) {
+                if let Some(op_idx) = hit.details.get("op_idx").and_then(|value| value.as_u64()) {
+                    receipt.step = op_idx;
+                    let key = if receipt.effect.relation
+                        == SemanticMutationRelation::FullLimbValueRepresentation
+                    {
+                        "op_idx"
+                    } else {
+                        "step"
+                    };
+                    receipt.effect.context.insert(key.to_string(), serde_json::json!(op_idx));
+                }
+            }
+            for key in [
+                "obligation_id",
+                "cell_id",
+                "backend",
+                "commit",
+                "trace_source",
+                "pc",
+                "opcode",
+                "mnemonic",
+            ] {
+                // Never let a matched hit overwrite a typed cell/obligation
+                // identity the hook already bound: under a timestamp-origin
+                // shift the ts1 hit legitimately disappears from the injected
+                // trace, and the fallback op_idx match can land on a sibling
+                // cell (e.g. ts3.standard) of the same bucket.
+                if matches!(key, "obligation_id" | "cell_id")
+                    && receipt
+                        .effect
+                        .context
+                        .get(key)
+                        .is_some_and(|existing| hit.details.get(key) != Some(existing))
+                {
+                    continue;
+                }
+                if let Some(value) = hit.details.get(key) {
+                    receipt.effect.context.insert(key.to_string(), value.clone());
+                }
+            }
         }
     }
     for steps in applied_injection_sites.values_mut() {
@@ -396,6 +568,8 @@ pub fn run_backend_once(
         backend_error: eval.backend_error,
         observed_injection_sites,
         injection_applied,
+        semantic_mutation_receipt,
+        executed_exception_receipt: None,
     })
 }
 
@@ -468,61 +642,35 @@ impl OpenVmBackend {
     }
 
     fn o5_variant_specs() -> Vec<String> {
-        let mut specs = Vec::new();
-        for mode in ["byte_bias", "neighbor_copy", "sign_echo", "modulus_bias", "rotate_lane"] {
-            for strength in 0..11u32 {
-                for slot in 0..4u32 {
-                    specs.push(format!("mode={mode},slot={slot},strength={strength}"));
-                }
-            }
-        }
-        for strength in 0..11u32 {
-            for slot in [1u32, 2, 3] {
-                specs.push(format!("mode=collapse_word,slot={slot},strength={strength}"));
-            }
-        }
-        for strength in 0..11u32 {
-            specs.push(format!("mode=collapse_word,slot=0,strength={strength}"));
-        }
-        specs
+        vec!["mode=adjacent_radix_carry,carry_slot=0,borrow_slot=1,radix=256,field_modulus=2013265921,limb_count=4".to_string()]
     }
 
     fn o1_variant_specs() -> Vec<String> {
-        let mut specs = Vec::new();
-        for mode in ["p_plus_mask", "double_modulus_mask", "p_plus_one"] {
-            for rank in 0..30u32 {
-                for strength in 0..8u32 {
-                    specs.push(format!("mode={mode},rank={rank},strength={strength}"));
-                }
-            }
-        }
-        specs
+        // The first nonzero XOR row with a p+1 shadow multiplicity is the exact
+        // audit-o1 mechanism; sweeping ranks/strengths only floods the schedule.
+        vec!["mode=p_plus_one,rank=0,strength=0".to_string()]
     }
 
     fn o7_variant_specs() -> Vec<String> {
-        let mut specs = Vec::new();
-        for mode in [
-            "from_pc_high_single_mod_p",
-            "from_pc_high_stagger_mod_p",
-            "from_pc_high_double_pair_mod_p",
-            "from_pc_high_pair_mod_p",
-            "from_pc_high_pair_mod_p_alt",
-            "single_mod_p",
-            "stagger_mod_p",
-            "double_pair_mod_p",
-            "pair_mod_p",
-        ] {
-            for mult in 1..=2u32 {
-                for strength in 0..24u32 {
-                    for slot in 1..3u32 {
-                        specs.push(format!(
-                            "mode={mode},slot={slot},strength={strength},mult={mult}"
-                        ));
-                    }
-                }
-            }
-        }
-        specs
+        // The installed auipc hook only accepts the single-limb mod-p variant
+        // at strength 0 and mult 1, and only slots 2|3: slot 1's pc_limbs[0]
+        // is covered by the straddling range pair (imm_limbs[2], pc_limbs[0]),
+        // so a +modulus mutation there is rejected by the range check.
+        (2..=3u32)
+            .map(|slot| format!("mode=from_pc_high_single_mod_p,slot={slot},strength=0,mult=1"))
+            .collect()
+    }
+
+    fn timestamp_origin_wrap_variant_specs() -> Vec<String> {
+        // The wrap_origin shape (origin -> modulus-1) is OOD-caught on this
+        // snapshot whenever the carrier performs memory accesses (the ts1
+        // connector observation requires saw_memory_access): re-basing the
+        // OnlineMemory origin unbalances the lt-lookup table and hangs or
+        // fails verify. The workable shape is a coherent +delta shift
+        // propagated across online/offline memory and boundary rows, which
+        // keeps every lookup balanced while breaking the declared-origin
+        // binding (declared INITIAL_TIMESTAMP=0, actual origin=delta).
+        vec!["mode=shift_origin,delta=1".to_string()]
     }
 
     fn o8_variant_specs_for_hit(hit: &beak_core::trace::BucketHit) -> Vec<String> {
@@ -545,7 +693,6 @@ impl OpenVmBackend {
         if is_load {
             domains.push("load");
         }
-        domains.push("any");
 
         let mut specs = Vec::new();
         for domain in domains {
@@ -555,40 +702,17 @@ impl OpenVmBackend {
             specs.push(format!("mode=flip_sign,domain={domain},guard=none"));
         }
 
-        if alt_in_range {
-            specs.push("mode=flip_sign,domain=any,guard=alt_in_range,search=wildcard".to_string());
-        }
-        specs.push("mode=flip_sign,domain=any,guard=none,search=wildcard".to_string());
         specs.dedup();
         specs
     }
 
     fn o15_variant_specs() -> Vec<String> {
-        let mut specs = Vec::new();
-        specs.push("mode=shadow_invalid_one,search=wildcard".to_string());
-        specs.push("mode=lt_diff_bias,slot=0,strength=0,search=wildcard".to_string());
-        // Try the overflow-special-case variants first; the standard o15 seed does not exercise
-        // the zero-divisor-only path, so leading with those variants wastes semantic-search budget.
-        for mode in ["lt_diff_bias", "marker_shift", "r_prime_alias", "flag_zero_divisor"] {
-            for strength in 0..24u32 {
-                for slot in 0..4u32 {
-                    specs.push(format!("mode={mode},slot={slot},strength={strength}"));
-                }
-            }
-        }
-        for mode in [
-            "zero_divisor_only_lt_diff_bias",
-            "zero_divisor_only_marker_shift",
-            "zero_divisor_only_r_prime_alias",
-            "zero_divisor_only_flag_zero_divisor",
-        ] {
-            for strength in 0..20u32 {
-                for slot in 0..4u32 {
-                    specs.push(format!("mode={mode},slot={slot},strength={strength}"));
-                }
-            }
-        }
-        specs
+        // Duplicate-row shadow flag variant: generate_trace appends an
+        // is_valid=0 duplicate of the INT_MIN/-1 divrem row with r_zero=1,
+        // satisfying every per-row constraint while breaking the row-vs-
+        // execution correspondence (the md2.div_overflow special-case flag
+        // lacks an is_valid implication).
+        vec!["mode=duplicate_row_shadow_r_zero,search=wildcard".to_string()]
     }
 
     fn inject_kinds_for_base(inject_kind: &str) -> Vec<String> {
@@ -605,12 +729,35 @@ impl OpenVmBackend {
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
+            "openvm.semantic.time.boundary_origin_consistency" => {
+                Self::timestamp_origin_wrap_variant_specs()
+                    .into_iter()
+                    .map(|variant| inject_kind_with_variant(inject_kind, &variant))
+                    .collect()
+            }
             "openvm.semantic.arithmetic.special_case_consistency" => Self::o15_variant_specs()
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect(),
             _ => vec![inject_kind.to_string()],
         }
+    }
+
+    fn monotonic_timestamp_variant_for_hit(hit: &beak_core::trace::BucketHit) -> Option<String> {
+        let cell_id = hit.details.get("cell_id")?.as_str()?;
+        let previous_timestamp = hit.details.get("previous_timestamp")?.as_u64()?;
+        let timestamp = hit.details.get("timestamp")?.as_u64()?;
+        let ts_diff = hit.details.get("ts_diff")?.as_u64()?;
+        if previous_timestamp >= timestamp || timestamp - previous_timestamp != ts_diff {
+            return None;
+        }
+        let cell_matches = match cell_id {
+            "ts2.consecutive" => ts_diff == 1,
+            "ts2.small_gap" => ts_diff <= 16,
+            "ts2.large_gap" => ts_diff >= 128,
+            _ => false,
+        };
+        cell_matches.then(|| format!("cell_id={cell_id}"))
     }
 
     fn semantic_candidate_from_hit(
@@ -632,7 +779,7 @@ impl OpenVmBackend {
                     semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.semantic_class,
                     "openvm.semantic.alu.immediate_limb_consistency",
                     InjectionSchedule::AroundAnchor(anchor),
-                    true,
+                    false,
                 )
             } else if bucket_id == semantic::decode::ZERO_REGISTER_IMMUTABILITY.id {
                 (
@@ -666,6 +813,13 @@ impl OpenVmBackend {
                 (
                     semantic::lookup::BOOLEAN_MULTIPLICITY.semantic_class,
                     "openvm.semantic.lookup.boolean_multiplicity",
+                    InjectionSchedule::AroundAnchor(anchor),
+                    false,
+                )
+            } else if bucket_id == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id {
+                (
+                    semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.semantic_class,
+                    "openvm.semantic.lookup.xor_multiplicity_consistency",
                     InjectionSchedule::AroundAnchor(anchor),
                     false,
                 )
@@ -735,7 +889,7 @@ impl OpenVmBackend {
                     semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.semantic_class,
                     "openvm.semantic.arithmetic.special_case_consistency",
                     InjectionSchedule::AroundAnchor(anchor),
-                    true,
+                    false,
                 )
             } else if bucket_id == semantic::alu::SHIFT_MOD32.id {
                 (
@@ -787,18 +941,31 @@ impl OpenVmBackend {
                     true,
                 )
             } else if bucket_id == semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.id {
+                // Candidate routing is fail-closed: only the matcher’s typed
+                // ts1.standard cell may reach the timestamp-origin hook.
+                if hit.details.get("obligation_id").and_then(|value| value.as_str()) != Some("ts1")
+                    || hit.details.get("cell_id").and_then(|value| value.as_str())
+                        != Some("ts1.standard")
+                {
+                    return Vec::new();
+                }
                 (
                     semantic::time::BOUNDARY_ORIGIN_CONSISTENCY.semantic_class,
                     "openvm.semantic.time.boundary_origin_consistency",
-                    InjectionSchedule::AroundAnchor(anchor),
-                    true,
+                    // The runtime hook observes the connector witness at the
+                    // stage-local counter, which is not stable across adapter
+                    // rows.  Use the explicit wildcard step so the typed
+                    // ts1.standard candidate reaches the genuine hook while
+                    // retaining fail-closed identity checks above.
+                    InjectionSchedule::Exact(u64::MAX),
+                    false,
                 )
             } else if bucket_id == semantic::time::MONOTONIC_ACCESS_ORDERING.id {
                 (
                     semantic::time::MONOTONIC_ACCESS_ORDERING.semantic_class,
                     "openvm.semantic.time.monotonic_access_ordering",
                     InjectionSchedule::AroundAnchor(anchor),
-                    true,
+                    false,
                 )
             } else if bucket_id == semantic::control::ENTRYPOINT_BINDING.id {
                 (
@@ -827,6 +994,12 @@ impl OpenVmBackend {
         let observed_steps = self
             .last_observed_injection_sites
             .get(base_inject_kind(inject_kind))
+            // An observed-site entry may legitimately be present but empty
+            // when the baseline only exposed the semantic bucket.  Treat
+            // that as "no scheduling hint" so a wildcard candidate keeps
+            // its explicit fallback schedule instead of becoming an empty
+            // schedule that silently skips semantic search.
+            .filter(|steps| !steps.is_empty())
             .map(|steps| Self::ordered_steps_around_anchor(steps, anchor));
         let schedule = observed_steps
             .as_ref()
@@ -834,6 +1007,11 @@ impl OpenVmBackend {
             .unwrap_or(fallback_schedule);
         let inject_kinds = if inject_kind == "openvm.semantic.memory.immediate_sign_consistency" {
             Self::o8_variant_specs_for_hit(hit)
+                .into_iter()
+                .map(|variant| inject_kind_with_variant(inject_kind, &variant))
+                .collect()
+        } else if inject_kind == "openvm.semantic.time.monotonic_access_ordering" {
+            Self::monotonic_timestamp_variant_for_hit(hit)
                 .into_iter()
                 .map(|variant| inject_kind_with_variant(inject_kind, &variant))
                 .collect()
@@ -847,14 +1025,13 @@ impl OpenVmBackend {
                 trigger_signal_id: None,
                 semantic_class: semantic_class.to_string(),
                 inject_kind: kind.clone(),
-                schedule: if inject_kind == "openvm.semantic.arithmetic.special_case_consistency"
-                    && kind.contains("search=wildcard")
-                {
-                    observed_steps
-                        .as_ref()
-                        .and_then(|steps| steps.first().copied())
-                        .map(|step| InjectionSchedule::Explicit(vec![step]))
-                        .unwrap_or_else(|| schedule.clone())
+                schedule: if matches!(
+                    inject_kind,
+                    "openvm.semantic.alu.immediate_limb_consistency"
+                        | "openvm.semantic.arithmetic.special_case_consistency"
+                        | "openvm.semantic.lookup.xor_multiplicity_consistency"
+                ) {
+                    InjectionSchedule::Exact(u64::MAX)
                 } else {
                     schedule.clone()
                 },
@@ -1034,9 +1211,18 @@ impl BenchmarkBackend for OpenVmBackend {
         if words.len() > self.max_instructions {
             return false;
         }
-        words
-            .iter()
-            .all(|w| is_openvm_supported_rv32_word(*w) && RV32IMInstruction::from_word(*w).is_ok())
+        words.iter().all(|w| {
+            is_int256_frontend_word(*w)
+                || (is_openvm_supported_rv32_word(*w) && RV32IMInstruction::from_word(*w).is_ok())
+        })
+    }
+
+    fn rv32_oracle_models_words(&self, words: &[u32]) -> bool {
+        !words.iter().copied().any(is_int256_frontend_word)
+    }
+
+    fn admits_seed_word(&self, word: u32) -> bool {
+        is_int256_frontend_word(word) || RV32IMInstruction::from_word(word).is_ok()
     }
 
     fn prepare_for_run(&mut self, _rng_seed: u64) {
@@ -1049,6 +1235,8 @@ impl BenchmarkBackend for OpenVmBackend {
         self.eval.micro_op_count = 0;
         self.eval.final_regs = None;
         self.eval.semantic_injection_applied = false;
+        self.eval.semantic_mutation_receipt = None;
+        self.eval.executed_exception_receipt = None;
         self.last_observed_injection_sites.clear();
         self.last_words = words.to_vec();
         self.start_worker()?;
@@ -1107,6 +1295,8 @@ impl BenchmarkBackend for OpenVmBackend {
         self.eval.backend_error = worker_resp.backend_error.clone();
         self.eval.final_regs = worker_resp.final_regs;
         self.eval.semantic_injection_applied = worker_resp.injection_applied;
+        self.eval.semantic_mutation_receipt = worker_resp.semantic_mutation_receipt;
+        self.eval.executed_exception_receipt = worker_resp.executed_exception_receipt;
         self.last_observed_injection_sites = worker_resp.observed_injection_sites;
 
         match worker_resp.final_regs {
@@ -1130,24 +1320,48 @@ impl BenchmarkBackend for OpenVmBackend {
         Ok(())
     }
 
+    fn semantic_mutation_relation(
+        &self,
+        candidate: &SemanticInjectionCandidate,
+    ) -> Option<SemanticMutationRelation> {
+        match base_inject_kind(&candidate.inject_kind) {
+            "openvm.semantic.alu.immediate_limb_consistency" => {
+                Some(SemanticMutationRelation::FullLimbValueRepresentation)
+            }
+            "openvm.semantic.row.padding_interaction_send" => {
+                Some(SemanticMutationRelation::PaddingInteractionSend)
+            }
+            "openvm.semantic.lookup.xor_multiplicity_consistency" => {
+                Some(SemanticMutationRelation::ShadowLookupMultiplicity)
+            }
+            "openvm.semantic.lookup.boolean_multiplicity" => {
+                Some(SemanticMutationRelation::BooleanSourceSelector)
+            }
+            "openvm.semantic.control.auipc_pc_limb_consistency" => {
+                Some(SemanticMutationRelation::AuipcPcLimbRepresentation)
+            }
+            "openvm.semantic.memory.immediate_sign_consistency" => {
+                Some(SemanticMutationRelation::MemoryImmediateSignEquation)
+            }
+            "openvm.semantic.time.boundary_origin_consistency" => {
+                Some(SemanticMutationRelation::TimestampOriginWrap)
+            }
+            "openvm.semantic.time.monotonic_access_ordering" => {
+                Some(SemanticMutationRelation::WitnessValueChanged)
+            }
+            "openvm.semantic.arithmetic.special_case_consistency" => {
+                Some(SemanticMutationRelation::DivisionRemainderSpecialCaseEquation)
+            }
+            _ => None,
+        }
+    }
+
     fn semantic_injection_candidates(
         &self,
         hits: &[beak_core::trace::BucketHit],
     ) -> Vec<SemanticInjectionCandidate> {
-        let has_boolean_multiplicity =
-            hits.iter().any(|hit| hit.bucket_id == semantic::lookup::BOOLEAN_MULTIPLICITY.id);
-        let has_more_specific_semantic_target = hits.iter().any(|hit| {
-            let bucket_id = hit.bucket_id.as_str();
-            bucket_id == semantic::memory::IMMEDIATE_SIGN_CONSISTENCY.id
-                || bucket_id == semantic::control::AUIPC_PC_LIMB_CONSISTENCY.id
-                || bucket_id == semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.id
-        });
         let mut candidates: Vec<_> = hits
             .iter()
-            .filter(|hit| {
-                !((has_more_specific_semantic_target || has_boolean_multiplicity)
-                    && hit.bucket_id == semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY.id)
-            })
             .flat_map(|hit| self.semantic_candidate_from_hit(hit))
             .collect();
         candidates.sort_by_key(Self::semantic_candidate_priority);
@@ -1158,5 +1372,379 @@ impl BenchmarkBackend for OpenVmBackend {
 impl Drop for OpenVmBackend {
     fn drop(&mut self) {
         self.stop_worker();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use beak_core::fuzz::benchmark::{InjectionSchedule, SemanticMutationRelation};
+    use beak_core::fuzz::bug_filter::has_exact_executed_exception_relation;
+    use beak_core::trace::{BucketHit, semantic};
+    use serde_json::json;
+
+    use super::{
+        BIGINT_BRANCH_GLOBAL_OPCODE, OpenVmBackend, OpenVmFrontend, build_exe,
+        bigint_opcode_conversion_failure_response,
+    };
+
+    fn valid_bigint_conversion_attempt(step: u64, from_pc: u64) -> serde_json::Value {
+        json!({
+            "effect": "bigint_opcode_conversion",
+            "obligation_id": "id4",
+            "cell_id": "id4.branch",
+            "stage": "openvm.bigint.branch_less_than_opcode_conversion",
+            "trace_source": "extensions/rv32im/circuit/src/branch_lt/core.rs::execute_instruction",
+            "conversion_target": "BranchLessThanOpcode",
+            "global_opcode": 0x425,
+            "chip_class_offset": 0x408,
+            "local_opcode": 29,
+            "supported_local_opcodes": [0, 1, 2, 3],
+            "relation": "local_opcode_not_in_branch_less_than_domain",
+            "relation_valid": true,
+            "backend": "openvm",
+            "commit": "336f1a475e5aa3513c4c5a266399f4128c119bba",
+            "from_pc": from_pc,
+            "step": step,
+            "hook_fired": true,
+        })
+    }
+
+    fn boundary_hit(cell_id: &str) -> BucketHit {
+        BucketHit::semantic(
+            semantic::time::BOUNDARY_ORIGIN_CONSISTENCY,
+            HashMap::from([
+                ("obligation_id".to_string(), json!("ts1")),
+                ("cell_id".to_string(), json!(cell_id)),
+                ("op_idx".to_string(), json!(9)),
+            ]),
+        )
+    }
+
+    fn monotonic_hit(cell_id: &str, previous: u64, timestamp: u64, diff: u64) -> BucketHit {
+        BucketHit::semantic(
+            semantic::time::MONOTONIC_ACCESS_ORDERING,
+            HashMap::from([
+                ("cell_id".to_string(), json!(cell_id)),
+                ("op_idx".to_string(), json!(9)),
+                ("previous_timestamp".to_string(), json!(previous)),
+                ("timestamp".to_string(), json!(timestamp)),
+                ("ts_diff".to_string(), json!(diff)),
+            ]),
+        )
+    }
+
+    #[test]
+    fn timestamp_wrap_routes_only_exact_ts1_origin_hit() {
+        let backend = OpenVmBackend::new(8);
+        let candidates = backend.semantic_candidate_from_hit(&boundary_hit("ts1.standard"));
+
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        match &candidate.schedule {
+            InjectionSchedule::Exact(step) => assert_eq!(*step, u64::MAX),
+            other => panic!("unexpected schedule: {other:?}"),
+        }
+        assert!(
+            candidate
+                .inject_kind
+                .ends_with("::mode=shift_origin,delta=1")
+        );
+        assert!(matches!(
+            beak_core::fuzz::benchmark::BenchmarkBackend::semantic_mutation_relation(
+                &backend, candidate
+            ),
+            Some(SemanticMutationRelation::TimestampOriginWrap)
+        ));
+
+        assert!(backend.semantic_candidate_from_hit(&boundary_hit("ts3.standard")).is_empty());
+        assert!(backend.semantic_candidate_from_hit(&boundary_hit("ts1.after_segment")).is_empty());
+    }
+
+    #[test]
+    fn timestamp_wrap_keeps_fallback_when_observed_site_list_is_empty() {
+        let mut backend = OpenVmBackend::new(8);
+        backend
+            .last_observed_injection_sites
+            .insert("openvm.semantic.time.boundary_origin_consistency".to_string(), Vec::new());
+        let candidates = backend.semantic_candidate_from_hit(&boundary_hit("ts1.standard"));
+        assert_eq!(candidates.len(), 1);
+        assert!(
+            matches!(candidates[0].schedule, InjectionSchedule::Exact(step) if step == u64::MAX)
+        );
+    }
+
+    #[test]
+    fn monotonic_timestamp_routes_typed_cell_and_fails_closed_on_bad_geometry() {
+        let backend = OpenVmBackend::new(8);
+        let candidates =
+            backend.semantic_candidate_from_hit(&monotonic_hit("ts2.consecutive", 10, 11, 1));
+
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert!(candidate.inject_kind.ends_with("::cell_id=ts2.consecutive"));
+        assert!(matches!(
+            beak_core::fuzz::benchmark::BenchmarkBackend::semantic_mutation_relation(
+                &backend, candidate
+            ),
+            Some(SemanticMutationRelation::WitnessValueChanged)
+        ));
+
+        assert!(
+            backend
+                .semantic_candidate_from_hit(&monotonic_hit("ts2.consecutive", 10, 12, 2))
+                .is_empty()
+        );
+        assert!(
+            backend
+                .semantic_candidate_from_hit(&monotonic_hit("ts2.unknown", 10, 11, 1))
+                .is_empty()
+        );
+        assert!(
+            backend
+                .semantic_candidate_from_hit(&monotonic_hit(
+                    "ts2.small_gap",
+                    11,
+                    10,
+                    u32::MAX as u64
+                ))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn memory_sign_variants_route_only_executed_load_or_store_domains() {
+        let load_hit = BucketHit::semantic(
+            semantic::memory::IMMEDIATE_SIGN_CONSISTENCY,
+            HashMap::from([
+                ("op_idx".to_string(), json!(3)),
+                ("is_load".to_string(), json!(true)),
+                ("is_store".to_string(), json!(false)),
+                ("alt_ptr_in_range_29".to_string(), json!(true)),
+            ]),
+        );
+        let variants = OpenVmBackend::o8_variant_specs_for_hit(&load_hit);
+
+        assert!(!variants.is_empty());
+        assert!(variants.iter().all(|variant| variant.contains("domain=load")));
+        assert!(variants.iter().all(|variant| !variant.contains("search=wildcard")));
+        assert!(variants.iter().all(|variant| !variant.contains("domain=any")));
+
+        let unsupported = BucketHit::semantic(
+            semantic::memory::IMMEDIATE_SIGN_CONSISTENCY,
+            HashMap::from([
+                ("is_load".to_string(), json!(false)),
+                ("is_store".to_string(), json!(false)),
+            ]),
+        );
+        assert!(OpenVmBackend::o8_variant_specs_for_hit(&unsupported).is_empty());
+    }
+
+    #[test]
+    fn bigint_exception_receipt_requires_exact_concrete_hook_attempt() {
+        let response = bigint_opcode_conversion_failure_response(
+            7,
+            "opaque backend panic".to_string(),
+            vec![valid_bigint_conversion_attempt(3, 1)],
+        )
+        .expect("exact installed-hook attempt must produce typed evidence");
+        assert_eq!(response.request_id, 7);
+        assert_eq!(response.bucket_hits.len(), 1);
+        let hit = &response.bucket_hits[0];
+        assert_eq!(hit.bucket_id, semantic::decode::FIELD_RANGE.id);
+        assert_eq!(hit.details.get("local_opcode"), Some(&json!(29)));
+        assert_eq!(hit.details.get("relation_valid"), Some(&json!(true)));
+        assert_eq!(hit.details.get("global_opcode"), Some(&json!(0x425)));
+        assert_eq!(hit.details.get("chip_class_offset"), Some(&json!(0x408)));
+        assert!(has_exact_executed_exception_relation(
+            &response.bucket_hits,
+            response.executed_exception_receipt.as_ref(),
+        ));
+        let receipt =
+            response.executed_exception_receipt.expect("typed executed exception receipt");
+        assert_eq!(receipt.obligation_id, "id4");
+        assert_eq!(receipt.cell_id, "id4.branch");
+        assert_eq!(receipt.step, 3);
+        assert_eq!(receipt.context.get("from_pc"), Some(&json!(1)));
+        assert_eq!(receipt.context.get("local_opcode"), Some(&json!(29)));
+        assert_eq!(receipt.context.get("hook_fired"), Some(&json!(true)));
+        assert_eq!(
+            receipt.context.get("trace_source"),
+            Some(&json!(
+                "extensions/rv32im/circuit/src/branch_lt/core.rs::execute_instruction"
+            ))
+        );
+    }
+
+    #[test]
+    fn bigint_exception_receipt_fails_closed_on_missing_duplicate_or_mismatched_attempts() {
+        let classify = |attempts| {
+            bigint_opcode_conversion_failure_response(
+                8,
+                "unrelated or deliberately identical panic text".to_string(),
+                attempts,
+            )
+        };
+        assert!(classify(vec![]).is_none(), "non-fired hook must fail closed");
+        let valid = valid_bigint_conversion_attempt(0, 7);
+        assert!(
+            classify(vec![valid.clone(), valid.clone()]).is_none(),
+            "duplicate/stale attempts must fail closed"
+        );
+
+        for (field, wrong) in [
+            ("hook_fired", json!(false)),
+            ("global_opcode", json!(0x424)),
+            ("chip_class_offset", json!(0x409)),
+            ("local_opcode", json!(28)),
+            ("supported_local_opcodes", json!([0, 1, 2, 4])),
+            ("stage", json!("openvm.bigint.other_stage")),
+            ("step", json!(null)),
+            ("from_pc", json!(-1)),
+            ("trace_source", json!("caller_supplied")),
+            ("backend", json!("not-openvm")),
+            ("commit", json!("stale")),
+            ("obligation_id", json!("id3")),
+            ("cell_id", json!("id4.not_branch")),
+            ("effect", json!("other_effect")),
+            ("relation_valid", json!(false)),
+        ] {
+            let mut attempt = valid.clone();
+            attempt.as_object_mut().unwrap().insert(field.to_string(), wrong);
+            assert!(classify(vec![attempt]).is_none(), "field {field} must fail closed");
+        }
+    }
+
+    #[test]
+    fn branch256_family_word_reaches_real_int256_transpiler_opcode() {
+        // opcode=0x0b (int256 custom), funct3=0b111 (branch256 family), tag=0 (BLT)
+        let words = [0x0000_0013, 0x0000_708b];
+        assert_eq!(OpenVmFrontend::detect(&words), OpenVmFrontend::Int256);
+        let exe = build_exe(&words, OpenVmFrontend::Int256).expect("generic transpilation");
+        let instruction = &exe.program.instructions_and_debug_infos[1]
+            .as_ref()
+            .expect("branch256 word transpiles")
+            .0;
+        assert_eq!(instruction.opcode.as_usize() as u64, BIGINT_BRANCH_GLOBAL_OPCODE);
+
+        assert_eq!(
+            OpenVmFrontend::detect(&[0x0000_0013, 0x0000_4063]),
+            OpenVmFrontend::Rv32,
+            "ordinary RV32 signed BLT must remain on the ordinary RV32 frontend"
+        );
+    }
+
+    #[test]
+    fn scoped_o5_and_o15_routes_expose_only_complete_receipt_variants() {
+        let backend = OpenVmBackend::new(8);
+        assert_eq!(
+            OpenVmBackend::o5_variant_specs(),
+            [
+                "mode=adjacent_radix_carry,carry_slot=0,borrow_slot=1,radix=256,field_modulus=2013265921,limb_count=4"
+            ]
+        );
+        assert_eq!(
+            OpenVmBackend::o15_variant_specs(),
+            ["mode=duplicate_row_shadow_r_zero,search=wildcard"]
+        );
+
+        let o5 = beak_core::fuzz::benchmark::SemanticInjectionCandidate {
+            bucket_id: semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.id.to_string(),
+            trigger_signal_id: None,
+            semantic_class: semantic::alu::IMMEDIATE_LIMB_CONSISTENCY.semantic_class.to_string(),
+            inject_kind: format!(
+                "openvm.semantic.alu.immediate_limb_consistency::{}",
+                OpenVmBackend::o5_variant_specs()[0]
+            ),
+            schedule: InjectionSchedule::Exact(0),
+        };
+        let o15 = beak_core::fuzz::benchmark::SemanticInjectionCandidate {
+            bucket_id: semantic::arithmetic::SPECIAL_CASE_CONSISTENCY.id.to_string(),
+            trigger_signal_id: None,
+            semantic_class: semantic::arithmetic::SPECIAL_CASE_CONSISTENCY
+                .semantic_class
+                .to_string(),
+            inject_kind: format!(
+                "openvm.semantic.arithmetic.special_case_consistency::{}",
+                OpenVmBackend::o15_variant_specs()[0]
+            ),
+            schedule: InjectionSchedule::Exact(0),
+        };
+        assert_eq!(
+            beak_core::fuzz::benchmark::BenchmarkBackend::semantic_mutation_relation(&backend, &o5),
+            Some(SemanticMutationRelation::FullLimbValueRepresentation)
+        );
+        assert_eq!(
+            beak_core::fuzz::benchmark::BenchmarkBackend::semantic_mutation_relation(
+                &backend, &o15
+            ),
+            Some(SemanticMutationRelation::DivisionRemainderSpecialCaseEquation)
+        );
+
+        let o5_hits = backend.semantic_candidate_from_hit(&BucketHit::semantic(
+            semantic::alu::IMMEDIATE_LIMB_CONSISTENCY,
+            HashMap::from([("op_idx".to_string(), json!(2))]),
+        ));
+        assert_eq!(o5_hits.len(), 1);
+        assert!(matches!(o5_hits[0].schedule, InjectionSchedule::Exact(step) if step == u64::MAX));
+
+        let o15_hits = backend.semantic_candidate_from_hit(&BucketHit::semantic(
+            semantic::arithmetic::SPECIAL_CASE_CONSISTENCY,
+            HashMap::from([("op_idx".to_string(), json!(3))]),
+        ));
+        assert_eq!(o15_hits.len(), 1);
+        assert!(matches!(o15_hits[0].schedule, InjectionSchedule::Exact(step) if step == u64::MAX));
+    }
+
+    fn xor_multiplicity_hit() -> BucketHit {
+        BucketHit::semantic(
+            semantic::lookup::XOR_MULTIPLICITY_CONSISTENCY,
+            HashMap::from([
+                ("op_idx".to_string(), json!(2)),
+                ("step_idx".to_string(), json!(9)),
+            ]),
+        )
+    }
+
+    #[test]
+    fn xor_shadow_multiplicity_hit_routes_to_p_plus_one_wildcard_candidate() {
+        let backend = OpenVmBackend::new(8);
+        let candidates = backend.semantic_candidate_from_hit(&xor_multiplicity_hit());
+
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert!(candidate.inject_kind.ends_with("::mode=p_plus_one,rank=0,strength=0"));
+        assert!(matches!(
+            candidate.schedule,
+            InjectionSchedule::Exact(step) if step == u64::MAX
+        ));
+        assert!(matches!(
+            beak_core::fuzz::benchmark::BenchmarkBackend::semantic_mutation_relation(
+                &backend, candidate
+            ),
+            Some(SemanticMutationRelation::ShadowLookupMultiplicity)
+        ));
+    }
+
+    #[test]
+    fn o7_variant_specs_converge_to_installed_hook_slots() {
+        let backend = OpenVmBackend::new(8);
+        assert_eq!(
+            OpenVmBackend::o7_variant_specs(),
+            [
+                "mode=from_pc_high_single_mod_p,slot=2,strength=0,mult=1",
+                "mode=from_pc_high_single_mod_p,slot=3,strength=0,mult=1",
+            ]
+        );
+
+        let candidates = backend.semantic_candidate_from_hit(&BucketHit::semantic(
+            semantic::control::AUIPC_PC_LIMB_CONSISTENCY,
+            HashMap::from([("op_idx".to_string(), json!(4))]),
+        ));
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.inject_kind.contains("mode=from_pc_high_single_mod_p")));
     }
 }

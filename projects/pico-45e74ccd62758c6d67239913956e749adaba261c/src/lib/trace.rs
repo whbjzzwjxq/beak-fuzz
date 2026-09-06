@@ -249,7 +249,9 @@ impl PicoTrace {
                 emit_memory_alignment: false,
                 emit_memory_address_progression: false,
                 emit_load_value_binding: false,
-                emit_opcode_selector_bindings: true,
+                // Pico emits a richer executed-instruction selector hit below.  Keeping the
+                // generic copy makes strict receipt-to-baseline binding ambiguous.
+                emit_opcode_selector_bindings: false,
                 emit_partial_word_write: false,
                 emit_ecall_word_validity: true,
             },

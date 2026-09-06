@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ark_bn254::Fr;
-use beak_core::fuzz::benchmark::{BackendEval, BenchmarkBackend, SemanticInjectionCandidate};
+use beak_core::fuzz::benchmark::{
+    BackendEval, BenchmarkBackend, ExecutedExceptionReceipt, SemanticInjectionCandidate,
+};
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::Trace;
 use common::constants::{
@@ -15,9 +17,11 @@ use jolt_core::host;
 use jolt_core::jolt::vm::rv32i_vm::{RV32IJoltVM, C, M, PCS, RV32I};
 use jolt_core::jolt::vm::{Jolt, JoltTraceStep};
 
-use crate::trace::JoltTrace;
+use crate::trace::{bytecode_boundary_hit_from_receipt, JoltTrace};
 
 const LOOP_FOREVER_WORD: u32 = 0x0000_006f;
+const BYTECODE_BOUNDARY_RECEIPT_ENV: &str = "BEAK_JOLT_BYTECODE_BOUNDARY_RECEIPT";
+const EXECUTED_EXCEPTION_RECEIPT_ENV: &str = "BEAK_JOLT_EXECUTED_EXCEPTION_RECEIPT";
 const T0_REG: u32 = 5;
 const T1_REG: u32 = 6;
 static TEMP_ELF_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -29,6 +33,7 @@ pub struct RunResponse {
     pub bucket_hits: Vec<beak_core::trace::BucketHit>,
     pub backend_error: Option<String>,
     pub injection_applied: bool,
+    pub executed_exception_receipt: Option<ExecutedExceptionReceipt>,
 }
 
 struct JoltExecution {
@@ -227,7 +232,7 @@ fn trace_memory_witness_size(
     trace: &[JoltTraceStep<RV32I>],
     memory_layout: &common::rv_trace::MemoryLayout,
 ) -> usize {
-    trace
+    let max_index = trace
         .iter()
         .flat_map(|step| step.memory_ops.iter())
         .filter_map(|op| match op {
@@ -235,8 +240,13 @@ fn trace_memory_witness_size(
                 remap_memory_address(*address, memory_layout)
             }
         })
-        .max()
-        .map(|idx| memory_layout.ram_witness_offset.saturating_add(idx).max(8) as usize)
+        .max();
+    memory_witness_size_from_max_index(max_index)
+}
+
+fn memory_witness_size_from_max_index(max_index: Option<u64>) -> usize {
+    max_index
+        .map(|idx| idx.saturating_add(1).max(8) as usize)
         .unwrap_or(8)
         .next_power_of_two()
 }
@@ -246,6 +256,23 @@ fn proving_sizes(exec: &JoltExecution) -> (usize, usize, usize) {
     let memory_size = trace_memory_witness_size(&exec.trace, &exec.io_device.memory_layout);
     let trace_size = exec.trace.len().max(8).next_power_of_two();
     (bytecode_size, memory_size, trace_size)
+}
+
+fn append_bytecode_boundary_receipt(
+    hits: &mut Vec<beak_core::trace::BucketHit>,
+    raw: Option<&str>,
+) {
+    if let Some(hit) = raw.and_then(bytecode_boundary_hit_from_receipt) {
+        hits.push(hit);
+    }
+}
+
+fn parse_executed_exception_receipt(
+    raw: Option<&str>,
+) -> Result<Option<ExecutedExceptionReceipt>, String> {
+    raw.map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| format!("invalid executed exception receipt: {e}"))
 }
 
 fn execute_trace(words: &[u32]) -> Result<JoltExecution, String> {
@@ -299,6 +326,36 @@ fn prove_and_verify(exec: JoltExecution) -> Result<Option<String>, String> {
     }
 }
 
+#[cfg(test)]
+mod memory_witness_sizing_tests {
+    use common::constants::{DEFAULT_MAX_INPUT_SIZE, DEFAULT_MAX_OUTPUT_SIZE, RAM_START_ADDRESS};
+
+    use super::{memory_witness_size_from_max_index, remap_memory_address};
+
+    #[test]
+    fn remapped_ram_index_is_sized_without_adding_the_offset_twice() {
+        let layout = common::rv_trace::MemoryLayout::new(
+            DEFAULT_MAX_INPUT_SIZE,
+            DEFAULT_MAX_OUTPUT_SIZE,
+        );
+        let second_ram_byte = RAM_START_ADDRESS + 1;
+        let max_index = remap_memory_address(second_ram_byte, &layout).unwrap();
+
+        assert_eq!(max_index, layout.ram_witness_offset + 1);
+        assert_eq!(
+            memory_witness_size_from_max_index(Some(max_index)),
+            (max_index.saturating_add(1).max(8) as usize).next_power_of_two()
+        );
+    }
+
+    #[test]
+    fn empty_and_small_witness_indices_preserve_the_minimum_size() {
+        assert_eq!(memory_witness_size_from_max_index(None), 8);
+        assert_eq!(memory_witness_size_from_max_index(Some(7)), 8);
+        assert_eq!(memory_witness_size_from_max_index(Some(8)), 16);
+    }
+}
+
 pub fn run_backend_once(
     words: &[u32],
     inject_kind: Option<&str>,
@@ -315,15 +372,102 @@ pub fn run_backend_once(
     let derived = JoltTrace::from_execution(&exec.bytecode)?;
     let final_regs = exec.final_regs;
     let micro_op_count = exec.trace.len();
-    let backend_error = prove_and_verify(exec)?;
+    let previous_receipt = std::env::var_os(BYTECODE_BOUNDARY_RECEIPT_ENV);
+    let previous_exception_receipt = std::env::var_os(EXECUTED_EXCEPTION_RECEIPT_ENV);
+    std::env::remove_var(BYTECODE_BOUNDARY_RECEIPT_ENV);
+    std::env::remove_var(EXECUTED_EXCEPTION_RECEIPT_ENV);
+    let prove_result = prove_and_verify(exec);
+    let boundary_receipt = std::env::var(BYTECODE_BOUNDARY_RECEIPT_ENV).ok();
+    let raw_executed_exception_receipt = std::env::var(EXECUTED_EXCEPTION_RECEIPT_ENV).ok();
+    if let Some(previous) = previous_receipt {
+        std::env::set_var(BYTECODE_BOUNDARY_RECEIPT_ENV, previous);
+    } else {
+        std::env::remove_var(BYTECODE_BOUNDARY_RECEIPT_ENV);
+    }
+    if let Some(previous) = previous_exception_receipt {
+        std::env::set_var(EXECUTED_EXCEPTION_RECEIPT_ENV, previous);
+    } else {
+        std::env::remove_var(EXECUTED_EXCEPTION_RECEIPT_ENV);
+    }
+    let backend_error = prove_result?;
+    let executed_exception_receipt =
+        parse_executed_exception_receipt(raw_executed_exception_receipt.as_deref())?;
+    let mut bucket_hits = derived.bucket_hits().to_vec();
+    append_bytecode_boundary_receipt(&mut bucket_hits, boundary_receipt.as_deref());
 
     Ok(RunResponse {
         final_regs: Some(final_regs),
         micro_op_count,
-        bucket_hits: derived.bucket_hits().to_vec(),
+        bucket_hits,
         backend_error,
         injection_applied: false,
+        executed_exception_receipt,
     })
+}
+
+#[cfg(test)]
+mod baseline_receipt_routing_tests {
+    use beak_core::fuzz::benchmark::BenchmarkBackend;
+
+    use beak_core::fuzz::benchmark::ExecutedExceptionEffect;
+    use beak_core::fuzz::bug_filter::has_exact_executed_exception_relation;
+
+    use super::{append_bytecode_boundary_receipt, parse_executed_exception_receipt, JoltBackend};
+
+    const VALID: &str = r#"{"schema_version":1,"relation":"preprocessed_bytecode_end_crosses_allocated_rows_by_one","table_name":"read_write_memory.v_init","population_start":12,"population_end":17,"population_rows":5,"allocated_rows":16,"boundary_k":4,"exact_crossing":true}"#;
+
+    #[test]
+    fn routes_only_valid_bytecode_boundary_receipts() {
+        let mut hits = Vec::new();
+        append_bytecode_boundary_receipt(&mut hits, Some(VALID));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].details["cell_id"], "pd4.just_over");
+
+        let mut missing = Vec::new();
+        append_bytecode_boundary_receipt(&mut missing, None);
+        assert!(missing.is_empty());
+
+        let mut malformed = Vec::new();
+        append_bytecode_boundary_receipt(&mut malformed, Some("{}"));
+        assert!(malformed.is_empty());
+    }
+
+    #[test]
+    fn baseline_snapshot_exposes_no_semantic_injection_route() {
+        let mut backend = JoltBackend::new(8);
+        assert!(backend.arm_semantic_injection("jolt.semantic.unsupported", 0).is_err());
+    }
+
+    #[test]
+    fn typed_capacity_exception_receipt_is_strict_and_non_injected() {
+        const VALID_EXCEPTION: &str = r#"{"effect":"bytecode_table_capacity_write","obligation_id":"pd4","cell_id":"pd4.just_over","stage":"read_write_memory.v_init.write","step":16,"context":{"backend":"jolt","commit":"6c3b0b49db0afceb967b33656176fa7a27e557b9","trace_source":"jolt.read_write_memory.preprocessed_bytecode","relation":"preprocessed_bytecode_end_crosses_allocated_rows_by_one","relation_valid":true,"failure_observed":true,"failure_manifestation":"capacity_write_out_of_bounds","table_name":"read_write_memory.v_init","population_start":12,"population_end":17,"population_rows":5,"allocated_rows":16,"boundary_k":4,"failing_index":16,"exact_crossing":true}}"#;
+        let receipt = parse_executed_exception_receipt(Some(VALID_EXCEPTION)).unwrap().unwrap();
+        assert_eq!(receipt.effect, ExecutedExceptionEffect::BytecodeTableCapacityWrite);
+        assert_eq!(receipt.step, 16);
+        assert_eq!(receipt.context["table_name"], "read_write_memory.v_init");
+        assert_eq!(receipt.context["failing_index"], 16);
+        let mut hits = Vec::new();
+        append_bytecode_boundary_receipt(&mut hits, Some(VALID));
+        assert!(has_exact_executed_exception_relation(&hits, Some(&receipt)));
+
+        let mut wrong_table = receipt.clone();
+        wrong_table.context.insert(
+            "table_name".to_string(),
+            serde_json::Value::String("other.v_init".to_string()),
+        );
+        assert!(!has_exact_executed_exception_relation(&hits, Some(&wrong_table)));
+
+        let mut missing_table = receipt.clone();
+        missing_table.context.remove("table_name");
+        assert!(!has_exact_executed_exception_relation(&hits, Some(&missing_table)));
+
+        assert!(parse_executed_exception_receipt(None).unwrap().is_none());
+        assert!(parse_executed_exception_receipt(Some("not-json")).is_err());
+        assert!(parse_executed_exception_receipt(Some(
+            r#"{"effect":"bytecode_table_capacity_write","obligation_id":"pd4"}"#,
+        ))
+        .is_err());
+    }
 }
 
 pub struct JoltBackend {
@@ -357,6 +501,7 @@ impl BenchmarkBackend for JoltBackend {
         self.eval.bucket_hits = resp.bucket_hits;
         self.eval.backend_error = resp.backend_error;
         self.eval.semantic_injection_applied = resp.injection_applied;
+        self.eval.executed_exception_receipt = resp.executed_exception_receipt;
         resp.final_regs.ok_or_else(|| "jolt backend returned no final_regs".to_string())
     }
 

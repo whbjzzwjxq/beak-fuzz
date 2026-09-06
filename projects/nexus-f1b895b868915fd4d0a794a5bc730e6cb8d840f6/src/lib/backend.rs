@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use beak_core::fuzz::benchmark::{
-    BackendEval, BenchmarkBackend, InjectionSchedule, SemanticInjectionCandidate,
+    BackendEval, BenchmarkBackend, ExecutedExceptionEffect, ExecutedExceptionReceipt,
+    SemanticInjectionCandidate,
 };
 use beak_core::rv32im::instruction::RV32IMInstruction;
 use beak_core::trace::{BucketHit, Trace, TraceSignal};
@@ -44,6 +45,7 @@ const KIND_SELECTOR_INJECT_KIND: &str = "nexus.semantic.memory.kind_selector_con
 const BEAK_NEXUS_INJECT_KIND_ENV: &str = "BEAK_NEXUS_INJECT_KIND";
 const BEAK_NEXUS_INJECT_STEP_ENV: &str = "BEAK_NEXUS_INJECT_STEP";
 const BEAK_NEXUS_INJECTION_APPLIED_ENV: &str = "BEAK_NEXUS_INJECTION_APPLIED";
+const EXECUTED_EXCEPTION_RECEIPT_ENV: &str = "BEAK_NEXUS_EXECUTED_EXCEPTION_RECEIPT";
 const BEAK_NEXUS_STORE_LOAD_FLOW_ENV: [&str; 3] = [
     "BEAK_NEXUS_STORE_LOAD_FLOW_ADDR",
     "BEAK_NEXUS_STORE_LOAD_FLOW_CLK",
@@ -65,6 +67,119 @@ pub struct RunResponse {
     pub backend_error: Option<String>,
     pub observed_injection_sites: BTreeMap<String, Vec<u64>>,
     pub injection_applied: bool,
+    pub executed_exception_receipt: Option<ExecutedExceptionReceipt>,
+}
+
+fn receipt_context_u64(receipt: &ExecutedExceptionReceipt, key: &str) -> Option<u64> {
+    receipt.context.get(key).and_then(serde_json::Value::as_u64)
+}
+
+fn nexus_mul_carry_1(lhs: u32, rhs: u32) -> u32 {
+    let b = lhs.to_le_bytes().map(u32::from);
+    let c = rhs.to_le_bytes().map(u32::from);
+    let z = std::array::from_fn::<_, 4, _>(|idx| b[idx] * c[idx]);
+    let p1 = (c[0] + c[1]) * (b[0] + b[1]) - z[0] - z[1];
+    let p2_prime = (c[0] + c[2]) * (b[0] + b[2]) - z[0] - z[2];
+    let p3_prime = (c[0] + c[3]) * (b[0] + b[3]) - z[0] - z[3];
+    let p3_prime_prime = (c[1] + c[2]) * (b[1] + b[2]) - z[1] - z[2];
+    let carry_0 = (z[0] + ((p1 & 0xff) << 8)) >> 16;
+    let a23 = z[1]
+        + ((p1 >> 8) & 0xff)
+        + p2_prime
+        + carry_0
+        + (((p3_prime & 0xff) + (p3_prime_prime & 0xff) + (p1 >> 16)) << 8);
+    a23 >> 16
+}
+
+fn validated_mul_carry_exception_receipt(
+    raw: Option<&str>,
+    hits: &[BucketHit],
+    inject_kind: Option<&str>,
+    backend_error: Option<&str>,
+) -> Option<ExecutedExceptionReceipt> {
+    if inject_kind.is_some() || backend_error.is_none() {
+        return None;
+    }
+    let receipt = serde_json::from_str::<ExecutedExceptionReceipt>(raw?).ok()?;
+    if receipt.effect != ExecutedExceptionEffect::MultiplicationCarryBound
+        || receipt.obligation_id != "md4"
+        || receipt.cell_id != "md4.mul_overflow"
+        || receipt.stage != "mul.witness.carry_1_bound"
+    {
+        return None;
+    }
+
+    // Fill execution-identity fields the M-chip hook cannot see (pc/opcode/
+    // mnemonic/rd values) from the exact executed hit, and stamp the observed
+    // failure manifestation: the hook only runs at the carry bound assert.
+    let mut receipt = receipt;
+    if let Some(hit) = hits.iter().find(|hit| {
+        hit.bucket_id == "sem.arithmetic.product_decomposition"
+            && detail_str(hit, "cell_id") == Some("md4.mul_overflow")
+            && detail_u64(hit, "op_idx") == Some(receipt.step)
+    }) {
+        for key in [
+            "op_idx",
+            "step_idx",
+            "pc",
+            "opcode",
+            "mnemonic",
+            "expected_rd_val",
+            "observed_rd_val",
+            "relation",
+            "relation_valid",
+        ] {
+            if !receipt.context.contains_key(key) {
+                if let Some(value) = hit.details.get(key) {
+                    receipt.context.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+    }
+    receipt
+        .context
+        .insert("failure_observed".to_string(), serde_json::json!(true));
+    receipt.context.insert(
+        "failure_manifestation".to_string(),
+        serde_json::json!("carry_bound_assertion"),
+    );
+    let lhs = receipt_context_u64(&receipt, "rs1_val")?;
+    let rhs = receipt_context_u64(&receipt, "rs2_val")?;
+    let product_hi = receipt_context_u64(&receipt, "product_hi")?;
+    let product_lo = receipt_context_u64(&receipt, "product_lo")?;
+    let carry_1 = receipt_context_u64(&receipt, "carry_1")?;
+    let carry_bound_exclusive = receipt_context_u64(&receipt, "carry_bound_exclusive")?;
+    let product = u128::from(lhs).checked_mul(u128::from(rhs))?;
+    if lhs > u64::from(u32::MAX)
+        || rhs > u64::from(u32::MAX)
+        || product_hi != ((product >> 32) as u32 as u64)
+        || product_lo != (product as u32 as u64)
+        || product_hi == 0
+        || carry_bound_exclusive != 4
+        || carry_1 < carry_bound_exclusive
+        || nexus_mul_carry_1(lhs as u32, rhs as u32) != carry_1 as u32
+    {
+        return None;
+    }
+
+    hits.iter()
+        .any(|hit| {
+            hit.bucket_id == "sem.arithmetic.product_decomposition"
+                && detail_str(hit, "obligation_id") == Some("md4")
+                && detail_str(hit, "cell_id") == Some("md4.mul_overflow")
+                && detail_str(hit, "mnemonic") == Some("mul")
+                && detail_str(hit, "relation") == Some("product_hi_lo_matches_operands")
+                && hit.details.get("relation_valid").and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                && detail_u64(hit, "op_idx") == Some(receipt.step)
+                && detail_u64(hit, "rs1_val") == Some(lhs)
+                && detail_u64(hit, "rs2_val") == Some(rhs)
+                && detail_u64(hit, "product_hi") == Some(product_hi)
+                && detail_u64(hit, "product_lo") == Some(product_lo)
+                && detail_u64(hit, "expected_rd_val") == Some(product_lo)
+                && detail_u64(hit, "observed_rd_val") == Some(product_lo)
+        })
+        .then_some(receipt)
 }
 
 fn panic_payload_to_string(p: &(dyn std::any::Any + Send)) -> String {
@@ -265,6 +380,12 @@ pub fn run_backend_once(
     inject_kind: Option<&str>,
     inject_step: u64,
 ) -> Result<RunResponse, String> {
+    if inject_kind.is_some() {
+        return Err(
+            "semantic injection is intentionally unsupported for the vulnerable Nexus MulCarry snapshot"
+                .to_string(),
+        );
+    }
     let final_regs = execute_final_regs(words)?;
 
     let program = nexus_vm::riscv::decode_instructions(words);
@@ -274,6 +395,8 @@ pub fn run_backend_once(
     let observed_injection_sites = collect_observed_injection_sites(&trace);
     let derived = NexusTrace::from_words_and_uniform_trace(words, &trace);
     let env_restore = arm_prover_injection_env(inject_kind, inject_step);
+    let previous_exception_receipt = std::env::var_os(EXECUTED_EXCEPTION_RECEIPT_ENV);
+    std::env::remove_var(EXECUTED_EXCEPTION_RECEIPT_ENV);
     let backend_error = match catch_unwind_nonfatal(std::panic::AssertUnwindSafe(|| {
         match nexus_vm_prover::prove(&trace, &view) {
             Ok(proof) => nexus_vm_prover::verify(proof, &view)
@@ -286,7 +409,19 @@ pub fn run_backend_once(
         Err(payload) => Some(panic_payload_to_string(&*payload)),
     };
     let injection_applied = read_prover_injection_applied();
+    let raw_exception_receipt = std::env::var(EXECUTED_EXCEPTION_RECEIPT_ENV).ok();
+    if let Some(previous) = previous_exception_receipt {
+        std::env::set_var(EXECUTED_EXCEPTION_RECEIPT_ENV, previous);
+    } else {
+        std::env::remove_var(EXECUTED_EXCEPTION_RECEIPT_ENV);
+    }
     env_restore.restore();
+    let executed_exception_receipt = validated_mul_carry_exception_receipt(
+        raw_exception_receipt.as_deref(),
+        derived.bucket_hits(),
+        inject_kind,
+        backend_error.as_deref(),
+    );
 
     Ok(RunResponse {
         final_regs: Some(final_regs),
@@ -296,6 +431,7 @@ pub fn run_backend_once(
         backend_error,
         observed_injection_sites,
         injection_applied,
+        executed_exception_receipt,
     })
 }
 
@@ -344,6 +480,7 @@ impl BenchmarkBackend for NexusBackend {
         self.eval.trace_signals = resp.trace_signals;
         self.eval.backend_error = resp.backend_error;
         self.eval.semantic_injection_applied = resp.injection_applied;
+        self.eval.executed_exception_receipt = resp.executed_exception_receipt;
         resp.final_regs.ok_or_else(|| "nexus backend returned no final_regs".to_string())
     }
 
@@ -355,108 +492,179 @@ impl BenchmarkBackend for NexusBackend {
         self.pending_injection = None;
     }
 
-    fn arm_semantic_injection(&mut self, kind: &str, step: u64) -> Result<(), String> {
-        self.pending_injection = Some(WitnessInjectionPlan { kind: kind.to_string(), step });
-        Ok(())
+    fn arm_semantic_injection(&mut self, _kind: &str, _step: u64) -> Result<(), String> {
+        Err(
+            "semantic injection is intentionally unsupported for the vulnerable Nexus MulCarry snapshot"
+                .to_string(),
+        )
     }
 
-    fn semantic_injection_candidates(&self, hits: &[BucketHit]) -> Vec<SemanticInjectionCandidate> {
-        hits.iter().filter_map(candidate_from_hit).collect()
+    fn semantic_injection_candidates(
+        &self,
+        _hits: &[BucketHit],
+    ) -> Vec<SemanticInjectionCandidate> {
+        Vec::new()
     }
 }
 
-fn candidate_from_hit(hit: &BucketHit) -> Option<SemanticInjectionCandidate> {
-    let mnemonic = detail_str(hit, "mnemonic");
-    let (inject_kind, semantic_class) = match hit.bucket_id.as_str() {
-        "sem.decode.zero_register_immutability" => {
-            (ZERO_REG_INJECT_KIND, "semantic.decode.zero_register_immutability")
-        }
-        "sem.decode.operand_index_routing" => {
-            (OPERAND_ROUTING_INJECT_KIND, "semantic.decode.operand_index_routing")
-        }
-        "sem.exec.dest_binding" => (DEST_BINDING_INJECT_KIND, "semantic.exec.dest_binding"),
-        "sem.decode.field_range" => (FIELD_RANGE_INJECT_KIND, "semantic.decode.field_range"),
-        "sem.decode.immediate_sign_extension" => {
-            (IMM_SIGNEXT_INJECT_KIND, "semantic.decode.immediate_sign_extension")
-        }
-        "sem.decode.upper_immediate_materialization" => {
-            (UPPER_IMM_INJECT_KIND, "semantic.decode.upper_immediate_materialization")
-        }
-        "sem.decode.format_immediate_reassembly" => {
-            (FORMAT_IMM_INJECT_KIND, "semantic.decode.format_immediate_reassembly")
-        }
-        "sem.exec.op_selector_binding" => {
-            (OP_SELECTOR_INJECT_KIND, "semantic.exec.op_selector_binding")
-        }
-        "sem.alu.immediate_limb_consistency" => {
-            (ALU_IMM_INJECT_KIND, "semantic.alu.immediate_limb_consistency")
-        }
-        "sem.alu.shift_mod32" if mnemonic.is_some_and(is_shift_mnemonic) => {
-            (SHIFT_INJECT_KIND, "semantic.alu.shift_mod32")
-        }
-        "sem.alu.comparison_booleanity" if mnemonic.is_some_and(is_comparison_mnemonic) => {
-            (CMP_BOOL_INJECT_KIND, "semantic.alu.comparison_booleanity")
-        }
-        "sem.alu.subtraction_borrow_chain"
-            if mnemonic.is_some_and(is_supported_sub_borrow_mnemonic) =>
-        {
-            (SUB_BORROW_INJECT_KIND, "semantic.alu.subtraction_borrow_chain")
-        }
-        "sem.alu.comparison_auxiliary_chain" if mnemonic.is_some_and(is_comparison_mnemonic) => {
-            (CMP_AUX_INJECT_KIND, "semantic.alu.comparison_auxiliary_chain")
-        }
-        "sem.exec.control_flow_binding" => {
-            (CONTROL_FLOW_INJECT_KIND, "semantic.exec.control_flow_binding")
-        }
-        "sem.control.entrypoint_binding" => {
-            (ENTRYPOINT_INJECT_KIND, "semantic.control.entrypoint_binding")
-        }
-        "sem.control.ecall_word_validity" => {
-            (ECALL_WORD_INJECT_KIND, "semantic.control.ecall_word_validity")
-        }
-        "sem.time.boundary_origin_consistency" => {
-            (TIME_BOUNDARY_INJECT_KIND, "semantic.time.boundary_origin_consistency")
-        }
-        "sem.memory.address_alignment_consistency" => {
-            (ADDRESS_ALIGNMENT_INJECT_KIND, "semantic.memory.address_alignment_consistency")
-        }
-        "sem.memory.load_value_binding" => {
-            (LOAD_VALUE_INJECT_KIND, "semantic.memory.load_value_binding")
-        }
-        "sem.memory.address_boundary_range" => {
-            (ADDRESS_POINTER_INJECT_KIND, "semantic.memory.address_boundary_range")
-        }
-        "sem.memory.address_progression_consistency" => {
-            (ADDRESS_PROGRESSION_INJECT_KIND, "semantic.memory.address_progression_consistency")
-        }
-        "sem.time.monotonic_access_ordering" => {
-            (TIME_MONOTONIC_INJECT_KIND, "semantic.time.monotonic_access_ordering")
-        }
-        "sem.memory.store_load_payload_flow" => {
-            (FLOW_PAYLOAD_INJECT_KIND, "semantic.memory.write_payload_flow_consistency")
-        }
-        "sem.memory.write_payload_consistency" => {
-            (WRITE_PAYLOAD_INJECT_KIND, "semantic.memory.write_payload_flow_consistency")
-        }
-        "sem.memory.kind_selector_consistency" => {
-            (KIND_SELECTOR_INJECT_KIND, "semantic.memory.kind_selector_consistency")
-        }
-        "sem.row.table_power2_boundary" => {
-            // Bucket-only for now: Nexus RamInitFinal table sizing has no safe witness hook yet.
-            return None;
-        }
-        _ => return None,
-    };
-    let step = detail_u64(hit, "store_step_idx")
-        .or_else(|| detail_u64(hit, "op_idx"))
-        .or_else(|| detail_u64(hit, "step_idx"))?;
-    Some(SemanticInjectionCandidate {
-        bucket_id: hit.bucket_id.clone(),
-        trigger_signal_id: None,
-        semantic_class: semantic_class.to_string(),
-        inject_kind: inject_kind.to_string(),
-        schedule: InjectionSchedule::Exact(step),
-    })
+
+#[cfg(test)]
+mod baseline_routing_tests {
+    use std::collections::HashMap;
+
+    use beak_core::fuzz::benchmark::BenchmarkBackend;
+    use beak_core::fuzz::bug_filter::has_exact_executed_exception_relation;
+    use beak_core::trace::BucketHit;
+    use serde_json::{json, Value};
+
+    use super::{nexus_mul_carry_1, validated_mul_carry_exception_receipt, NexusBackend};
+
+    const FAIL_LHS: u32 = 0x55e4_fcfd;
+    const FAIL_RHS: u32 = 0x2ff7_dde6;
+    const STEP: u64 = 7;
+
+    fn exact_hit(mnemonic: &str, cell_id: &str, lhs: u32, rhs: u32) -> BucketHit {
+        let product = u64::from(lhs) * u64::from(rhs);
+        let product_hi = (product >> 32) as u32;
+        let product_lo = product as u32;
+        let observed = if mnemonic == "mul" { product_lo } else { product_hi };
+        let details: HashMap<String, Value> = [
+            ("obligation_id", json!("md4")),
+            ("cell_id", json!(cell_id)),
+            ("mnemonic", json!(mnemonic)),
+            ("op_idx", json!(STEP)),
+            ("step_idx", json!(STEP)),
+            ("rs1_val", json!(lhs)),
+            ("rs2_val", json!(rhs)),
+            ("product_hi", json!(product_hi)),
+            ("product_lo", json!(product_lo)),
+            ("expected_rd_val", json!(observed)),
+            ("observed_rd_val", json!(observed)),
+            ("relation", json!("product_hi_lo_matches_operands")),
+            ("relation_valid", json!(true)),
+            ("backend", json!("nexus")),
+            ("commit", json!("f1b895b868915fd4d0a794a5bc730e6cb8d840f6")),
+            ("trace_source", json!("instruction")),
+            ("pc", json!(0x88 + STEP * 4)),
+            ("opcode", json!("0x02c58533")),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect();
+        BucketHit::semantic_id("sem.arithmetic.product_decomposition", details)
+    }
+
+    fn receipt(lhs: u32, rhs: u32, carry_1: u32) -> String {
+        let product = u64::from(lhs) * u64::from(rhs);
+        json!({
+            "effect": "multiplication_carry_bound",
+            "obligation_id": "md4",
+            "cell_id": "md4.mul_overflow",
+            "stage": "mul.witness.carry_1_bound",
+            "step": STEP,
+            "context": {
+                "backend": "nexus",
+                "commit": "f1b895b868915fd4d0a794a5bc730e6cb8d840f6",
+                "trace_source": "instruction",
+                "rs1_val": lhs,
+                "rs2_val": rhs,
+                "product_hi": (product >> 32) as u32,
+                "product_lo": product as u32,
+                "carry_1": carry_1,
+                "carry_bound_exclusive": 4,
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn baseline_snapshot_exposes_no_semantic_injection_route() {
+        let mut backend = NexusBackend::new(8);
+        assert!(backend.arm_semantic_injection("nexus.semantic.unsupported", 0).is_err());
+    }
+
+    #[test]
+    fn accepts_exact_executed_mul_carry_failure() {
+        let carry_1 = nexus_mul_carry_1(FAIL_LHS, FAIL_RHS);
+        assert_eq!(carry_1, 4);
+        let hit = exact_hit("mul", "md4.mul_overflow", FAIL_LHS, FAIL_RHS);
+        let raw = receipt(FAIL_LHS, FAIL_RHS, carry_1);
+        let parsed = validated_mul_carry_exception_receipt(
+            Some(&raw),
+            std::slice::from_ref(&hit),
+            None,
+            Some("prover failed"),
+        )
+        .expect("exact non-injected receipt must route");
+        assert_eq!(parsed.step, STEP);
+        assert!(has_exact_executed_exception_relation(&[hit], Some(&parsed)));
+    }
+
+    #[test]
+    fn nearby_carry_bound_and_mulhu_nonoverflow_controls_stay_clean() {
+        let nearby_lhs = 0xe453_7af9;
+        let nearby_rhs = 0xb3ba_d9dd;
+        assert_eq!(nexus_mul_carry_1(nearby_lhs, nearby_rhs), 3);
+        let nearby_hit = exact_hit("mul", "md4.mul_overflow", nearby_lhs, nearby_rhs);
+        let nearby_raw = receipt(nearby_lhs, nearby_rhs, 3);
+        assert!(validated_mul_carry_exception_receipt(
+            Some(&nearby_raw),
+            &[nearby_hit],
+            None,
+            Some("prover failed"),
+        )
+        .is_none());
+
+        let mulhu_hit = exact_hit("mulhu", "md4.mulhu", FAIL_LHS, FAIL_RHS);
+        let target_raw = receipt(FAIL_LHS, FAIL_RHS, 4);
+        assert!(validated_mul_carry_exception_receipt(
+            Some(&target_raw),
+            &[mulhu_hit],
+            None,
+            Some("prover failed"),
+        )
+        .is_none());
+
+        let small_hit = exact_hit("mul", "md4.mul_small", 0xffff, 0x1_0000);
+        let small_raw = receipt(0xffff, 0x1_0000, nexus_mul_carry_1(0xffff, 0x1_0000));
+        assert!(validated_mul_carry_exception_receipt(
+            Some(&small_raw),
+            &[small_hit],
+            None,
+            Some("prover failed"),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn malformed_injected_and_nonfailing_receipts_fail_closed() {
+        let hit = exact_hit("mul", "md4.mul_overflow", FAIL_LHS, FAIL_RHS);
+        let raw = receipt(FAIL_LHS, FAIL_RHS, 4);
+        assert!(validated_mul_carry_exception_receipt(
+            Some("{malformed"),
+            std::slice::from_ref(&hit),
+            None,
+            Some("prover failed"),
+        )
+        .is_none());
+
+        let wrong_product = raw.replace("\"product_lo\":", "\"product_lo\":1,\"ignored\":");
+        assert!(validated_mul_carry_exception_receipt(
+            Some(&wrong_product),
+            std::slice::from_ref(&hit),
+            None,
+            Some("prover failed"),
+        )
+        .is_none());
+        assert!(validated_mul_carry_exception_receipt(
+            Some(&raw),
+            std::slice::from_ref(&hit),
+            Some("unsupported-injection"),
+            Some("prover failed"),
+        )
+        .is_none());
+        assert!(validated_mul_carry_exception_receipt(Some(&raw), &[hit], None, None).is_none());
+    }
 }
 
 fn detail_str<'a>(hit: &'a BucketHit, key: &str) -> Option<&'a str> {

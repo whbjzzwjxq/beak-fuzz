@@ -5,13 +5,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Arg, Command};
 use serde_json::json;
 
-use beak_core::fuzz::benchmark::{BenchmarkConfig, DEFAULT_RNG_SEED, run_benchmark_threaded};
+use beak_core::fuzz::benchmark::{run_benchmark_threaded, BenchmarkConfig, DEFAULT_RNG_SEED};
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
-use beak_sp1_7f643da1::backend::{Sp1Backend, WorkerRequest, WorkerResponse, run_backend_once};
+use beak_sp1_7f643da1::backend::{run_backend_once, Sp1Backend, WorkerRequest, WorkerResponse};
 
 const ZKVM_COMMIT: &str = "7f643da16813af4c0fbaad4837cd7409386cf38c";
 const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
+const SP1_WRITE_SYSCALL: i32 = 2;
+const ECALL_WORD: u32 = 0x0000_0073;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OrdinaryWriteEcallState {
+    fd: u32,
+    write_ptr: u32,
+    write_len: u32,
+}
+
+const ORDINARY_WRITE_ECALL_STATES: [OrdinaryWriteEcallState; 3] = [
+    OrdinaryWriteEcallState { fd: 3, write_ptr: 0x100, write_len: 1 },
+    OrdinaryWriteEcallState { fd: 4, write_ptr: 0x140, write_len: 2 },
+    OrdinaryWriteEcallState { fd: 1, write_ptr: 0x180, write_len: 4 },
+];
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -22,7 +37,11 @@ fn workspace_root() -> PathBuf {
 
 fn resolve_path(root: &Path, arg: &str) -> PathBuf {
     let p = PathBuf::from(arg);
-    if p.is_absolute() { p } else { root.join(p) }
+    if p.is_absolute() {
+        p
+    } else {
+        root.join(p)
+    }
 }
 
 fn parse_u32_arg(value: &str, name: &str) -> u32 {
@@ -72,6 +91,86 @@ fn write_inline_seed_jsonl(root: &Path, words: &[u32]) -> PathBuf {
     path
 }
 
+fn encode_addi(rd: u32, imm: i32) -> u32 {
+    (((imm as u32) & 0x0fff) << 20) | (rd << 7) | 0x13
+}
+
+fn ordinary_write_ecall_carrier(state: OrdinaryWriteEcallState) -> Vec<u32> {
+    vec![
+        encode_addi(5, SP1_WRITE_SYSCALL),
+        encode_addi(10, state.fd as i32),
+        encode_addi(11, state.write_ptr as i32),
+        encode_addi(12, state.write_len as i32),
+        ECALL_WORD,
+    ]
+}
+
+fn ordinary_write_ecall_carrier_lines() -> Vec<String> {
+    ORDINARY_WRITE_ECALL_STATES
+        .into_iter()
+        .enumerate()
+        .map(|(lane_idx, state)| {
+            json!({
+                "instructions": ordinary_write_ecall_carrier(state),
+                "metadata": {
+                    "source": "generated_initial_corpus",
+                    "generator": "sp1_nonzero_write_ecall_family_v2",
+                    "carrier_family": "ecall",
+                    "syscall_family": "write",
+                    "lane_idx": lane_idx,
+                    "ecall_register_state": {
+                        "x5": SP1_WRITE_SYSCALL,
+                        "x10": state.fd,
+                        "x11": state.write_ptr,
+                        "x12": state.write_len,
+                    },
+                    "write_range_start": state.write_ptr,
+                    "write_range_end_exclusive": state.write_ptr + state.write_len,
+                }
+            })
+            .to_string()
+        })
+        .collect()
+}
+
+fn ordinary_write_ecall_augmented_contents(original_contents: &str) -> (String, usize) {
+    let carrier_lines = ordinary_write_ecall_carrier_lines();
+    let mut contents = carrier_lines.join("\n");
+    contents.push('\n');
+    if !original_contents.is_empty() {
+        contents.push_str(original_contents);
+        if !original_contents.ends_with('\n') {
+            contents.push('\n');
+        }
+    }
+    (contents, carrier_lines.len())
+}
+
+fn write_ordinary_write_ecall_seed_jsonl(root: &Path, original: &Path) -> (PathBuf, usize) {
+    let original_contents = std::fs::read_to_string(original)
+        .unwrap_or_else(|err| panic!("read ordinary seeds JSONL {}: {err}", original.display()));
+    let (contents, carrier_count) = ordinary_write_ecall_augmented_contents(&original_contents);
+    let ts_millis = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+    let dir = root.join("storage/fuzzing_seeds");
+    std::fs::create_dir_all(&dir).expect("create storage/fuzzing_seeds");
+    let path = dir.join(format!(
+        ".tmp-sp1-write-ecall-corpus-{ts_millis}-pid{}.jsonl",
+        std::process::id()
+    ));
+    std::fs::write(&path, contents).expect("write ordinary SP1 ECALL carrier JSONL");
+    (path, carrier_count)
+}
+
+fn effective_initial_limit(requested: usize, carrier_count: usize, inline: bool) -> usize {
+    if inline {
+        1
+    } else if requested == 0 {
+        0
+    } else {
+        requested.saturating_add(carrier_count)
+    }
+}
+
 fn main() {
     let matches = Command::new("beak-fuzz")
         .about("Initial-corpus benchmark with semantic witness search (oracle vs SP1).")
@@ -108,6 +207,12 @@ fn main() {
                 .long("max-instructions")
                 .default_value("256")
                 .help("Maximum number of RISC-V instruction words in a seed."),
+        )
+        .arg(
+            Arg::new("long_tail_max_instructions")
+                .long("long-tail-max-instructions")
+                .default_value("0")
+                .help("Absolute length ceiling for long-tail scheduling; 0 keeps the hard cap at max-instructions."),
         )
         .arg(
             Arg::new("semantic_window_before")
@@ -154,7 +259,7 @@ fn main() {
         .arg(
             Arg::new("oracle_data_size_bytes")
                 .long("oracle-data-size-bytes")
-                .default_value("0")
+                .default_value("0x100000")
                 .help("Oracle zeroed data RAM bytes for split-code-data mode."),
         )
         .arg(
@@ -173,11 +278,11 @@ fn main() {
 
     let root = workspace_root();
     let inline_words = collect_bin_words(&matches);
-    let seeds_path = if inline_words.is_empty() {
+    let (seeds_path, ordinary_write_ecall_carrier_count) = if inline_words.is_empty() {
         let seeds_arg = matches.get_one::<String>("seeds_jsonl").unwrap().to_string();
-        resolve_path(&root, &seeds_arg)
+        write_ordinary_write_ecall_seed_jsonl(&root, &resolve_path(&root, &seeds_arg))
     } else {
-        write_inline_seed_jsonl(&root, &inline_words)
+        (write_inline_seed_jsonl(&root, &inline_words), 0)
     };
     let requested_initial_limit: usize =
         matches.get_one::<String>("initial_limit").unwrap().parse().expect("initial-limit");
@@ -185,6 +290,11 @@ fn main() {
         matches.get_one::<String>("mutation_iters").unwrap().parse().expect("mutation-iters");
     let requested_max_instructions: usize =
         matches.get_one::<String>("max_instructions").unwrap().parse().expect("max-instructions");
+    let requested_long_tail_max: usize = matches
+        .get_one::<String>("long_tail_max_instructions")
+        .unwrap()
+        .parse()
+        .expect("long-tail-max-instructions");
     let precheck_oracle_max_steps: u32 = matches
         .get_one::<String>("oracle_precheck_max_steps")
         .unwrap()
@@ -220,7 +330,11 @@ fn main() {
         "oracle-data-size-bytes",
     );
 
-    let initial_limit: usize = if inline_words.is_empty() { requested_initial_limit } else { 1 };
+    let initial_limit = effective_initial_limit(
+        requested_initial_limit,
+        ordinary_write_ecall_carrier_count,
+        !inline_words.is_empty(),
+    );
     let mutation_iterations: usize =
         if inline_words.is_empty() { requested_mutation_iterations } else { 0 };
     let max_instructions: usize = if inline_words.is_empty() {
@@ -228,6 +342,12 @@ fn main() {
     } else {
         inline_words.len().max(1)
     };
+    let long_tail_max_instructions: usize = if inline_words.is_empty() {
+        requested_long_tail_max
+    } else {
+        0
+    };
+    let backend_max_instructions = long_tail_max_instructions.max(max_instructions);
 
     let cfg = BenchmarkConfig {
         zkvm_tag: "sp1".to_string(),
@@ -244,6 +364,7 @@ fn main() {
         initial_limit,
         mutation_iterations,
         max_instructions,
+        long_tail_max_instructions,
         precheck_oracle_max_steps,
         semantic_search_enabled: true,
         semantic_window_before,
@@ -253,7 +374,8 @@ fn main() {
         stack_size_bytes: 256 * 1024 * 1024,
     };
 
-    let res = run_benchmark_threaded(cfg, move || Sp1Backend::new(max_instructions));
+    println!("ordinary_write_ecall_carriers = {ordinary_write_ecall_carrier_count}");
+    let res = run_benchmark_threaded(cfg, move || Sp1Backend::new(backend_max_instructions));
     match res {
         Ok(out) => {
             println!("Wrote corpus JSONL: {}", out.corpus_path.display());
@@ -310,6 +432,7 @@ fn run_worker_loop() {
                         backend_error: Some(e),
                         observed_injection_sites: std::collections::BTreeMap::new(),
                         injection_applied: false,
+                        semantic_mutation_receipt: None,
                     },
                     Err(p) => WorkerResponse {
                         request_id: req.request_id,
@@ -323,6 +446,7 @@ fn run_worker_loop() {
                         )),
                         observed_injection_sites: std::collections::BTreeMap::new(),
                         injection_applied: false,
+                        semantic_mutation_receipt: None,
                     },
                 };
                 let payload = match serde_json::to_vec(&resp) {
@@ -358,4 +482,100 @@ fn panic_payload_to_string(p: &(dyn std::any::Any + Send)) -> String {
         return s.clone();
     }
     "non-string panic payload".to_string()
+}
+
+#[cfg(test)]
+mod ordinary_carrier_tests {
+    use std::collections::BTreeSet;
+
+    use super::{
+        effective_initial_limit, encode_addi, ordinary_write_ecall_augmented_contents,
+        ordinary_write_ecall_carrier_lines, ECALL_WORD, ORDINARY_WRITE_ECALL_STATES,
+        SP1_WRITE_SYSCALL,
+    };
+
+    fn executed_ecall_state(words: &[u32]) -> [u32; 4] {
+        let mut registers = [0u32; 32];
+        for &word in words {
+            if word == ECALL_WORD {
+                return [registers[5], registers[10], registers[11], registers[12]];
+            }
+            assert_eq!(word & 0x7f, 0x13, "carrier setup must be ADDI");
+            assert_eq!((word >> 12) & 0x7, 0, "carrier setup must be ADDI");
+            let rd = ((word >> 7) & 0x1f) as usize;
+            let rs1 = ((word >> 15) & 0x1f) as usize;
+            let raw_imm = (word >> 20) & 0x0fff;
+            let imm = ((raw_imm << 20) as i32 >> 20) as u32;
+            if rd != 0 {
+                registers[rd] = registers[rs1].wrapping_add(imm);
+            }
+        }
+        panic!("carrier has no executed ECALL")
+    }
+
+    #[test]
+    fn ordinary_write_ecall_generator_is_byte_and_state_distinct_from_history() {
+        let historical = vec![
+            0x0020_0293,
+            0x0010_0513,
+            0x0000_0593,
+            0x0000_0613,
+            ECALL_WORD,
+        ];
+        let historical_state = executed_ecall_state(&historical);
+        let lines = ordinary_write_ecall_carrier_lines();
+        assert_eq!(lines.len(), ORDINARY_WRITE_ECALL_STATES.len());
+        let mut observed_bytes = BTreeSet::new();
+        let mut observed_states = BTreeSet::new();
+
+        for line in lines {
+            let row: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let words = row["instructions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|word| word.as_u64().unwrap() as u32)
+                .collect::<Vec<_>>();
+            let state = executed_ecall_state(&words);
+
+            assert_eq!(words.len(), 5);
+            assert_eq!(words.last(), Some(&ECALL_WORD));
+            assert!(words[..words.len() - 1].contains(&encode_addi(5, SP1_WRITE_SYSCALL)));
+            assert_ne!(words, historical);
+            assert_ne!(state, historical_state, "historical zero-length ECALL state was rebuilt");
+            assert_eq!(state[0], SP1_WRITE_SYSCALL as u32);
+            assert_ne!(state[2], 0, "write pointer must be nonzero");
+            assert_ne!(state[3], 0, "write length must be nonzero");
+            assert!(state[2].checked_add(state[3]).is_some(), "write range must not wrap");
+            assert_eq!(row["metadata"]["ecall_register_state"]["x5"], state[0]);
+            assert_eq!(row["metadata"]["ecall_register_state"]["x10"], state[1]);
+            assert_eq!(row["metadata"]["ecall_register_state"]["x11"], state[2]);
+            assert_eq!(row["metadata"]["ecall_register_state"]["x12"], state[3]);
+            assert_eq!(row["metadata"]["source"], "generated_initial_corpus");
+            assert_eq!(row["metadata"]["generator"], "sp1_nonzero_write_ecall_family_v2");
+            assert!(row["metadata"].get("case_id").is_none());
+            observed_bytes.insert(words);
+            observed_states.insert(state);
+        }
+
+        assert_eq!(observed_bytes.len(), ORDINARY_WRITE_ECALL_STATES.len());
+        assert_eq!(observed_states.len(), ORDINARY_WRITE_ECALL_STATES.len());
+    }
+
+    #[test]
+    fn ordinary_write_ecall_family_is_prepended_and_admitted_by_a_bounded_limit() {
+        let original = r#"{"instructions":[19],"metadata":{"source":"ordinary"}}"#;
+        let (contents, carrier_count) = ordinary_write_ecall_augmented_contents(original);
+        let lines = contents.lines().collect::<Vec<_>>();
+
+        assert_eq!(carrier_count, ORDINARY_WRITE_ECALL_STATES.len());
+        assert_eq!(lines.len(), carrier_count + 1);
+        assert_eq!(lines.last(), Some(&original));
+        assert!(lines[..carrier_count]
+            .iter()
+            .all(|line| line.contains("sp1_nonzero_write_ecall_family_v2")));
+        assert_eq!(effective_initial_limit(0, carrier_count, false), 0);
+        assert_eq!(effective_initial_limit(1, carrier_count, false), 4);
+        assert_eq!(effective_initial_limit(1, carrier_count, true), 1);
+    }
 }

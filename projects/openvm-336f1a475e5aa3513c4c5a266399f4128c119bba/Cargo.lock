@@ -655,6 +655,7 @@ dependencies = [
  "beak-core",
  "clap",
  "fuzzer_utils",
+ "openvm-bigint-transpiler",
  "openvm-circuit",
  "openvm-instructions",
  "openvm-rv32im-transpiler",
@@ -3147,6 +3148,7 @@ dependencies = [
  "openvm-circuit-primitives-derive",
  "openvm-stark-backend",
  "rand 0.8.5",
+ "serde_json",
  "tracing",
 ]
 
