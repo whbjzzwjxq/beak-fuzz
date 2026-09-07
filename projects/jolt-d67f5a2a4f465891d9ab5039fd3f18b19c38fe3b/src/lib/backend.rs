@@ -335,8 +335,23 @@ fn prove_and_verify(
     Ok((backend_error, receipt))
 }
 
+/// The Dory commitment materializes tables scaled by the padded trace length; a mutated
+/// long-running input would attempt tens of GB of allocation and abort the whole campaign
+/// process (allocation failure is uncatchable). Refuse such inputs with a clean error.
+fn dory_resource_guard(exec: &JoltExecution) -> Result<(), String> {
+    const MAX_TRACE_ROWS: usize = 1 << 22;
+    let padded = exec.trace.len().max(256).next_power_of_two();
+    if padded > MAX_TRACE_ROWS {
+        return Err(format!(
+            "jolt resource guard: padded trace rows {padded} exceed budget"
+        ));
+    }
+    Ok(())
+}
+
 pub fn run_backend_once(words: &[u32]) -> Result<RunResponse, String> {
     let exec = execute_trace(words)?;
+    dory_resource_guard(&exec)?;
     let mut bucket_hits: Vec<BucketHit> =
         dory_short_trace_hit(words.len(), exec.trace.len()).into_iter().collect();
     let (backend_error, receipt) = prove_and_verify(&exec, words.len())?;

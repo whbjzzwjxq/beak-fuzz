@@ -258,6 +258,27 @@ fn proving_sizes(exec: &JoltExecution) -> (usize, usize, usize) {
     (bytecode_size, memory_size, trace_size)
 }
 
+/// Dense proving tables scale with these padded powers of two; a mutated input that
+/// touches a huge memory index would make the prover attempt tens of GB of allocation
+/// and abort the whole campaign process (allocation failure is uncatchable). Refuse
+/// such inputs with a clean error instead. Legit benchmark cases are far below these
+/// budgets (HighBytecode pads to 8192 bytecode rows; everything else is smaller).
+fn proving_resource_guard(exec: &JoltExecution) -> Result<(), String> {
+    const MAX_BYTECODE_ROWS: usize = 1 << 15;
+    const MAX_MEMORY_ROWS: usize = 1 << 24;
+    const MAX_TRACE_ROWS: usize = 1 << 22;
+    let (bytecode_size, memory_size, trace_size) = proving_sizes(exec);
+    if bytecode_size > MAX_BYTECODE_ROWS
+        || memory_size > MAX_MEMORY_ROWS
+        || trace_size > MAX_TRACE_ROWS
+    {
+        return Err(format!(
+            "jolt resource guard: padded proving sizes (bytecode={bytecode_size}, memory={memory_size}, trace={trace_size}) exceed budget"
+        ));
+    }
+    Ok(())
+}
+
 fn append_bytecode_boundary_receipt(
     hits: &mut Vec<beak_core::trace::BucketHit>,
     raw: Option<&str>,
@@ -369,6 +390,7 @@ pub fn run_backend_once(
     }
 
     let exec = execute_trace(words)?;
+    proving_resource_guard(&exec)?;
     let derived = JoltTrace::from_execution(&exec.bytecode)?;
     let final_regs = exec.final_regs;
     let micro_op_count = exec.trace.len();
