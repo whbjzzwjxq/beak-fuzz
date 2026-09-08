@@ -563,6 +563,7 @@ dependencies = [
  "clap",
  "common",
  "jolt-core",
+ "serde",
  "serde_json",
  "tracer",
 ]

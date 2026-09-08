@@ -1,3 +1,4 @@
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,7 +8,7 @@ use serde_json::json;
 use beak_core::fuzz::benchmark::{run_benchmark_threaded, BenchmarkConfig, DEFAULT_RNG_SEED};
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
-use beak_jolt_d67f5a2a::backend::JoltBackend;
+use beak_jolt_d67f5a2a::backend::{run_backend_once, JoltBackend, WorkerRequest, WorkerResponse, WORKER_RESPONSE_PREFIX};
 use beak_jolt_d67f5a2a::JOLT_ORACLE_CODE_BASE;
 
 const ZKVM_COMMIT: &str = "d67f5a2a4f465891d9ab5039fd3f18b19c38fe3b";
@@ -157,7 +158,19 @@ fn main() {
                 .default_value("0x100000")
                 .help("Oracle zeroed data RAM bytes for split-code-data mode."),
         )
+        .arg(
+            Arg::new("worker_loop")
+                .long("worker-loop")
+                .hide(true)
+                .action(clap::ArgAction::SetTrue)
+                .help("Run persistent backend worker loop from stdin JSONL."),
+        )
         .get_matches();
+
+    if matches.get_flag("worker_loop") {
+        run_worker_loop();
+        return;
+    }
 
     let root = workspace_root();
     let out_dir = resolve_path(&root, matches.get_one::<String>("out_dir").unwrap());
@@ -252,6 +265,63 @@ fn main() {
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
+        }
+    }
+}
+
+fn run_worker_loop() {
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    loop {
+        let mut line = String::new();
+        match input.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let req: WorkerRequest = match serde_json::from_str(trimmed) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("parse worker request failed: {e}");
+                        continue;
+                    }
+                };
+                let resp = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_backend_once(&req.words)
+                })) {
+                    Ok(Ok(v)) => WorkerResponse::from_run_response(req.request_id, v),
+                    Ok(Err(e)) => WorkerResponse::error(req.request_id, e),
+                    Err(p) => WorkerResponse::error(
+                        req.request_id,
+                        format!("worker panic in run_backend_once: {p:?}"),
+                    ),
+                };
+                let payload = match serde_json::to_vec(&resp) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("serialize worker response failed: {e}");
+                        continue;
+                    }
+                };
+                if out.write_all(WORKER_RESPONSE_PREFIX.as_bytes()).is_err() {
+                    break;
+                }
+                if out.write_all(&payload).is_err() {
+                    break;
+                }
+                if out.write_all(b"\n").is_err() {
+                    break;
+                }
+                if out.flush().is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
         }
     }
 }

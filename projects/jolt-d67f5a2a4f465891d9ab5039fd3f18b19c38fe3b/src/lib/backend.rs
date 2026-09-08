@@ -1,5 +1,9 @@
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,6 +37,55 @@ pub struct RunResponse {
     pub injection_applied: bool,
     pub executed_exception_receipt: Option<ExecutedExceptionReceipt>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerRequest {
+    pub request_id: u64,
+    pub words: Vec<u32>,
+    pub iteration: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerResponse {
+    pub request_id: u64,
+    pub final_regs: Option<[u32; 32]>,
+    pub micro_op_count: usize,
+    pub bucket_hits: Vec<BucketHit>,
+    pub trace_signals: Vec<TraceSignal>,
+    pub backend_error: Option<String>,
+    pub injection_applied: bool,
+    pub executed_exception_receipt: Option<ExecutedExceptionReceipt>,
+}
+
+impl WorkerResponse {
+    pub fn from_run_response(request_id: u64, resp: RunResponse) -> Self {
+        Self {
+            request_id,
+            final_regs: resp.final_regs,
+            micro_op_count: resp.micro_op_count,
+            bucket_hits: resp.bucket_hits,
+            trace_signals: resp.trace_signals,
+            backend_error: resp.backend_error,
+            injection_applied: resp.injection_applied,
+            executed_exception_receipt: resp.executed_exception_receipt,
+        }
+    }
+
+    pub fn error(request_id: u64, error: String) -> Self {
+        Self {
+            request_id,
+            final_regs: None,
+            micro_op_count: 0,
+            bucket_hits: Vec::new(),
+            trace_signals: Vec::new(),
+            backend_error: Some(error),
+            injection_applied: false,
+            executed_exception_receipt: None,
+        }
+    }
+}
+
+pub const WORKER_RESPONSE_PREFIX: &str = "__BEAK_WORKER_JSON__ ";
 
 struct JoltExecution {
     elf: Vec<u8>,
@@ -375,11 +428,88 @@ pub fn run_backend_once(words: &[u32]) -> Result<RunResponse, String> {
 pub struct JoltBackend {
     max_instructions: usize,
     eval: BackendEval,
+    current_iteration: u64,
+    next_request_id: u64,
+    worker: Option<WorkerProcess>,
+}
+
+struct WorkerProcess {
+    child: Child,
+    stdin: ChildStdin,
+    responses_rx: Receiver<Result<WorkerResponse, String>>,
+    reader_thread: JoinHandle<()>,
 }
 
 impl JoltBackend {
     pub fn new(max_instructions: usize) -> Self {
-        Self { max_instructions, eval: BackendEval::default() }
+        Self {
+            max_instructions,
+            eval: BackendEval::default(),
+            current_iteration: 0,
+            next_request_id: 1,
+            worker: None,
+        }
+    }
+
+    fn start_worker(&mut self) -> Result<(), String> {
+        if self.worker.is_some() {
+            return Ok(());
+        }
+        let exe_path = std::env::current_exe()
+            .map_err(|e| format!("resolve current executable for worker failed: {e}"))?;
+        let mut child = Command::new(exe_path)
+            .arg("--worker-loop")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| format!("spawn backend worker failed: {e}"))?;
+
+        let stdin =
+            child.stdin.take().ok_or_else(|| "capture backend worker stdin failed".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "capture backend worker stdout failed".to_string())?;
+
+        let (tx, rx) = mpsc::channel::<Result<WorkerResponse, String>>();
+        let reader_thread = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() || !trimmed.starts_with(WORKER_RESPONSE_PREFIX) {
+                            continue;
+                        }
+                        let payload = &trimmed[WORKER_RESPONSE_PREFIX.len()..];
+                        let parsed = serde_json::from_str::<WorkerResponse>(payload)
+                            .map_err(|e| format!("parse worker response failed: {e}"));
+                        if tx.send(parsed).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("read worker response failed: {e}")));
+                        break;
+                    }
+                }
+            }
+        });
+
+        self.worker = Some(WorkerProcess { child, stdin, responses_rx: rx, reader_thread });
+        Ok(())
+    }
+
+    fn stop_worker(&mut self) {
+        if let Some(mut worker) = self.worker.take() {
+            let _ = worker.child.kill();
+            let _ = worker.child.wait();
+            drop(worker.stdin);
+            let _ = worker.reader_thread.join();
+        }
     }
 }
 
@@ -393,11 +523,55 @@ impl BenchmarkBackend for JoltBackend {
 
     fn prepare_for_run(&mut self, _rng_seed: u64) {
         self.eval = BackendEval::default();
+        self.current_iteration = self.current_iteration.saturating_add(1);
     }
 
     fn prove_and_read_final_regs(&mut self, words: &[u32]) -> Result<[u32; 32], String> {
         self.eval = BackendEval::default();
-        let resp = run_backend_once(words)?;
+        self.start_worker()?;
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let req = WorkerRequest {
+            request_id,
+            words: words.to_vec(),
+            iteration: self.current_iteration,
+        };
+        {
+            let worker =
+                self.worker.as_mut().ok_or_else(|| "backend worker unavailable".to_string())?;
+            let mut payload = serde_json::to_vec(&req)
+                .map_err(|e| format!("serialize worker request failed: {e}"))?;
+            payload.push(b'\n');
+            worker
+                .stdin
+                .write_all(&payload)
+                .map_err(|e| format!("write worker request failed: {e}"))?;
+            worker.stdin.flush().map_err(|e| format!("flush worker request failed: {e}"))?;
+        }
+
+        let resp = loop {
+            let recv = {
+                let worker =
+                    self.worker.as_ref().ok_or_else(|| "backend worker unavailable".to_string())?;
+                worker.responses_rx.recv()
+            };
+            match recv {
+                Ok(Ok(resp)) if resp.request_id == request_id => break resp,
+                Ok(Ok(_)) => continue,
+                Ok(Err(e)) => {
+                    self.stop_worker();
+                    self.eval.backend_error = Some(e.clone());
+                    return Err(e);
+                }
+                Err(_) => {
+                    self.stop_worker();
+                    let msg = "backend worker disconnected".to_string();
+                    self.eval.backend_error = Some(msg.clone());
+                    return Err(msg);
+                }
+            }
+        };
+        self.stop_worker();
         self.eval.final_regs = resp.final_regs;
         self.eval.micro_op_count = resp.micro_op_count;
         self.eval.bucket_hits = resp.bucket_hits;
