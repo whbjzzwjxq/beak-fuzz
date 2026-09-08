@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use libafl::inputs::BytesInput;
+use libafl_bolts::rands::{Rand, StdRand};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -2299,11 +2300,29 @@ fn schedule_initial_seeds(
     scheduled
 }
 
+/// Deterministic Fisher-Yates shuffle of the corpus portion of the schedule, driven
+/// by the campaign RNG seed. Repeated campaigns with different RNG_SEED values then
+/// cover different corpus prefixes within the same wall-clock budget, instead of
+/// always draining the same head of the file.
+fn shuffle_file_seeds(
+    mut file_seeds: Vec<(BytesInput, serde_json::Value)>,
+    rng_seed: u64,
+) -> Vec<(BytesInput, serde_json::Value)> {
+    let mut rng = StdRand::with_seed(rng_seed ^ 0x5eed_5eed_5eed_5eed);
+    for i in (1..file_seeds.len()).rev() {
+        let j = (rng.next() as usize) % (i + 1);
+        file_seeds.swap(i, j);
+    }
+    file_seeds
+}
+
 fn ordinary_seed_schedule(
     file_seeds: Vec<(BytesInput, serde_json::Value)>,
     max_instructions: usize,
     is_usable: &dyn Fn(&[u32]) -> bool,
+    rng_seed: u64,
 ) -> Vec<(BytesInput, serde_json::Value)> {
+    let file_seeds = shuffle_file_seeds(file_seeds, rng_seed);
     let mut scheduled = ordinary_generated_carriers(max_instructions, is_usable);
     let generated_words: HashSet<Vec<u32>> = scheduled
         .iter()
@@ -2897,6 +2916,7 @@ pub fn run_benchmark<B: BenchmarkBackend>(
         ),
         hard_max_instructions(&cfg),
         &|words| backend.is_usable_seed(words),
+        cfg.rng_seed,
     );
     if seeds.is_empty() {
         return Err(format!("No usable initial seeds loaded from {}", cfg.seeds_jsonl.display()));
@@ -3505,7 +3525,7 @@ mod tests {
             (super::encode_words(&[0x0000_0073]), json!({"source": "file-duplicate"})),
             (super::encode_words(&[0x1234_50b7]), json!({"source": "file-unique"})),
         ];
-        let scheduled = ordinary_seed_schedule(file_seeds, 256, &|_| true);
+        let scheduled = ordinary_seed_schedule(file_seeds, 256, &|_| true, 2026);
         assert_eq!(scheduled.len(), ORDINARY_GENERATED_CARRIER_BUDGET + 1);
         assert!(scheduled
             .iter()
