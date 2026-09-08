@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Arg, Command};
 use serde_json::json;
 
-use beak_core::fuzz::benchmark::{run_benchmark_threaded, BenchmarkConfig, DEFAULT_RNG_SEED};
+use beak_core::fuzz::benchmark::{run_benchmark_threaded, BenchmarkConfig};
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
 use beak_nexus_f2ad126::backend::NexusBackend;
@@ -170,7 +170,19 @@ fn main() {
                 .default_value("projects/nexus-f2ad12652c39dc516a116447a53f8557f64a7f7d/out")
                 .help("Directory for benchmark corpus/runs/bugs JSONL."),
         )
+        .arg(
+            Arg::new("rng_seed")
+                .long("rng-seed")
+                .default_value("2026")
+                .help("RNG seed driving the mutation engine (deterministic per value)."),
+        )
         .get_matches();
+
+    let rng_seed: u64 = matches
+        .get_one::<String>("rng_seed")
+        .unwrap()
+        .parse()
+        .expect("rng-seed");
 
     let root = workspace_root();
     let inline_words = collect_bin_words(&matches);
@@ -245,7 +257,7 @@ fn main() {
     let cfg = BenchmarkConfig {
         zkvm_tag: "nexus".to_string(),
         zkvm_commit: ZKVM_COMMIT.to_string(),
-        rng_seed: DEFAULT_RNG_SEED,
+        rng_seed,
         oracle: OracleConfig {
             memory_model: oracle_memory_model,
             code_base: oracle_code_base,

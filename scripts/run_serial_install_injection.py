@@ -273,6 +273,7 @@ class Config:
         self.initial_limit = env_int("INITIAL_LIMIT", 0)
         self.mutation_iters = env_int("MUTATION_ITERS", env_int("ITERS", 0))
         self.max_instructions = env_int("MAX_INSTRUCTIONS", 256)
+        self.rng_seed = env_int("RNG_SEED", 2026)
         # Long-tail scheduling is the default for ordinary campaigns: programs longer
         # than MAX_INSTRUCTIONS up to this absolute ceiling occupy a small deterministic
         # quota lane instead of being truncated away. Set to 0 for the legacy hard cap.
@@ -443,6 +444,8 @@ def build_run_cmd(target_id: str, config: Config) -> tuple[list[str], Path, dict
         str(config.max_instructions),
         "--long-tail-max-instructions",
         str(config.long_tail_max_instructions),
+        "--rng-seed",
+        str(config.rng_seed),
     ]
     if target_id != "openvm-d7eab708":
         oracle_precheck_max_steps = max(

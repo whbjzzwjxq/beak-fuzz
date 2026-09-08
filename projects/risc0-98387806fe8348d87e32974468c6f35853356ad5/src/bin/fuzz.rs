@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Arg, Command};
 use serde_json::json;
 
-use beak_core::fuzz::benchmark::{run_benchmark_threaded, BenchmarkConfig, DEFAULT_RNG_SEED};
+use beak_core::fuzz::benchmark::{run_benchmark_threaded, BenchmarkConfig};
 use beak_core::rv32im::oracle::{OracleConfig, OracleMemoryModel};
 
 use beak_risc0_98387806::backend::Risc0Backend;
@@ -164,7 +164,19 @@ fn main() {
                 .long("oracle-data-size-bytes")
                 .default_value("0"),
         )
+        .arg(
+            Arg::new("rng_seed")
+                .long("rng-seed")
+                .default_value("2026")
+                .help("RNG seed driving the mutation engine (deterministic per value)."),
+        )
         .get_matches();
+
+    let rng_seed: u64 = matches
+        .get_one::<String>("rng_seed")
+        .unwrap()
+        .parse()
+        .expect("rng-seed");
 
     let root = workspace_root();
     let frontend = matches.get_one::<String>("risc0_frontend").unwrap().as_str();
@@ -247,7 +259,7 @@ fn main() {
     let cfg = BenchmarkConfig {
         zkvm_tag: "risc0".to_string(),
         zkvm_commit: ZKVM_COMMIT.to_string(),
-        rng_seed: DEFAULT_RNG_SEED,
+        rng_seed,
         oracle: OracleConfig {
             memory_model: oracle_memory_model,
             code_base: oracle_code_base,
