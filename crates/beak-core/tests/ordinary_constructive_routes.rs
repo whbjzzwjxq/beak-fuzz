@@ -725,6 +725,7 @@ fn config(backend: &str, commit: &str, dir: &std::path::Path, seeds: PathBuf) ->
         semantic_window_after: 64,
         semantic_step_stride: 1,
         semantic_max_trials_per_bucket: 1,
+        semantic_max_variants_per_bucket: 0,
         stack_size_bytes: 16 * 1024 * 1024,
     }
 }

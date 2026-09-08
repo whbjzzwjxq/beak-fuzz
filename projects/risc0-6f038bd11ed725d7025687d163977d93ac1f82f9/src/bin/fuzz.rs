@@ -456,6 +456,12 @@ fn main() {
                 .default_value("2026")
                 .help("RNG seed driving the mutation engine (deterministic per value)."),
         )
+        .arg(
+            Arg::new("semantic_max_variants_per_bucket")
+                .long("semantic-max-variants-per-bucket")
+                .default_value("0")
+                .help("Fairness cap on candidate variants per bucket per seed; 0 = unlimited."),
+        )
         .get_matches();
 
     let rng_seed: u64 = matches
@@ -463,6 +469,11 @@ fn main() {
         .unwrap()
         .parse()
         .expect("rng-seed");
+    let semantic_max_variants_per_bucket: usize = matches
+        .get_one::<String>("semantic_max_variants_per_bucket")
+        .unwrap()
+        .parse()
+        .expect("semantic-max-variants-per-bucket");
 
     let root = workspace_root();
     let inline_words = collect_bin_words(&matches);
@@ -556,6 +567,7 @@ fn main() {
         semantic_window_after,
         semantic_step_stride,
         semantic_max_trials_per_bucket,
+        semantic_max_variants_per_bucket,
         stack_size_bytes: 256 * 1024 * 1024,
     };
 

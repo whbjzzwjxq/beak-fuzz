@@ -283,6 +283,10 @@ class Config:
         self.semantic_window_after = env_int("SEMANTIC_WINDOW_AFTER", 64)
         self.semantic_step_stride = env_int("SEMANTIC_STEP_STRIDE", 1)
         self.semantic_max_trials = env_int("SEMANTIC_MAX_TRIALS", 64)
+        # Fairness cap on candidate variants per bucket per seed, so flood buckets
+        # (e.g. hundreds of al1 variants on f038) cannot drain a seed's whole budget
+        # before scarcer buckets run. 0 disables the cap.
+        self.semantic_max_variants = env_int("SEMANTIC_MAX_VARIANTS_PER_BUCKET", 8)
         self.fast_test = os.environ.get("FAST_TEST", "0")
         self.benchmark_out_dir = env_path("BEAK_BENCHMARK_OUT_DIR", STORAGE_DIR)
         self.run_root = env_path("RUN_ROOT", BEAK_ROOT / "out" / "serial-install-injection")
@@ -446,6 +450,8 @@ def build_run_cmd(target_id: str, config: Config) -> tuple[list[str], Path, dict
         str(config.long_tail_max_instructions),
         "--rng-seed",
         str(config.rng_seed),
+        "--semantic-max-variants-per-bucket",
+        str(config.semantic_max_variants),
     ]
     if target_id != "openvm-d7eab708":
         oracle_precheck_max_steps = max(

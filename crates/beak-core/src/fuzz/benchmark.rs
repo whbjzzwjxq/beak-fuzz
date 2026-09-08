@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -146,6 +146,10 @@ pub struct BenchmarkConfig {
     pub semantic_window_after: u64,
     pub semantic_step_stride: u64,
     pub semantic_max_trials_per_bucket: usize,
+    /// Fairness cap on how many candidate *variants* of one bucket may run per seed.
+    /// Flood buckets (hundreds of variants, e.g. f038 al1) otherwise drain the whole
+    /// per-seed budget before scarcer buckets are ever attempted. 0 = unlimited.
+    pub semantic_max_variants_per_bucket: usize,
     pub stack_size_bytes: usize,
 }
 
@@ -3011,8 +3015,16 @@ pub fn run_benchmark<B: BenchmarkBackend>(
                 )
             });
         let mut attempted = HashSet::<(String, u64)>::new();
+        let mut bucket_variants = HashMap::<String, usize>::new();
 
         for candidate in candidates {
+            let variant_count = bucket_variants.entry(candidate.bucket_id.clone()).or_insert(0);
+            *variant_count += 1;
+            if cfg.semantic_max_variants_per_bucket > 0
+                && *variant_count > cfg.semantic_max_variants_per_bucket
+            {
+                continue;
+            }
             let steps = candidate_steps(&cfg, &candidate);
             if steps.is_empty() {
                 continue;
@@ -3694,6 +3706,7 @@ mod tests {
             semantic_window_after: 0,
             semantic_step_stride: 0,
             semantic_max_trials_per_bucket: 0,
+            semantic_max_variants_per_bucket: 0,
             stack_size_bytes: 0,
         }
     }
