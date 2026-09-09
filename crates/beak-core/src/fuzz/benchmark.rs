@@ -2927,6 +2927,11 @@ pub fn run_benchmark<B: BenchmarkBackend>(
         .take_while(|(_, metadata)| metadata["source"] == json!("ordinary_generator"))
         .count();
     let take_n = initial_schedule_take_count(cfg.initial_limit, generated_count, seeds.len());
+    let semantic_global_bucket_budget = std::env::var("BEAK_SEMANTIC_GLOBAL_BUCKET_BUDGET")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(64);
+    let mut global_bucket_trials = HashMap::<String, usize>::new();
     let mut bug_count = 0usize;
     let mut eval_id: u64 = 0;
     let mut mutation_corpus = Vec::<CorpusEntry>::new();
@@ -3045,6 +3050,20 @@ pub fn run_benchmark<B: BenchmarkBackend>(
             {
                 continue;
             }
+            // Campaign-wide saturation: buckets whose candidates appear on nearly every
+            // seed (e.g. al1/auipc on openvm) otherwise consume the whole campaign budget
+            // while rare-bucket candidates never run. After the global budget is spent,
+            // further trials of that bucket are skipped. 0 disables; env override for
+            // runner-independent tuning.
+            if semantic_global_bucket_budget > 0
+                && global_bucket_trials
+                    .get(&candidate.bucket_id)
+                    .copied()
+                    .unwrap_or(0)
+                    >= semantic_global_bucket_budget
+            {
+                continue;
+            }
             let steps = candidate_steps(&cfg, &candidate);
             if steps.is_empty() {
                 continue;
@@ -3057,6 +3076,7 @@ pub fn run_benchmark<B: BenchmarkBackend>(
                     continue;
                 }
 
+                *global_bucket_trials.entry(candidate.bucket_id.clone()).or_insert(0) += 1;
                 backend.clear_semantic_injection();
                 backend.arm_semantic_injection(&candidate.inject_kind, step)?;
 
@@ -3261,8 +3281,25 @@ pub fn run_benchmark<B: BenchmarkBackend>(
                 )
             });
         let mut attempted = HashSet::<(String, u64)>::new();
+        let mut bucket_variants = HashMap::<String, usize>::new();
 
         for candidate in candidates {
+            let variant_count = bucket_variants.entry(candidate.bucket_id.clone()).or_insert(0);
+            *variant_count += 1;
+            if cfg.semantic_max_variants_per_bucket > 0
+                && *variant_count > cfg.semantic_max_variants_per_bucket
+            {
+                continue;
+            }
+            if semantic_global_bucket_budget > 0
+                && global_bucket_trials
+                    .get(&candidate.bucket_id)
+                    .copied()
+                    .unwrap_or(0)
+                    >= semantic_global_bucket_budget
+            {
+                continue;
+            }
             let steps = candidate_steps(&cfg, &candidate);
             if steps.is_empty() {
                 continue;
@@ -3275,6 +3312,7 @@ pub fn run_benchmark<B: BenchmarkBackend>(
                     continue;
                 }
 
+                *global_bucket_trials.entry(candidate.bucket_id.clone()).or_insert(0) += 1;
                 backend.clear_semantic_injection();
                 backend.arm_semantic_injection(&candidate.inject_kind, step)?;
 
