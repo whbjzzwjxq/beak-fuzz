@@ -2887,6 +2887,7 @@ def apply(*, openvm_install_path, commit_or_branch):
         _patch_336f_memory_timestamp_aux_witness_injection(openvm_install_path)
         _patch_336f_memory_lifecycle_instrumentation(openvm_install_path)
         _patch_336f_divrem_core_witness_injection(openvm_install_path)
+        _patch_336f_base_alu_field_consistent_run_add(openvm_install_path)
         _patch_336f_shift_core_semantic_injection(openvm_install_path)
         _patch_336f_less_than_core_semantic_injection(openvm_install_path)
         _patch_336f_base_alu_core_semantic_injection(openvm_install_path)
