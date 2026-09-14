@@ -387,7 +387,7 @@ def test_f038_program_trace_is_observation_only_for_address_space(
     assert trace.read_text() == once
 
 
-def test_f038_adapter_is_the_only_typed_address_space_mutation(
+def test_f038_adapter_mem_as_hook_is_observation_only(
     tmp_path: Path,
 ) -> None:
     adapter = tmp_path / "extensions" / "rv32im" / "circuit" / "src" / "adapters" / "loadstore.rs"
@@ -427,26 +427,13 @@ def test_f038_adapter_is_the_only_typed_address_space_mutation(
     assert adapter.read_text() == once
     assert once.count("use fuzzer_utils;") == 1
     assert once.count("#[allow(unused_imports)]") == 1
-    assert 'beak_variant.as_deref() == Some("mode=bus_mem_as_reg")' in once
-    assert once.index('beak_variant.as_deref() == Some("mode=bus_mem_as_reg")') < once.index(
-        'should_inject_witness("openvm.semantic.memory.address_space_consistency"'
-    )
-    assert '"relation": "address_space_consistency_equation"' in once
-    assert '"bucket_id": "sem.memory.address_space_consistency"' in once
-    assert '"rv32_loadstore_adapter.preprocess"' in once
+    assert once.count("guard.f038.loadstore.adapter.mem_as_pre_access") == 1
+    assert "let beak_mem_as = e;" in once
     assert "mem_as: beak_mem_as," in once
-    for key in [
-        '"row_idx"',
-        '"is_memory"',
-        '"register_address_space"',
-        '"memory_address_space"',
-        '"address_space_before"',
-        '"address_space_after"',
-        '"is_load"',
-        '"is_store"',
-        '"executed_access"',
-    ]:
-        assert key in once
+    # The o51 mutation lives in the program ROM (build_exe); the adapter hook must
+    # stay observation-only so it cannot diverge from the program bus.
+    assert "bus_mem_as" not in once
+    assert "record_semantic_mutation" not in once
 
 
 def test_boolean_multiplicity_hook_targets_source_selector_and_is_idempotent(
@@ -711,6 +698,7 @@ def test_f038_volatile_remap_receipt_follows_concrete_match_and_is_idempotent(
     volatile.parent.mkdir(parents=True)
     volatile.write_text(
         "use fuzzer_utils;\n"
+        "        let memory_len = sorted_final_memory.len();\n"
         "                row.final_data = data;\n"
         "                // BEAK-INSERT: guard.f038.volatile.o25\n"
         "                if fuzzer_utils::should_inject_witness(\"openvm.semantic.memory.volatile_boundary_range\", i as u64) {\n"
@@ -731,7 +719,10 @@ def test_f038_volatile_remap_receipt_follows_concrete_match_and_is_idempotent(
     assert "let mut beak_mutated_tuple = None;" not in once
     volatile_once = volatile.read_text()
     assert "guard.f038.volatile.o25.row_witness" in volatile_once
-    assert "i + 1 != memory_len" in volatile_once
+    assert "guard.f038.volatile.o25.height_room" in volatile_once
+    assert "appended_row_idx" in volatile_once
+    assert "forged_row.is_valid = Val::<SC>::ONE;" in volatile_once
+    assert "generate_subrow" in volatile_once
     assert volatile_once.index("mark_witness_mutation_applied") < volatile_once.index(
         "record_semantic_mutation"
     )
@@ -741,6 +732,7 @@ def test_f038_volatile_remap_receipt_follows_concrete_match_and_is_idempotent(
         '"volatile_start"',
         '"volatile_end"',
         '"forged_address"',
+        '"trace_source"',
         '"outside_volatile_range"',
     ]:
         assert key in volatile_once
