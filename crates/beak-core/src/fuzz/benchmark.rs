@@ -283,6 +283,7 @@ enum FrozenFindingReportIdentity {
     OpenVmTimestampOriginO2,
     OpenVmTimestampOriginO26,
     OpenVmTimestampPaddingO3,
+    OpenVmVolatileBoundaryO25,
     PicoReadWriteOpcodeSelector,
     Risc0ControlDoneCycle,
     Sp1Memory,
@@ -313,6 +314,7 @@ impl FrozenFindingReportIdentity {
             Self::OpenVmTimestampOriginO2 => ("OpenVM", "Timestamp-Audit", "o2"),
             Self::OpenVmTimestampOriginO26 => ("OpenVM", "Timestamp-Audit", "o26"),
             Self::OpenVmTimestampPaddingO3 => ("OpenVM", "Timestamp-Audit", "o3"),
+            Self::OpenVmVolatileBoundaryO25 => ("OpenVM", "RangeCheck-Audit", "o25"),
             Self::OpenVmOverflowO1 => ("OpenVM", "Overflow-Audit", "o1"),
             Self::PicoReadWriteOpcodeSelector => ("Pico", "ReadWrite-OpcodeSelector", "01"),
             Self::Risc0ControlDoneCycle => ("Risc0", "ControlDone-Cycle", "01"),
@@ -396,6 +398,17 @@ fn exact_semantic_reporting_identity(
             && source == "memory_access" =>
         {
             Some(FrozenFindingReportIdentity::OpenVmAddressSpace)
+        }
+        (
+            "openvm",
+            "f038f61d21db3aecd3029e1a23ba1ba0bb314800",
+            "sem.memory.volatile_boundary_range",
+            SemanticMutationRelation::VolatileBoundaryRange,
+        ) if obligation == "rc3"
+            && cell == "rc3.volatile_pointer"
+            && source == "volatile_boundary" =>
+        {
+            Some(FrozenFindingReportIdentity::OpenVmVolatileBoundaryO25)
         }
         (
             "openvm",
@@ -791,6 +804,7 @@ fn exact_baseline_pairs(relation: SemanticMutationRelation) -> &'static [(&'stat
         | SemanticMutationRelation::ExecutedControlFlowEquation => {
             &[("op_idx", "op_idx"), ("pc", "pc"), ("opcode", "opcode"), ("mnemonic", "mnemonic")]
         }
+        SemanticMutationRelation::VolatileBoundaryRange => &[("row_idx", "row_idx")],
         // Relations without additional row-local equation fields still require
         // exactly one baseline hit with the complete common source identity.
         _ => &[],
@@ -1108,8 +1122,8 @@ fn valid_address_space_receipt(
 ) -> bool {
     let context = &receipt.effect.context;
     if candidate.bucket_id != "sem.memory.address_space_consistency"
-        || receipt.site != "rv32_loadstore_adapter.preprocess"
-        || receipt.field != "memory_address_space"
+        || receipt.site != "program_rom.instruction_e_rewrite"
+        || receipt.field != "instruction_e"
         || context_str(context, "obligation_id") != Some("me5")
         || !matches!(
             context_str(context, "cell_id"),
@@ -1138,16 +1152,38 @@ fn valid_address_space_receipt(
     else {
         return false;
     };
-    let exact_variant = candidate.inject_kind.rsplit_once("::").map(|(_, variant)| variant)
-        == Some("mode=bus_mem_as_reg");
+    let Some(variant) = candidate
+        .inject_kind
+        .rsplit_once("::")
+        .map(|(_, variant)| variant)
+    else {
+        return false;
+    };
+    let mut variant_mode = "";
+    let mut variant_target_as: Option<u64> = None;
+    for part in variant.split(',') {
+        if let Some((key, value)) = part.split_once('=') {
+            match key.trim() {
+                "mode" => variant_mode = value.trim(),
+                "target_as" => variant_target_as = value.trim().parse().ok(),
+                _ => {}
+            }
+        }
+    }
+    let after_matches_variant = match variant_mode {
+        "rom_e_rewrite" => {
+            after >= 3 && variant_target_as.map_or(true, |target| after == target)
+        }
+        _ => false,
+    };
     matches!(context_str(context, "cell_id"), Some("me5.mem_read" | "me5.mem_write"))
-        && exact_variant
         && is_memory
         && register_space == 1
         && memory_space == 2
         && row == receipt.step
         && before == memory_space
-        && after == register_space
+        && after != before
+        && after_matches_variant
         && receipt.before.as_u64() == Some(before)
         && receipt.after.as_u64() == Some(after)
 }
@@ -4792,7 +4828,9 @@ mod tests {
             "sem.memory.address_space_consistency",
             "openvm.semantic.memory.address_space_consistency",
         );
-        address_candidate.inject_kind.push_str("::mode=bus_mem_as_reg");
+        address_candidate
+            .inject_kind
+            .push_str("::mode=rom_e_rewrite,target_as=4");
         let address_context = serde_json::Map::from_iter([
             ("obligation_id".to_string(), json!("me5")),
             ("cell_id".to_string(), json!("me5.mem_read")),
@@ -4801,19 +4839,20 @@ mod tests {
             ("register_address_space".to_string(), json!(1)),
             ("memory_address_space".to_string(), json!(2)),
             ("address_space_before".to_string(), json!(2)),
-            ("address_space_after".to_string(), json!(1)),
-            ("mode".to_string(), json!("bus_mem_as_reg")),
+            ("address_space_after".to_string(), json!(4)),
+            ("mode".to_string(), json!("rom_e_rewrite")),
+            ("target_as".to_string(), json!(4)),
             ("executed_access".to_string(), json!(true)),
         ]);
         let mut address_receipt = exact_receipt(
             &address_candidate,
             SemanticMutationRelation::AddressSpaceConsistencyEquation,
             json!(2),
-            json!(1),
+            json!(4),
             address_context,
         );
-        address_receipt.site = "rv32_loadstore_adapter.preprocess".to_string();
-        address_receipt.field = "memory_address_space".to_string();
+        address_receipt.site = "program_rom.instruction_e_rewrite".to_string();
+        address_receipt.field = "instruction_e".to_string();
         assert!(valid_address_space_receipt(&address_receipt, &address_candidate));
         let mut stale_address_field = address_receipt.clone();
         stale_address_field.field = "caller_forged".to_string();
@@ -4823,6 +4862,8 @@ mod tests {
             ("register_address_space", json!(2)),
             ("memory_address_space", json!(1)),
             ("address_space_after", json!(2)),
+            ("address_space_after", json!(3)),
+            ("target_as", json!(5)),
             ("cell_id", json!("me5.reg_read")),
         ] {
             let mut forged_receipt = address_receipt.clone();
@@ -5397,6 +5438,16 @@ mod tests {
                 "me5.mem_read",
                 "memory_access",
                 FrozenFindingReportIdentity::OpenVmAddressSpace,
+            ),
+            (
+                "openvm",
+                "f038f61d21db3aecd3029e1a23ba1ba0bb314800",
+                "sem.memory.volatile_boundary_range",
+                SemanticMutationRelation::VolatileBoundaryRange,
+                "rc3",
+                "rc3.volatile_pointer",
+                "volatile_boundary",
+                FrozenFindingReportIdentity::OpenVmVolatileBoundaryO25,
             ),
             (
                 "openvm",
