@@ -866,6 +866,7 @@ impl OpenVMTrace {
         let mut memory_inits = Vec::new();
         let mut memory_finalizations = Vec::new();
         let mut volatile_boundary_hits = Vec::new();
+        let mut seen_volatile_rows = HashSet::new();
         let mut timestamp_boundary_origins = Vec::new();
 
         for (idx, log) in logs.into_iter().enumerate() {
@@ -913,7 +914,13 @@ impl OpenVMTrace {
                 "volatile_boundary" => {
                     let row: OpenVMVolatileBoundaryRow = serde_json::from_value(data)
                         .map_err(|e| format!("log[{}] volatile_boundary: {}", idx, e))?;
-                    volatile_boundary_hits.extend(volatile_boundary_obligation_hits(&row));
+                    // The harness executes the program twice per eval (trace pass and
+                    // prover pass), so each boundary row is emitted twice with identical
+                    // identity. Keep the first emission per (row, cell) so strict
+                    // receipt binding sees exactly one baseline hit.
+                    if seen_volatile_rows.insert((row.row_idx, row.address_space, row.pointer)) {
+                        volatile_boundary_hits.extend(volatile_boundary_obligation_hits(&row));
+                    }
                 }
                 "timestamp_boundary_origin" => {
                     let origin: OpenVMTimestampBoundaryOrigin = serde_json::from_value(data)

@@ -67,6 +67,85 @@ fn build_exe(words: &[u32]) -> Result<std::sync::Arc<VmExe<F>>, String> {
     }
     instructions.push(Instruction::from_usize(SystemOpcode::TERMINATE.global_opcode(), [0, 0, 0]));
 
+    // Executor-level o51 hook: rewrite the address-space operand `e` of the targeted
+    // load/store instruction in the program itself, so the adapter witness, memory
+    // log, boundary rows, and the program bus all propagate the forged selector
+    // consistently. f038's load/store adapter AIR never range-checks the selector,
+    // which is the exact AddrSpace-Audit root cause.
+    const O51_KIND: &str = "openvm.semantic.memory.address_space_consistency";
+    if let Some(variant) = fuzzer_utils::active_witness_variant(O51_KIND) {
+        let mut mode = "";
+        let mut target_as: Option<u32> = None;
+        for part in variant.split(',') {
+            if let Some((key, value)) = part.split_once('=') {
+                match key.trim() {
+                    "mode" => mode = value.trim(),
+                    "target_as" => target_as = value.trim().parse().ok(),
+                    _ => {}
+                }
+            }
+        }
+        if mode == "rom_e_rewrite" {
+            if let Some(target_as) = target_as.filter(|target| *target >= 3) {
+                for (idx, word) in words.iter().enumerate() {
+                    if !fuzzer_utils::should_inject_witness(O51_KIND, idx as u64) {
+                        continue;
+                    }
+                    let Ok(insn) = beak_core::rv32im::instruction::RV32IMInstruction::from_word(*word)
+                    else {
+                        continue;
+                    };
+                    let is_load =
+                        matches!(insn.mnemonic.as_str(), "lb" | "lh" | "lw" | "lbu" | "lhu");
+                    let is_store = matches!(insn.mnemonic.as_str(), "sb" | "sh" | "sw");
+                    if is_load == is_store {
+                        continue;
+                    }
+                    let Some(slot) = instructions.get_mut(idx) else { continue };
+                    slot.e = F::new(target_as);
+                    eprintln!(
+                        "[beak-witness-inject] kind={O51_KIND} step={idx} site=program_rom mode=rom_e_rewrite old_e=2 new_e={target_as} mnemonic={}",
+                        insn.mnemonic
+                    );
+                    fuzzer_utils::record_semantic_mutation(
+                        O51_KIND,
+                        "program_rom.instruction_e_rewrite",
+                        "instruction_e",
+                        idx as u64,
+                        serde_json::json!(2),
+                        serde_json::json!(target_as),
+                        serde_json::json!({
+                            "relation": "address_space_consistency_equation",
+                            "context": {
+                                "bucket_id": "sem.memory.address_space_consistency",
+                                "obligation_id": "me5",
+                                "cell_id": if is_load { "me5.mem_read" } else { "me5.mem_write" },
+                                "backend": "openvm",
+                                "commit": "f038f61d21db3aecd3029e1a23ba1ba0bb314800",
+                                "trace_source": "memory_access",
+                                "row_idx": idx,
+                                "pc": 4 * idx,
+                                "opcode": insn.word,
+                                "mnemonic": insn.mnemonic,
+                                "mode": "rom_e_rewrite",
+                                "target_as": target_as,
+                                "is_memory": true,
+                                "register_address_space": 1,
+                                "memory_address_space": 2,
+                                "address_space_before": 2,
+                                "address_space_after": target_as,
+                                "is_load": is_load,
+                                "is_store": is_store,
+                                "executed_access": true
+                            }
+                        }),
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
     let program = Program::from_instructions(&instructions);
     Ok(std::sync::Arc::new(VmExe::new(program)))
 }
@@ -116,22 +195,47 @@ fn exact_address_space_receipt_hit<'a>(
     let context = &receipt.effect.context;
     let is_load = context.get("is_load").and_then(|value| value.as_bool())?;
     let is_store = context.get("is_store").and_then(|value| value.as_bool())?;
-    if receipt.inject_kind
-        != "openvm.semantic.memory.address_space_consistency::mode=bus_mem_as_reg"
+    let variant = receipt
+        .inject_kind
+        .split_once("::")
+        .map(|(_, variant)| variant)?;
+    let mut variant_mode = "";
+    let mut variant_target_as: Option<u64> = None;
+    for part in variant.split(',') {
+        if let Some((key, value)) = part.split_once('=') {
+            match key.trim() {
+                "mode" => variant_mode = value.trim(),
+                "target_as" => variant_target_as = value.trim().parse().ok(),
+                _ => {}
+            }
+        }
+    }
+    let expected_after: u64 = match variant_mode {
+        "rom_e_rewrite" => {
+            let target = variant_target_as?;
+            if target < 3 {
+                return None;
+            }
+            target
+        }
+        _ => return None,
+    };
+    if base_inject_kind(&receipt.inject_kind) != "openvm.semantic.memory.address_space_consistency"
         || receipt.effect.relation != SemanticMutationRelation::AddressSpaceConsistencyEquation
-        || receipt.site != "rv32_loadstore_adapter.preprocess"
-        || receipt.field != "memory_address_space"
+        || receipt.site != "program_rom.instruction_e_rewrite"
+        || receipt.field != "instruction_e"
         || receipt.before.as_u64() != Some(2)
-        || receipt.after.as_u64() != Some(1)
+        || receipt.after.as_u64() != Some(expected_after)
         || context.get("bucket_id").and_then(|value| value.as_str())
             != Some("sem.memory.address_space_consistency")
         || context.get("row_idx").and_then(|value| value.as_u64()) != Some(receipt.step)
-        || context.get("mode").and_then(|value| value.as_str()) != Some("bus_mem_as_reg")
+        || context.get("mode").and_then(|value| value.as_str()) != Some(variant_mode)
         || context.get("is_memory").and_then(|value| value.as_bool()) != Some(true)
         || context.get("register_address_space").and_then(|value| value.as_u64()) != Some(1)
         || context.get("memory_address_space").and_then(|value| value.as_u64()) != Some(2)
         || context.get("address_space_before").and_then(|value| value.as_u64()) != Some(2)
-        || context.get("address_space_after").and_then(|value| value.as_u64()) != Some(1)
+        || context.get("address_space_after").and_then(|value| value.as_u64())
+            != Some(expected_after)
         || context.get("executed_access").and_then(|value| value.as_bool()) != Some(true)
         || is_load == is_store
     {
@@ -159,7 +263,7 @@ fn exact_address_space_receipt_hit<'a>(
             && hit.details.get("trace_source").and_then(|value| value.as_str())
                 == Some("memory_access")
             && hit.details.get("address_space").and_then(|value| value.as_u64())
-                == Some(1)
+                == Some(expected_after)
     });
     let hit = matching.next()?;
     matching.next().is_none().then_some(hit)
@@ -565,7 +669,10 @@ impl OpenVmBackend {
 
     fn o51_variant_specs() -> Vec<String> {
         // Keep strict o51 reporting on one deterministic, typed cross-space remap.
-        vec!["mode=bus_mem_as_reg".to_string()]
+        // The mutation rewrites the load/store instruction's `e` operand in the
+        // program ROM (executor-level): f038's adapter AIR never range-checks the
+        // selector, so an unsupported address space proves cleanly end-to-end.
+        vec!["mode=rom_e_rewrite,target_as=4".to_string()]
     }
 
     fn inject_kinds_for_base(inject_kind: &str) -> Vec<String> {
@@ -1198,24 +1305,25 @@ mod tests {
         serde_json::from_value(json!({
             "inject_kind": concat!(
                 "openvm.semantic.memory.address_space_consistency",
-                "::mode=bus_mem_as_reg"
+                "::mode=rom_e_rewrite,target_as=4"
             ),
-            "site": "rv32_loadstore_adapter.preprocess",
-            "field": "memory_address_space",
+            "site": "program_rom.instruction_e_rewrite",
+            "field": "instruction_e",
             "step": 3,
             "before": 2,
-            "after": 1,
+            "after": 4,
             "effect": {
                 "relation": "address_space_consistency_equation",
                 "context": {
                     "bucket_id": "sem.memory.address_space_consistency",
                     "row_idx": 3,
-                    "mode": "bus_mem_as_reg",
+                    "mode": "rom_e_rewrite",
+                    "target_as": 4,
                     "is_memory": true,
                     "register_address_space": 1,
                     "memory_address_space": 2,
                     "address_space_before": 2,
-                    "address_space_after": 1,
+                    "address_space_after": 4,
                     "is_load": true,
                     "is_store": false,
                     "executed_access": true
@@ -1230,7 +1338,9 @@ mod tests {
         let backend = OpenVmBackend::new(8);
         let candidates = backend.semantic_candidate_from_hit(&typed_address_space_hit());
         assert_eq!(candidates.len(), 1);
-        assert!(candidates[0].inject_kind.ends_with("::mode=bus_mem_as_reg"));
+        assert!(candidates[0]
+            .inject_kind
+            .ends_with("::mode=rom_e_rewrite,target_as=4"));
         assert_eq!(
             backend.semantic_mutation_relation(&candidates[0]),
             Some(SemanticMutationRelation::AddressSpaceConsistencyEquation)
@@ -1274,10 +1384,10 @@ mod tests {
     fn address_space_receipt_enrichment_requires_one_exact_adapter_hit() {
         let receipt = typed_address_space_receipt();
         let mut mutated_memory_hit = typed_address_space_hit();
-        mutated_memory_hit.details.insert("address_space".to_string(), json!(1));
+        mutated_memory_hit.details.insert("address_space".to_string(), json!(4));
         let mut register_proxy = typed_address_space_hit();
         register_proxy.details.insert("cell_id".to_string(), json!("me5.reg_write"));
-        register_proxy.details.insert("address_space".to_string(), json!(1));
+        register_proxy.details.insert("address_space".to_string(), json!(4));
         let hits = vec![register_proxy, mutated_memory_hit.clone()];
         let matched = exact_address_space_receipt_hit(&hits, &receipt)
             .expect("one exact executed memory-side hit with the mutated bus address space");
